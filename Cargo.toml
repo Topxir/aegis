@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aegis-crypto",
+    "crates/aegis-identity",
+    "crates/aegis-storage",
+    "crates/aegis-protocol",
+    "crates/aegis-transport",
+    "crates/aegis-calls",
+    "crates/aegis-server",
+    "crates/aegis-directory",
+    "crates/aegis-launcher",
+    "crates/aegis-plugins",
+    "crates/aegis-ffi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["aegis-project <aegis-project@users.noreply.github.com>"]
+repository = "https://github.com/aegis-project/aegis"
+
+[workspace.dependencies]
+aegis-crypto = { path = "crates/aegis-crypto" }
+aegis-identity = { path = "crates/aegis-identity" }
+aegis-storage = { path = "crates/aegis-storage" }
+aegis-protocol = { path = "crates/aegis-protocol" }
+aegis-transport = { path = "crates/aegis-transport" }
+aegis-calls = { path = "crates/aegis-calls" }
+aegis-server = { path = "crates/aegis-server" }
+aegis-directory = { path = "crates/aegis-directory" }
+aegis-launcher = { path = "crates/aegis-launcher" }
+aegis-plugins = { path = "crates/aegis-plugins" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

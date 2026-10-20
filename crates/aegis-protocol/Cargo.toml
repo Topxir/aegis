@@ -1,0 +1,14 @@
+[package]
+name = "aegis-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+aegis-crypto.workspace = true
+aegis-identity.workspace = true
+aegis-storage.workspace = true
+
+[lints]
+workspace = true

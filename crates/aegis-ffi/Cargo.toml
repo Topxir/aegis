@@ -1,0 +1,21 @@
+[package]
+name = "aegis-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+aegis-crypto.workspace = true
+aegis-identity.workspace = true
+aegis-storage.workspace = true
+aegis-protocol.workspace = true
+aegis-transport.workspace = true
+aegis-calls.workspace = true
+aegis-server.workspace = true
+aegis-directory.workspace = true
+aegis-launcher.workspace = true
+aegis-plugins.workspace = true
+
+[lints]
+workspace = true
