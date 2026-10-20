@@ -22,6 +22,12 @@ pub const CONSTANT_OPAQUE_RECORD_LEN: usize = 1024;
 /// Default maximum buffered frames per anonymous unidirectional queue.
 pub const DEFAULT_MAX_QUEUE_FRAMES: usize = 256;
 
+/// Global maximum number of concurrent active queues in memory (prevents RAM exhaustion DoS).
+pub const MAX_ACTIVE_QUEUES: usize = 4_096;
+
+/// Global maximum number of registered OPAQUE accounts in memory (prevents RAM exhaustion DoS).
+pub const MAX_OPAQUE_ACCOUNTS: usize = 16_384;
+
 /// Computes the adaptive Proof-of-Work difficulty (in leading zero bits) based on
 /// the current in-memory sliding window request rate (D-0007).
 /// No client IP addresses are stored on disk.
@@ -192,6 +198,9 @@ impl FederationServerState {
         if !PADDING_BUCKETS.contains(&frame.len()) {
             return Err(ServerError::InvalidFrameBucketSize(frame.len()));
         }
+        if !self.queues.contains_key(&queue_id) && self.queues.len() >= MAX_ACTIVE_QUEUES {
+            return Err(ServerError::QueueFull);
+        }
         if !quota.can_accept_frame(frame.len()) {
             return Err(ServerError::QueueFull);
         }
@@ -214,7 +223,7 @@ impl FederationServerState {
     /// Atomically rotates `old_queue_id` to `new_queue_id`, moving any buffered frames.
     ///
     /// # Errors
-    /// Rejects all-zero, identical, or already-occupied `new_queue_id` values.
+    /// Rejects all-zero, identical, non-existent `old_queue_id`, or already-occupied `new_queue_id` values.
     pub fn rotate_queue_id(
         &mut self,
         old_queue_id: &[u8; 32],
@@ -223,6 +232,7 @@ impl FederationServerState {
         if *old_queue_id == [0u8; 32]
             || new_queue_id == [0u8; 32]
             || *old_queue_id == new_queue_id
+            || !self.queues.contains_key(old_queue_id)
             || self.queues.contains_key(&new_queue_id)
         {
             return Err(ServerError::InvalidIdentifier);
@@ -244,7 +254,8 @@ impl FederationServerState {
     /// Stores a fixed-size blinded OPAQUE registration record (`1024` bytes) under `login_id`.
     ///
     /// # Errors
-    /// Rejects all-zero `login_id` or records whose length != [`CONSTANT_OPAQUE_RECORD_LEN`].
+    /// Rejects all-zero `login_id`, records whose length != [`CONSTANT_OPAQUE_RECORD_LEN`],
+    /// or new registrations when [`MAX_OPAQUE_ACCOUNTS`] is reached.
     pub fn store_opaque_record(
         &mut self,
         login_id: [u8; 32],
@@ -255,6 +266,11 @@ impl FederationServerState {
         }
         if record.len() != CONSTANT_OPAQUE_RECORD_LEN {
             return Err(ServerError::InvalidOpaqueRecordLength(record.len()));
+        }
+        if !self.opaque_records.contains_key(&login_id)
+            && self.opaque_records.len() >= MAX_OPAQUE_ACCOUNTS
+        {
+            return Err(ServerError::QueueFull);
         }
         let _ = self.record_request(false);
         self.opaque_records.insert(login_id, record);
@@ -373,6 +389,9 @@ impl SupportPortalState {
                 .any(|n| n.as_slice() == blinded_nonce)
         {
             return Err(ServerError::InvalidSupportRequest);
+        }
+        if self.redeemed_blinded_nonces.len() >= DEFAULT_MAX_QUEUE_FRAMES {
+            return Err(ServerError::QueueFull);
         }
         self.redeemed_blinded_nonces.push(blinded_nonce.to_vec());
         self.issued_passes_count = self.issued_passes_count.saturating_add(1);
@@ -525,8 +544,10 @@ pub fn handle_http_request(
     path: &str,
     body: &str,
 ) -> (u16, &'static str, String) {
-    let clean_path = path.split('?').next().unwrap_or(path);
-    match (method, clean_path) {
+    let norm_method = method.trim().to_ascii_uppercase();
+    let trimmed_path = path.trim();
+    let clean_path = trimmed_path.split('?').next().unwrap_or(trimmed_path);
+    match (norm_method.as_str(), clean_path) {
         ("GET", "/") | ("GET", "/support") => (
             200,
             "text/html; charset=utf-8",
@@ -782,5 +803,34 @@ mod tests {
             srv.rotate_queue_id(&q_a, q_b),
             Err(ServerError::InvalidIdentifier)
         );
+    }
+
+    #[test]
+    fn b0048_b0049_server_ram_dos_caps_nonexistent_rotate_and_case_insensitive_http_method() {
+        let mut srv = FederationServerState::default();
+        let mut portal = SupportPortalState::new();
+
+        // B-0048: Rotating a non-existent queue must fail closed
+        assert_eq!(
+            srv.rotate_queue_id(&[0x91; 32], [0x92; 32]),
+            Err(ServerError::InvalidIdentifier)
+        );
+        assert_eq!(srv.active_queue_count(), 0);
+
+        // B-0048: SupportPortalState::issue_blind_supporter_pass caps redeemed nonces at DEFAULT_MAX_QUEUE_FRAMES
+        for idx in 0..DEFAULT_MAX_QUEUE_FRAMES {
+            let nonce = format!("valid-nonce-{idx:04}");
+            assert!(portal.issue_blind_supporter_pass(nonce.as_bytes()).is_ok());
+        }
+        assert_eq!(
+            portal.issue_blind_supporter_pass(b"overflow-nonce-9999"),
+            Err(ServerError::QueueFull)
+        );
+
+        // B-0049: handle_http_request normalizes lowercase/whitespace-padded HTTP methods
+        let (code, _, body) =
+            handle_http_request(&mut srv, &mut portal, " get ", "/health?probe=1", "");
+        assert_eq!(code, 200);
+        assert!(body.contains(r#""status":"ok""#));
     }
 }

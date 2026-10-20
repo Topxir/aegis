@@ -7,6 +7,8 @@ use aegis_crypto::{
     ZeroizingBuffer,
 };
 use core::fmt;
+use core::sync::atomic::{compiler_fence, Ordering};
+use std::hint::black_box;
 
 /// Minimum password length required by D-0006.
 pub const MIN_PASSWORD_CHARS: usize = 12;
@@ -437,29 +439,40 @@ impl PinGuard {
         } else {
             max_attempts
         };
+        let invalid_primary_or_key = primary_pin_digest.is_empty()
+            || primary_pin_digest.iter().all(|&b| b == 0)
+            || wrapped_db_key.is_empty()
+            || wrapped_db_key.iter().all(|&b| b == 0);
         let sanitized_duress = duress_pin_digest.and_then(|duress| {
-            if constant_time_eq(&duress, &primary_pin_digest) || duress.is_empty() {
+            if constant_time_eq(&duress, &primary_pin_digest)
+                || duress.is_empty()
+                || duress.iter().all(|&b| b == 0)
+            {
                 None
             } else {
                 Some(ZeroizingBuffer::new(duress))
             }
         });
-        Self {
+        let mut guard = Self {
             primary_pin_digest: ZeroizingBuffer::new(primary_pin_digest),
             duress_pin_digest: sanitized_duress,
             wrapped_db_key: ZeroizingBuffer::new(wrapped_db_key),
             failed_attempts: 0,
             max_attempts: effective_max,
             wiped: false,
+        };
+        if invalid_primary_or_key {
+            guard.wipe_wrapper();
         }
+        guard
     }
 
-    /// Validated constructor that rejects empty key/PIN material, `max_attempts == 0`,
+    /// Validated constructor that rejects empty/all-zero key/PIN material, `max_attempts == 0`,
     /// or a Duress PIN equal to the primary PIN.
     ///
     /// # Errors
-    /// Returns [`PinSetupError`] if `primary_pin_digest` or `wrapped_db_key` is empty,
-    /// `max_attempts == 0`, or if `duress_pin_digest` matches `primary_pin_digest`.
+    /// Returns [`PinSetupError`] if `primary_pin_digest` or `wrapped_db_key` is empty or all-zero,
+    /// `max_attempts == 0`, or if `duress_pin_digest` is empty/all-zero or matches `primary_pin_digest`.
     pub fn try_new(
         primary_pin_digest: Vec<u8>,
         duress_pin_digest: Option<Vec<u8>>,
@@ -469,11 +482,15 @@ impl PinGuard {
         if max_attempts == 0 {
             return Err(PinSetupError::InvalidMaxAttempts);
         }
-        if primary_pin_digest.is_empty() || wrapped_db_key.is_empty() {
+        if primary_pin_digest.is_empty()
+            || primary_pin_digest.iter().all(|&b| b == 0)
+            || wrapped_db_key.is_empty()
+            || wrapped_db_key.iter().all(|&b| b == 0)
+        {
             return Err(PinSetupError::EmptyKeyOrPinMaterial);
         }
         if let Some(duress) = &duress_pin_digest {
-            if duress.is_empty() {
+            if duress.is_empty() || duress.iter().all(|&b| b == 0) {
                 return Err(PinSetupError::EmptyKeyOrPinMaterial);
             }
             if constant_time_eq(duress, &primary_pin_digest) {
@@ -537,7 +554,7 @@ impl PinGuard {
 
     /// Returns `true` if the PIN wrapper has been wiped due to lockout or duress.
     #[must_use]
-    pub fn is_wiped(&self) -> bool {
+    pub const fn is_wiped(&self) -> bool {
         self.wiped
     }
 }
@@ -572,7 +589,7 @@ pub fn derive_login_id(
 
 /// Encrypted cloud-recoverable account state stored inside the OPAQUE record (`AccountVault`, D-0002).
 /// Contains the user's active unidirectional queue keys and recovery metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AccountVault {
     /// Master 32-byte account identity secret.
     pub master_identity_secret: [u8; 32],
@@ -580,6 +597,16 @@ pub struct AccountVault {
     pub active_queue_ids: Vec<[u8; 32]>,
     /// Optional 24-word recovery phrase enabled flag.
     pub recovery_phrase_enabled: bool,
+}
+
+impl fmt::Debug for AccountVault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AccountVault")
+            .field("master_identity_secret", &"[REDACTED]")
+            .field("active_queue_ids", &self.active_queue_ids)
+            .field("recovery_phrase_enabled", &self.recovery_phrase_enabled)
+            .finish()
+    }
 }
 
 impl AccountVault {
@@ -669,7 +696,7 @@ impl OpaqueAccountEnvelope {
     /// Seals an [`AccountVault`] under a key derived from `(nickname, password, kdf_salt)`.
     ///
     /// # Errors
-    /// Returns [`CryptoError`] if the password fails policy validation or encryption fails.
+    /// Returns [`CryptoError`] if the password fails policy validation, `kdf_salt` or `nonce` is all-zero, or encryption fails.
     pub fn seal(
         nickname: &str,
         password: &str,
@@ -677,7 +704,8 @@ impl OpaqueAccountEnvelope {
         nonce: [u8; 12],
         vault: &AccountVault,
     ) -> Result<Self, CryptoError> {
-        if kdf_salt == [0u8; 32] || vault.master_identity_secret == [0u8; 32] {
+        if kdf_salt == [0u8; 32] || nonce == [0u8; 12] || vault.master_identity_secret == [0u8; 32]
+        {
             return Err(CryptoError::KeyDerivationFailed);
         }
         for (idx, q) in vault.active_queue_ids.iter().enumerate() {
@@ -688,8 +716,13 @@ impl OpaqueAccountEnvelope {
         let mut key = Self::derive_export_key(nickname, password, &kdf_salt)?;
         let raw = ZeroizingBuffer::new(vault.to_bytes());
         let aad = sha256(nickname.trim().to_ascii_lowercase().as_bytes());
-        let ciphertext_and_tag = aead_seal(&key, &nonce, &aad, raw.as_slice())?;
-        key.fill(0);
+        let res = aead_seal(&key, &nonce, &aad, raw.as_slice());
+        for b in &mut key {
+            *b = black_box(0u8);
+        }
+        let _ = black_box(key.as_mut_slice());
+        compiler_fence(Ordering::SeqCst);
+        let ciphertext_and_tag = res?;
         Ok(Self {
             nonce,
             kdf_salt,
@@ -703,12 +736,19 @@ impl OpaqueAccountEnvelope {
     /// Fail-closed: returns [`CryptoError::AuthenticationFailed`] if the password or nickname is wrong
     /// or the ciphertext was tampered with.
     pub fn open(&self, nickname: &str, password: &str) -> Result<AccountVault, CryptoError> {
+        if self.kdf_salt == [0u8; 32] || self.nonce == [0u8; 12] {
+            return Err(CryptoError::AuthenticationFailed);
+        }
         let mut key = Self::derive_export_key(nickname, password, &self.kdf_salt)
             .map_err(|_| CryptoError::AuthenticationFailed)?;
         let aad = sha256(nickname.trim().to_ascii_lowercase().as_bytes());
-        let decrypted = aead_open(&key, &self.nonce, &aad, &self.ciphertext_and_tag);
-        key.fill(0);
-        let decrypted = decrypted?;
+        let res = aead_open(&key, &self.nonce, &aad, &self.ciphertext_and_tag);
+        for b in &mut key {
+            *b = black_box(0u8);
+        }
+        let _ = black_box(key.as_mut_slice());
+        compiler_fence(Ordering::SeqCst);
+        let decrypted = res?;
         AccountVault::from_bytes(decrypted.as_slice())
     }
 }
@@ -906,13 +946,13 @@ impl ChatPinLock {
     /// Creates a per-chat PIN lock for `chat_id`.
     ///
     /// # Errors
-    /// Returns [`PinSetupError`] if `chat_id` is all-zero, `pin_digest` is empty, or `max_attempts == 0`.
+    /// Returns [`PinSetupError`] if `chat_id` is all-zero, `pin_digest` is empty or all-zero, or `max_attempts == 0`.
     pub fn try_new(
         chat_id: [u8; 32],
         pin_digest: Vec<u8>,
         max_attempts: u8,
     ) -> Result<Self, PinSetupError> {
-        if chat_id == [0u8; 32] || pin_digest.is_empty() {
+        if chat_id == [0u8; 32] || pin_digest.is_empty() || pin_digest.iter().all(|&b| b == 0) {
             return Err(PinSetupError::EmptyKeyOrPinMaterial);
         }
         if max_attempts == 0 {
@@ -938,6 +978,12 @@ impl ChatPinLock {
     #[must_use]
     pub fn is_locked(&self) -> bool {
         self.locked || self.wiped
+    }
+
+    /// Returns `true` if the per-chat PIN lock has been wiped due to exhausting allowed attempts.
+    #[must_use]
+    pub const fn is_wiped(&self) -> bool {
+        self.wiped
     }
 
     /// Explicitly locks the chat again when the user leaves the conversation screen.
@@ -984,16 +1030,43 @@ const RECOVERY_WORDLIST: [&str; 64] = [
 ];
 
 /// Optional 24-word recovery phrase with cryptographic checksum verification (D-0006, PLAN.md §4.4).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecoveryPhrase {
     words: Vec<String>,
+}
+
+impl fmt::Debug for RecoveryPhrase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecoveryPhrase")
+            .field("words", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for RecoveryPhrase {
+    fn drop(&mut self) {
+        for word in &mut self.words {
+            let mut bytes = core::mem::take(word).into_bytes();
+            for b in &mut bytes {
+                *b = black_box(0u8);
+            }
+            let _ = black_box(bytes.as_mut_slice());
+        }
+        compiler_fence(Ordering::SeqCst);
+    }
 }
 
 impl RecoveryPhrase {
     /// Deterministically generates a 24-word recovery phrase from 24 bytes of CSPRNG entropy.
     /// The 24th word embeds a SHA-256 checksum over the first 23 indices.
-    #[must_use]
-    pub fn generate(entropy: &[u8; 24]) -> Self {
+    ///
+    /// # Errors
+    /// Returns [`PasswordPolicyError::WeakPatternDetected`] if `entropy` is all-zero, uniform,
+    /// or produces 23 identical data words.
+    pub fn generate(entropy: &[u8; 24]) -> Result<Self, PasswordPolicyError> {
+        if entropy.iter().all(|&b| b == entropy[0]) {
+            return Err(PasswordPolicyError::WeakPatternDetected);
+        }
         let mut words = Vec::with_capacity(24);
         let mut indices = [0u8; 23];
         for i in 0..23 {
@@ -1001,16 +1074,19 @@ impl RecoveryPhrase {
             indices[i] = idx;
             words.push(RECOVERY_WORDLIST[usize::from(idx)].to_owned());
         }
+        if indices.iter().all(|&idx| idx == indices[0]) {
+            return Err(PasswordPolicyError::WeakPatternDetected);
+        }
         let checksum = sha256(&indices)[0] & 0x3F;
         words.push(RECOVERY_WORDLIST[usize::from(checksum)].to_owned());
-        Self { words }
+        Ok(Self { words })
     }
 
     /// Parses a whitespace-separated 24-word recovery phrase and verifies its checksum.
     ///
     /// # Errors
     /// Returns [`PasswordPolicyError::WeakPatternDetected`] if the word count is not 24,
-    /// any word is unknown, or the SHA-256 checksum word fails verification.
+    /// any word is unknown, all 23 data words are identical, or the SHA-256 checksum word fails verification.
     pub fn parse_and_verify(phrase: &str) -> Result<Self, PasswordPolicyError> {
         let tokens: Vec<&str> = phrase.split_whitespace().collect();
         if tokens.len() != 24 {
@@ -1025,6 +1101,9 @@ impl RecoveryPhrase {
             };
             indices[i] = pos as u8;
             words.push(lower);
+        }
+        if indices[0..23].iter().all(|&idx| idx == indices[0]) {
+            return Err(PasswordPolicyError::WeakPatternDetected);
         }
         let expected_checksum = sha256(&indices[0..23])[0] & 0x3F;
         if indices[23] != expected_checksum {
@@ -1415,7 +1494,8 @@ mod tests {
         assert!(chat_lock.is_locked());
 
         // 24-word recovery phrase generation and checksum verification
-        let phrase = RecoveryPhrase::generate(&[0x5A; 24]);
+        let entropy: [u8; 24] = core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(1));
+        let phrase = RecoveryPhrase::generate(&entropy).unwrap();
         assert_eq!(phrase.words().len(), 24);
         let joined = phrase.words().join(" ");
         let parsed = RecoveryPhrase::parse_and_verify(&joined).unwrap();
@@ -1491,5 +1571,112 @@ mod tests {
             PanicAction::LockAndMinimize,
         )
         .is_err());
+    }
+
+    #[test]
+    fn b0035_account_vault_and_recovery_phrase_redact_debug_and_zeroize_on_drop() {
+        let vault = AccountVault {
+            master_identity_secret: [0xAB; 32],
+            active_queue_ids: vec![[0x11; 32]],
+            recovery_phrase_enabled: true,
+        };
+        let vault_dbg = format!("{vault:?}");
+        assert!(vault_dbg.contains("[REDACTED]"));
+        assert!(!vault_dbg.contains("171"));
+
+        let entropy: [u8; 24] = core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(3));
+        let phrase = RecoveryPhrase::generate(&entropy).unwrap();
+        let first_word = phrase.words()[0].clone();
+        let phrase_dbg = format!("{phrase:?}");
+        assert!(phrase_dbg.contains("[REDACTED]"));
+        assert!(!phrase_dbg.contains(&first_word));
+        drop(phrase);
+    }
+
+    #[test]
+    fn b0036_recovery_phrase_rejects_zero_or_uniform_entropy_and_repeated_words() {
+        assert_eq!(
+            RecoveryPhrase::generate(&[0u8; 24]),
+            Err(PasswordPolicyError::WeakPatternDetected)
+        );
+        assert_eq!(
+            RecoveryPhrase::generate(&[0x5A; 24]),
+            Err(PasswordPolicyError::WeakPatternDetected)
+        );
+        // Non-uniform raw bytes that mask (& 0x3F) to the same 6-bit index
+        let mut masked_same = [0u8; 24];
+        masked_same[0] = 0x40;
+        masked_same[1] = 0x80;
+        masked_same[2] = 0xC0;
+        assert_eq!(
+            RecoveryPhrase::generate(&masked_same),
+            Err(PasswordPolicyError::WeakPatternDetected)
+        );
+
+        // Construct a 24-word string with 23x "abandon" + valid checksum word for [0u8; 23]
+        let checksum_idx = usize::from(sha256(&[0u8; 23])[0] & 0x3F);
+        let mut degenerate_words = vec!["abandon"; 23];
+        degenerate_words.push(RECOVERY_WORDLIST[checksum_idx]);
+        assert_eq!(
+            RecoveryPhrase::parse_and_verify(&degenerate_words.join(" ")),
+            Err(PasswordPolicyError::WeakPatternDetected)
+        );
+    }
+
+    #[test]
+    fn b0037_pin_guard_and_chat_pin_lock_reject_all_zero_material_and_expose_is_wiped() {
+        assert_eq!(
+            PinGuard::try_new(vec![0u8; 32], None, vec![0x42; 32], 3).unwrap_err(),
+            PinSetupError::EmptyKeyOrPinMaterial
+        );
+        assert_eq!(
+            PinGuard::try_new(b"primary".to_vec(), Some(vec![0u8; 32]), vec![0x42; 32], 3)
+                .unwrap_err(),
+            PinSetupError::EmptyKeyOrPinMaterial
+        );
+        assert_eq!(
+            PinGuard::try_new(b"primary".to_vec(), None, vec![0u8; 32], 3).unwrap_err(),
+            PinSetupError::EmptyKeyOrPinMaterial
+        );
+
+        // PinGuard::new with all-zero primary digest or wrapped key starts wiped
+        let mut zero_guard = PinGuard::new(vec![0u8; 32], None, vec![0x42; 32], 3);
+        assert!(zero_guard.is_wiped());
+        assert_eq!(
+            zero_guard.verify_pin_digest(&[0u8; 32]),
+            PinUnlockOutcome::PinWrapperWiped
+        );
+
+        // ChatPinLock rejects all-zero pin_digest and tracks is_wiped()
+        assert_eq!(
+            ChatPinLock::try_new([0xAA; 32], vec![0u8; 32], 2).unwrap_err(),
+            PinSetupError::EmptyKeyOrPinMaterial
+        );
+        let mut lock = ChatPinLock::try_new([0xAA; 32], b"valid-pin".to_vec(), 1).unwrap();
+        assert!(!lock.is_wiped());
+        assert_eq!(
+            lock.verify_chat_pin(b"wrong"),
+            PinUnlockOutcome::PinWrapperWiped
+        );
+        assert!(lock.is_wiped());
+    }
+
+    #[test]
+    fn b0038_opaque_account_envelope_rejects_zero_nonce() {
+        let vault = AccountVault {
+            master_identity_secret: [0x11; 32],
+            active_queue_ids: vec![[0x22; 32]],
+            recovery_phrase_enabled: false,
+        };
+        assert_eq!(
+            OpaqueAccountEnvelope::seal(
+                "silent-vortex-4821",
+                "AEGis#Secure987!",
+                [0x33; 32],
+                [0u8; 12],
+                &vault
+            ),
+            Err(CryptoError::KeyDerivationFailed)
+        );
     }
 }

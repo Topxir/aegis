@@ -78,6 +78,7 @@ class AegisRustBridge(private val context: Context) {
 
     val accounts = mutableListOf<AccountSlotUi>()
     val chats = mutableListOf<ChatItemUi>()
+    private val redeemedSupporterTokens = mutableSetOf<String>()
 
     init {
         ensureHardwareKeystoreWrapperKey()
@@ -101,6 +102,31 @@ class AegisRustBridge(private val context: Context) {
         val noun = nouns[rng.nextInt(nouns.size)]
         val num = rng.nextInt(9000) + 1000
         return "%s-%s-%04d".format(adj, noun, num)
+    }
+
+    /**
+     * Validates a login nickname (`aegis_ffi::validate_nickname`):
+     * - 3..32 characters, trimmed
+     * - Only `[a-z0-9_-]`
+     * - No leading or trailing `-` or `_`
+     * - Not composed exclusively of digits
+     */
+    fun validateNickname(loginNickname: String): Result<String> {
+        if (loginNickname != loginNickname.trim() || loginNickname.length !in 3..32) {
+            return Result.failure(IllegalArgumentException("Длина ника должна быть 3..32 символа без пробелов"))
+        }
+        if (loginNickname.first() == '-' || loginNickname.first() == '_' ||
+            loginNickname.last() == '-' || loginNickname.last() == '_'
+        ) {
+            return Result.failure(IllegalArgumentException("Ник не может начинаться или заканчиваться на '-' или '_'"))
+        }
+        if (!loginNickname.all { it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }) {
+            return Result.failure(IllegalArgumentException("Ник может содержать только строчные буквы a-z, цифры, '-' и '_'"))
+        }
+        if (loginNickname.all { it.isDigit() }) {
+            return Result.failure(IllegalArgumentException("Ник не может состоять только из цифр"))
+        }
+        return Result.success(loginNickname)
     }
 
     /**
@@ -149,18 +175,27 @@ class AegisRustBridge(private val context: Context) {
      * Registers an isolated local account profile (max 3 free, 5+ with blind-signed `SupporterPass`, D-0010).
      */
     fun registerAccount(loginNickname: String, displayName: String, password: String): Result<AccountSlotUi> {
+        val cleanNick = validateNickname(loginNickname).getOrElse {
+            return Result.failure(it)
+        }
+        if (displayName.isBlank()) {
+            return Result.failure(IllegalArgumentException("Отображаемое имя профиля не может быть пустым"))
+        }
+        if (accounts.any { it.loginNickname.equals(cleanNick, ignoreCase = true) }) {
+            return Result.failure(IllegalStateException("Аккаунт с таким ником уже зарегистрирован на устройстве"))
+        }
         if (accounts.size >= maxAccountSlots) {
             return Result.failure(
                 IllegalStateException("Лимит 3 бесплатных аккаунтов исчерпан. Активируйте SupporterPass.")
             )
         }
-        val score = validateStrictPassword(password, loginNickname).getOrElse {
+        val score = validateStrictPassword(password, cleanNick).getOrElse {
             return Result.failure(it)
         }
         val slot = AccountSlotUi(
             slotIndex = accounts.size + 1,
-            loginNickname = loginNickname,
-            displayName = displayName,
+            loginNickname = cleanNick,
+            displayName = displayName.trim(),
             passwordScore = score
         )
         accounts.add(slot)
@@ -171,7 +206,11 @@ class AegisRustBridge(private val context: Context) {
      * Activates a blind-signed `SupporterPass` token (`aegis_ffi::SupporterPass`) to unlock 5 account slots.
      */
     fun activateSupporterPass(blindTokenHex: String): Boolean {
-        if (blindTokenHex.length < 16) return false
+        val trimmed = blindTokenHex.trim()
+        if (trimmed != blindTokenHex || trimmed.length !in 16..256) return false
+        if (!trimmed.all { it.isLetterOrDigit() || it == '_' || it == '-' }) return false
+        if (trimmed.all { it == '0' || it == '_' || it == '-' }) return false
+        if (!redeemedSupporterTokens.add(trimmed)) return false
         supporterPassActive = true
         maxAccountSlots = 5
         return true
@@ -274,13 +313,15 @@ class AegisRustBridge(private val context: Context) {
      * Generates a 1-click self-hosted server configuration (`aegis-launcher`).
      */
     fun buildServerLaunchBundle(target: String, port: Int, ttlDays: Int): String {
-        val ttlSecs = ttlDays * 86400
+        val safePort = port.coerceIn(1, 65535)
+        val safeTtlDays = ttlDays.coerceIn(1, 365)
+        val ttlSecs = safeTtlDays.toLong() * 86400L
         return when (target) {
             "TOR_ONION" -> """
                 # Скрытый Tor .onion сервер Aegis (Zero-Knowledge)
                 HiddenServiceDir /var/lib/tor/aegis_hidden_service/
                 HiddenServiceVersion 3
-                HiddenServicePort $port 127.0.0.1:$port
+                HiddenServicePort $safePort 127.0.0.1:$safePort
                 # Queue TTL: ${ttlSecs}s (Без IP-логов)
             """.trimIndent()
             else -> """
@@ -288,8 +329,8 @@ class AegisRustBridge(private val context: Context) {
                   aegis-server:
                     image: ghcr.io/aegis-project/aegis-server:v0.1.0
                     ports:
-                      - "$port:$port/udp"
-                      - "$port:$port/tcp"
+                      - "$safePort:$safePort/udp"
+                      - "$safePort:$safePort/tcp"
                     environment:
                       - AEGIS_ZERO_KNOWLEDGE=1
                       - AEGIS_NO_IP_LOGS=1
@@ -314,6 +355,11 @@ class AegisRustBridge(private val context: Context) {
         }
         accounts.clear()
         chats.clear()
+        redeemedSupporterTokens.clear()
+        supporterPassActive = false
+        maxAccountSlots = 3
+        activeThemeId = "obsidian-stealth-dark"
+        voicePitchSemitones = -4
         callActive = false
         wipedByPanicOrDuress = true
     }

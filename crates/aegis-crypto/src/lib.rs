@@ -515,13 +515,22 @@ pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64
     out
 }
 
+fn zeroize_slice(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        *b = black_box(0u8);
+    }
+    let _ = black_box(buf);
+    compiler_fence(Ordering::SeqCst);
+}
+
 fn chacha20_xor(key: &[u8; 32], initial_counter: u32, nonce: &[u8; 12], data: &mut [u8]) {
     let mut counter = initial_counter;
     for chunk in data.chunks_mut(64) {
-        let block = chacha20_block(key, counter, nonce);
+        let mut block = chacha20_block(key, counter, nonce);
         for (dst, &ks) in chunk.iter_mut().zip(block.iter()) {
             *dst ^= ks;
         }
+        zeroize_slice(&mut block);
         counter = counter.wrapping_add(1);
     }
 }
@@ -655,18 +664,20 @@ pub fn poly1305_mac(msg: &[u8], key: &[u8; 32]) -> [u8; 16] {
     let mut g3 = h3.wrapping_add(c);
     c = g3 >> 26;
     g3 &= 0x03ff_ffff;
-    let g4 = h4.wrapping_add(c).wrapping_sub(1 << 26);
+    let mut g4 = h4.wrapping_add(c).wrapping_sub(1 << 26);
 
     let mask = (g4 >> 63).wrapping_sub(1);
     g0 &= mask;
     g1 &= mask;
     g2 &= mask;
     g3 &= mask;
+    g4 &= mask;
     let inv_mask = !mask;
     h0 = (h0 & inv_mask) | g0;
     h1 = (h1 & inv_mask) | g1;
     h2 = (h2 & inv_mask) | g2;
     h3 = (h3 & inv_mask) | g3;
+    h4 = (h4 & inv_mask) | g4;
 
     let w0 = (h0 | (h1 << 26)) & 0xffff_ffff;
     let w1 = ((h1 >> 6) | (h2 << 20)) & 0xffff_ffff;
@@ -726,9 +737,10 @@ pub fn aead_seal(
             actual: 0,
         });
     }
-    let block0 = chacha20_block(key, 0, nonce);
+    let mut block0 = chacha20_block(key, 0, nonce);
     let mut otk = [0u8; 32];
     otk.copy_from_slice(&block0[0..32]);
+    zeroize_slice(&mut block0);
 
     let mut out = Vec::with_capacity(plaintext.len() + AEAD_TAG_LEN);
     out.extend_from_slice(plaintext);
@@ -737,9 +749,7 @@ pub fn aead_seal(
     let tag = compute_rfc8439_tag(&otk, aad, &out);
     out.extend_from_slice(&tag);
 
-    for b in &mut otk {
-        *b = black_box(0u8);
-    }
+    zeroize_slice(&mut otk);
     Ok(out)
 }
 
@@ -762,14 +772,13 @@ pub fn aead_open(
     let ciphertext = &ciphertext_and_tag[..ct_len];
     let received_tag = &ciphertext_and_tag[ct_len..];
 
-    let block0 = chacha20_block(key, 0, nonce);
+    let mut block0 = chacha20_block(key, 0, nonce);
     let mut otk = [0u8; 32];
     otk.copy_from_slice(&block0[0..32]);
+    zeroize_slice(&mut block0);
 
     let expected_tag = compute_rfc8439_tag(&otk, aad, ciphertext);
-    for b in &mut otk {
-        *b = black_box(0u8);
-    }
+    zeroize_slice(&mut otk);
 
     if !constant_time_eq(received_tag, &expected_tag) {
         return Err(CryptoError::AuthenticationFailed);
@@ -963,8 +972,9 @@ impl RatchetSession {
         plaintext: &[u8],
         aad: &[u8],
     ) -> Result<(RatchetHeader, Vec<u8>), CryptoError> {
-        let (next_ck, mut msg_key) = kdf_chain_step(self.send_chain_key.as_slice());
+        let (mut next_ck, mut msg_key) = kdf_chain_step(self.send_chain_key.as_slice());
         self.send_chain_key = ZeroizingBuffer::new(next_ck.to_vec());
+        zeroize_slice(&mut next_ck);
 
         let header = RatchetHeader {
             dh_public: self.our_dh_public,
@@ -972,11 +982,10 @@ impl RatchetSession {
             msg_num: self.send_msg_num,
         };
         let nonce = message_nonce(&header.dh_public, header.msg_num);
-        let ciphertext = aead_seal(&msg_key, &nonce, aad, plaintext)?;
+        let res = aead_seal(&msg_key, &nonce, aad, plaintext);
+        zeroize_slice(&mut msg_key);
+        let ciphertext = res?;
 
-        for b in &mut msg_key {
-            *b = black_box(0u8);
-        }
         self.send_msg_num = self.send_msg_num.saturating_add(1);
         Ok((header, ciphertext))
     }
@@ -999,15 +1008,14 @@ impl RatchetSession {
             .iter()
             .position(|(dh, num, _)| *dh == header.dh_public && *num == header.msg_num)
         {
-            let (_, _, mk_buf) = self.skipped_keys.remove(pos);
             let mut mk = [0u8; 32];
-            mk.copy_from_slice(mk_buf.as_slice());
+            mk.copy_from_slice(self.skipped_keys[pos].2.as_slice());
             let nonce = message_nonce(&header.dh_public, header.msg_num);
             let res = aead_open(&mk, &nonce, aad, ciphertext_and_tag);
-            for b in &mut mk {
-                *b = black_box(0u8);
-            }
-            return res;
+            zeroize_slice(&mut mk);
+            let pt = res?;
+            self.skipped_keys.remove(pos);
+            return Ok(pt);
         }
 
         if header.dh_public != self.peer_dh_public || header.msg_num < self.recv_msg_num {
@@ -1025,30 +1033,32 @@ impl RatchetSession {
         let mut newly_skipped = Vec::with_capacity(skip_count);
 
         for skipped_num in self.recv_msg_num..header.msg_num {
-            let (next_ck, mk) = kdf_chain_step(&temp_ck);
+            let (mut next_ck, mut mk) = kdf_chain_step(&temp_ck);
             temp_ck = next_ck;
+            zeroize_slice(&mut next_ck);
             newly_skipped.push((
                 header.dh_public,
                 skipped_num,
                 ZeroizingBuffer::new(mk.to_vec()),
             ));
+            zeroize_slice(&mut mk);
         }
 
-        let (final_ck, mut target_mk) = kdf_chain_step(&temp_ck);
+        let (mut final_ck, mut target_mk) = kdf_chain_step(&temp_ck);
         let nonce = message_nonce(&header.dh_public, header.msg_num);
         let plaintext = aead_open(&target_mk, &nonce, aad, ciphertext_and_tag);
 
-        for b in &mut target_mk {
-            *b = black_box(0u8);
-        }
-        for b in &mut temp_ck {
-            *b = black_box(0u8);
-        }
+        zeroize_slice(&mut target_mk);
+        zeroize_slice(&mut temp_ck);
 
-        let plaintext = plaintext?;
+        let Ok(plaintext) = plaintext else {
+            zeroize_slice(&mut final_ck);
+            return Err(CryptoError::AuthenticationFailed);
+        };
 
         // Commit state only after AEAD verification succeeded
         self.recv_chain_key = ZeroizingBuffer::new(final_ck.to_vec());
+        zeroize_slice(&mut final_ck);
         self.recv_msg_num = header.msg_num.saturating_add(1);
         for item in newly_skipped {
             if self.skipped_keys.len() >= MAX_SKIPPED_KEYS {
@@ -1322,5 +1332,70 @@ mod tests {
         assert!(session
             .dh_ratchet_step([0xA2; 32], [0xB3; 32], &[0x99; 32])
             .is_ok());
+    }
+
+    #[test]
+    fn b0032_poly1305_rfc8439_vector_and_h_ge_2_pow_130_minus_5_boundary() {
+        // Official RFC 8439 §2.5.2 Poly1305 test vector
+        let key: [u8; 32] = [
+            0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33, 0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5,
+            0x06, 0xa8, 0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd, 0x4a, 0xbf, 0xf6, 0xaf,
+            0x41, 0x49, 0xf5, 0x1b,
+        ];
+        let msg = b"Cryptographic Forum Research Group";
+        let expected_tag: [u8; 16] = [
+            0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01,
+            0x27, 0xa9,
+        ];
+        assert_eq!(poly1305_mac(msg, &key), expected_tag);
+
+        // Boundary test: h == 2^130 - 5 before final conditional subtraction.
+        // With r = 1, s = 0, three 16-byte blocks where:
+        // B1 = 2^128 + (2^128 - 5) = 2^129 - 5, B2 = 2^128, B3 = 2^128
+        // Sum h = B1 + B2 + B3 = 2^130 - 5 === 0 (mod 2^130 - 5).
+        let mut r_one_key = [0u8; 32];
+        r_one_key[0] = 1;
+        let mut boundary_msg = [0u8; 48];
+        boundary_msg[0] = 0xFB;
+        boundary_msg[1..16].fill(0xFF);
+        assert_eq!(poly1305_mac(&boundary_msg, &r_one_key), [0u8; 16]);
+
+        // And h == 2^130 - 1 === 4 (mod 2^130 - 5)
+        boundary_msg[0] = 0xFF;
+        let mut expected_four = [0u8; 16];
+        expected_four[0] = 4;
+        assert_eq!(poly1305_mac(&boundary_msg, &r_one_key), expected_four);
+    }
+
+    #[test]
+    fn b0033_b0034_skipped_key_not_evicted_on_tampered_packet_and_stack_keys_zeroized() {
+        let root = combine_pqxdh_secrets(&[0x11; 32], &[0x22; 32], b"b0033-session").unwrap();
+        let alice_dh = [0xA1; 32];
+        let bob_dh = [0xB2; 32];
+        let mut alice = RatchetSession::new(root.as_slice(), alice_dh, bob_dh, true).unwrap();
+        let mut bob = RatchetSession::new(root.as_slice(), bob_dh, alice_dh, false).unwrap();
+
+        let (h0, c0) = alice.send_ratchet_step(b"secret-msg-0", b"aad").unwrap();
+        let (h1, c1) = alice.send_ratchet_step(b"secret-msg-1", b"aad").unwrap();
+
+        // Bob receives msg-1 first -> msg-0 key is cached in skipped_keys
+        let p1 = bob.recv_ratchet_step(&h1, &c1, b"aad").unwrap();
+        assert_eq!(p1.as_slice(), b"secret-msg-1");
+        assert_eq!(bob.skipped_key_count(), 1);
+
+        // Attacker sends a corrupted packet for msg-0
+        let mut tampered_c0 = c0.clone();
+        tampered_c0[0] ^= 0xFF;
+        assert_eq!(
+            bob.recv_ratchet_step(&h0, &tampered_c0, b"aad"),
+            Err(CryptoError::AuthenticationFailed)
+        );
+        // Skipped key for msg-0 MUST still be present!
+        assert_eq!(bob.skipped_key_count(), 1);
+
+        // Legitimate msg-0 arrives and decrypts cleanly, then consumes the skipped key
+        let p0 = bob.recv_ratchet_step(&h0, &c0, b"aad").unwrap();
+        assert_eq!(p0.as_slice(), b"secret-msg-0");
+        assert_eq!(bob.skipped_key_count(), 0);
     }
 }

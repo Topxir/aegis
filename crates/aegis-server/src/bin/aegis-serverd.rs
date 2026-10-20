@@ -15,6 +15,7 @@ use aegis_server::{handle_http_request, FederationServerState, SupportPortalStat
 use std::env;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::time::Duration;
 
 fn parse_http_request(raw: &[u8]) -> (&str, &str, &str) {
     let text = core::str::from_utf8(raw).unwrap_or("");
@@ -103,6 +104,9 @@ fn main() {
         let Ok(mut stream) = stream_res else {
             continue;
         };
+        let io_timeout = Some(Duration::from_secs(2));
+        let _ = stream.set_read_timeout(io_timeout);
+        let _ = stream.set_write_timeout(io_timeout);
         // Note: peer_addr() is intentionally NEVER inspected or logged (AGENTS.md §2.3, D-0007).
         let mut buf = [0u8; 8192];
         let Ok(n) = stream.read(&mut buf) else {

@@ -992,25 +992,35 @@ impl DesktopAppState {
     /// Masks all `LeakGuard` findings with `****` and sends the sanitized message.
     ///
     /// # Errors
-    /// Propagates any error from [`DesktopAppState::send_chat_message`].
+    /// Propagates any error from [`DesktopAppState::send_chat_message`] or rejects if the active chat changed.
     pub fn confirm_leak_guard_masked_send(&mut self) -> Result<usize, DesktopUiError> {
         let Some(modal) = self.leak_guard_modal.take() else {
             return Ok(0);
         };
+        let active_matches = self
+            .chats
+            .get(self.active_chat_index)
+            .is_some_and(|c| c.chat_id == modal.target_chat_id);
+        if !active_matches {
+            return Err(DesktopUiError::Protocol(
+                ProtocolError::MalformedPaddedFrame,
+            ));
+        }
         self.send_chat_message(&modal.redacted_preview, true, None)
     }
 
     /// Locks or unlocks a chat protected by a per-chat PIN (PLAN.md §14).
     ///
     /// # Errors
-    /// Returns [`DesktopUiError::InvalidPin`] if the provided per-chat PIN does not match.
+    /// Returns [`DesktopUiError::InvalidPin`] if the provided per-chat PIN does not match,
+    /// or [`DesktopUiError::ChatLockedWithPin`] if `chat_index` is out of bounds.
     pub fn unlock_chat_with_pin(
         &mut self,
         chat_index: usize,
         candidate_pin: &str,
     ) -> Result<(), DesktopUiError> {
         let Some(chat) = self.chats.get_mut(chat_index) else {
-            return Ok(());
+            return Err(DesktopUiError::ChatLockedWithPin);
         };
         if let Some(expected) = &chat.per_chat_pin {
             if constant_time_eq(expected.as_bytes(), candidate_pin.as_bytes()) {
@@ -1068,11 +1078,24 @@ impl DesktopAppState {
         })
     }
 
-    /// Switches into Duress Decoy profile: wipes real chats/accounts from memory and shows an innocuous decoy profile.
+    /// Switches into Duress Decoy profile: wipes real chats/accounts/PINs/tickets from memory and shows an innocuous decoy profile.
     pub fn activate_duress_decoy_mode(&mut self) {
         self.duress_mode_active = true;
+        self.onboarding_nickname.clear();
+        self.last_password_score = None;
+        self.app_pin.clear();
+        self.duress_pin = None;
         self.accounts = AccountSwitcherView::new();
         self.leak_guard_modal = None;
+        self.calculator_disguise.display_buffer.clear();
+        self.calculator_disguise.last_result = "0".to_owned();
+        self.calculator_disguise.disguise_active = false;
+        self.support_portal.submitted_tickets.clear();
+        self.support_portal.supporter_pass_active = false;
+        self.support_portal.max_account_slots = 3;
+        self.call_overlay.active = false;
+        self.call_overlay.peer_name.clear();
+        self.call_overlay.video_enabled = false;
         self.chats = vec![ChatView {
             chat_id: [0xD0; 16],
             title: "Покупки и бытовые заметки".to_owned(),
@@ -1095,13 +1118,26 @@ impl DesktopAppState {
         self.status_banner = "Открыт профиль по умолчанию.".to_owned();
     }
 
-    /// Emergency Panic Button: immediately wipes all accounts, messages, tickets, and keys in memory.
+    /// Emergency Panic Button: immediately wipes all accounts, messages, tickets, PINs, and keys in memory.
     pub fn trigger_panic_wipe(&mut self) {
+        self.onboarding_nickname.clear();
+        self.last_password_score = None;
+        self.app_pin.clear();
+        self.duress_pin = None;
+        self.remaining_pin_attempts = 0;
         self.accounts = AccountSwitcherView::new();
         self.chats.clear();
+        self.active_chat_index = 0;
         self.leak_guard_modal = None;
+        self.calculator_disguise.display_buffer.clear();
+        self.calculator_disguise.last_result = "0".to_owned();
+        self.calculator_disguise.disguise_active = false;
         self.support_portal.submitted_tickets.clear();
+        self.support_portal.supporter_pass_active = false;
+        self.support_portal.max_account_slots = 3;
         self.call_overlay.active = false;
+        self.call_overlay.peer_name.clear();
+        self.call_overlay.video_enabled = false;
         self.current_screen = Screen::PanicWiped;
         self.status_banner =
             "🚨 Криптографическое стирание (Crypto-Wipe) выполнено. Все ключи и чаты уничтожены."
@@ -1167,6 +1203,61 @@ impl DesktopGuiServer {
     #[must_use]
     pub fn render_html(&self) -> String {
         let s = self.state.strings();
+        if self.state.current_screen == Screen::PanicWiped {
+            return format!(
+                "<!DOCTYPE html>
+<html lang='ru'>
+<head>
+<meta charset='utf-8'>
+<title>Crypto-Wipe Completed</title>
+<style>
+  body {{ background:#0b0f17; color:#f85149; font-family:system-ui,-apple-system,sans-serif; margin:0; padding:48px; text-align:center; }}
+  .card {{ max-width:560px; margin:0 auto; background:#141b26; border:2px solid #da3633; border-radius:12px; padding:24px; }}
+</style>
+</head>
+<body>
+  <div class='card'>
+    <h1>🚨 КРИПТОГРАФИЧЕСКОЕ СТИРАНИЕ ВЫПОЛНЕНО</h1>
+    <p style='color:#e6edf3;'>{status}</p>
+  </div>
+</body>
+</html>",
+                status = html_escape(&self.state.status_banner)
+            );
+        }
+
+        if self.state.current_screen == Screen::CalculatorDisguise {
+            return format!(
+                "<!DOCTYPE html>
+<html lang='ru'>
+<head>
+<meta charset='utf-8'>
+<title>{calc_title}</title>
+<style>
+  body {{ background:#1c1c1e; color:#ffffff; font-family:system-ui,-apple-system,sans-serif; margin:0; padding:48px; }}
+  .calc {{ max-width:360px; margin:0 auto; background:#2c2c2e; border-radius:14px; padding:20px; }}
+  input[type=text] {{ width:100%; box-sizing:border-box; background:#000; color:#fff; font-size:22px; border:1px solid #444; padding:10px; border-radius:8px; margin-bottom:12px; }}
+  button {{ width:100%; background:#ff9f0a; color:#000; font-weight:700; font-size:16px; border:none; padding:10px; border-radius:8px; cursor:pointer; }}
+</style>
+</head>
+<body>
+  <div class='calc'>
+    <h2>🧮 {calc_title}</h2>
+    <div style='margin-bottom:8px;color:#a1a1aa;'>Результат: <b>{res}</b></div>
+    <form action='/action' method='get'>
+      <input type='hidden' name='cmd' value='calc_eval'>
+      <input type='text' name='expr' value='{buf}' placeholder='0'>
+      <button type='submit'>=</button>
+    </form>
+  </div>
+</body>
+</html>",
+                calc_title = html_escape(s.disguise_calculator_title),
+                res = html_escape(&self.state.calculator_disguise.last_result),
+                buf = html_escape(&self.state.calculator_disguise.display_buffer)
+            );
+        }
+
         let shield_badge = match self.state.shield_evaluation.status {
             NetworkRouteStatus::TorAnonymized => s.network_shield_tor,
             NetworkRouteStatus::VpnOrProxyProtected => s.network_shield_vpn,
@@ -1508,11 +1599,20 @@ impl DesktopGuiServer {
             }
             "leak_force" => {
                 if let Some(modal) = self.state.leak_guard_modal.take() {
-                    let _ = self
+                    let active_matches = self
                         .state
-                        .send_chat_message(&modal.original_draft, true, None);
-                    self.state.status_banner =
-                        "Сообщение отправлено по явному подтверждению пользователя.".to_owned();
+                        .chats
+                        .get(self.state.active_chat_index)
+                        .is_some_and(|c| c.chat_id == modal.target_chat_id);
+                    if active_matches
+                        && self
+                            .state
+                            .send_chat_message(&modal.original_draft, true, None)
+                            .is_ok()
+                    {
+                        self.state.status_banner =
+                            "Сообщение отправлено по явному подтверждению пользователя.".to_owned();
+                    }
                 }
             }
             "send_photo_view_once" => {
@@ -1581,6 +1681,27 @@ impl DesktopGuiServer {
             "disguise" => {
                 self.state.enable_calculator_disguise();
             }
+            "calc_eval" => {
+                let expr = extract_query_param(query, "expr").unwrap_or_default();
+                self.state.calculator_disguise.display_buffer = expr;
+                let pin = self.state.app_pin.clone();
+                let duress = self.state.duress_pin.clone();
+                match self
+                    .state
+                    .calculator_disguise
+                    .press_equals(&pin, duress.as_deref())
+                {
+                    CalculatorAction::UnlockRealVault => {
+                        self.state.current_screen = Screen::ChatWorkspace;
+                        self.state.status_banner =
+                            "Секретный PIN принят: маскировка снята.".to_owned();
+                    }
+                    CalculatorAction::TriggerDuressDecoy => {
+                        self.state.activate_duress_decoy_mode();
+                    }
+                    CalculatorAction::ComputedMath => {}
+                }
+            }
             "panic" => {
                 self.state.trigger_panic_wipe();
             }
@@ -1616,14 +1737,19 @@ impl DesktopGuiServer {
             let Ok(mut stream) = stream_res else {
                 continue;
             };
+            let io_timeout = Some(std::time::Duration::from_secs(2));
+            let _ = stream.set_read_timeout(io_timeout);
+            let _ = stream.set_write_timeout(io_timeout);
             let mut buf = [0u8; 4096];
             let n = stream.read(&mut buf).unwrap_or(0);
             if n > 0 {
                 let req = String::from_utf8_lossy(&buf[..n]);
                 if let Some(first_line) = req.lines().next() {
                     if let Some(path_and_query) = first_line.split_whitespace().nth(1) {
-                        if let Some((_, query)) = path_and_query.split_once('?') {
-                            self.handle_command(query);
+                        if let Some((route_path, query)) = path_and_query.split_once('?') {
+                            if route_path == "/" || route_path == "/action" {
+                                self.handle_command(query);
+                            }
                         }
                     }
                 }
@@ -2032,5 +2158,48 @@ mod tests {
         let before = app.remaining_pin_attempts;
         assert!(app.unlock_chat_with_pin(1, "0000").is_err());
         assert_eq!(app.remaining_pin_attempts, before - 1);
+    }
+
+    #[test]
+    fn b0050_b0051_disguise_and_panic_html_hide_chats_and_scrub_all_sensitive_fields() {
+        let state = DesktopAppState::new(Locale::Ru);
+        let mut gui = DesktopGuiServer::new(0, state);
+
+        // B-0050: CalculatorDisguise HTML renders only the disguised calculator, hiding chats & accounts
+        gui.handle_command("cmd=disguise");
+        let disguise_html = gui.render_html();
+        assert!(disguise_html.contains("Инженерный калькулятор"));
+        assert!(!disguise_html.contains("nordic-falcon"));
+        assert!(!disguise_html.contains("Мультиаккаунты"));
+
+        // B-0051: Out-of-bounds unlock_chat_with_pin returns Err(ChatLockedWithPin)
+        assert_eq!(
+            gui.state.unlock_chat_with_pin(999, "7788"),
+            Err(DesktopUiError::ChatLockedWithPin)
+        );
+
+        // B-0051: Switching active chat before confirm_leak_guard_masked_send fails closed
+        gui.handle_command("cmd=calc_eval&expr=2580");
+        assert_eq!(gui.state.current_screen, Screen::ChatWorkspace);
+        gui.handle_command("cmd=test_leak_card");
+        assert!(gui.state.leak_guard_modal.is_some());
+        gui.state.active_chat_index = 0;
+        assert!(gui.state.confirm_leak_guard_masked_send().is_err());
+
+        // B-0050 & B-0051: Panic wipe scrubs all sensitive fields and renders only wiped screen
+        gui.state
+            .call_overlay
+            .start_call("nordic-falcon", CallConfig::default(), -4, true)
+            .unwrap();
+        gui.handle_command("cmd=panic");
+        assert!(gui.state.onboarding_nickname.is_empty());
+        assert!(gui.state.app_pin.is_empty());
+        assert!(gui.state.duress_pin.is_none());
+        assert!(gui.state.call_overlay.peer_name.is_empty());
+        assert!(!gui.state.support_portal.supporter_pass_active);
+
+        let wiped_html = gui.render_html();
+        assert!(wiped_html.contains("КРИПТОГРАФИЧЕСКОЕ СТИРАНИЕ ВЫПОЛНЕНО"));
+        assert!(!wiped_html.contains("nordic-falcon"));
     }
 }

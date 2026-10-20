@@ -665,6 +665,8 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
         out.push(0xD8);
         let mut stripped = 0usize;
         let mut i = 2usize;
+        let mut saw_sos = false;
+        let mut saw_eoi = false;
 
         while i < media_bytes.len() {
             if media_bytes[i] != 0xFF {
@@ -679,10 +681,18 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
             let marker = media_bytes[i];
             i += 1;
 
+            if marker == 0x00 || marker == 0xD8 {
+                return Err(ProtocolError::MalformedPaddedFrame);
+            }
+
             // EOI (End of Image)
             if marker == 0xD9 {
+                if !saw_sos || i != media_bytes.len() {
+                    return Err(ProtocolError::MalformedPaddedFrame);
+                }
                 out.push(0xFF);
                 out.push(0xD9);
+                saw_eoi = true;
                 break;
             }
             // Standalone markers without length (RST0..RST7, TEM)
@@ -692,31 +702,60 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
                 continue;
             }
 
-            if i + 2 > media_bytes.len() {
+            let len_end = i
+                .checked_add(2)
+                .ok_or(ProtocolError::MalformedPaddedFrame)?;
+            if len_end > media_bytes.len() {
                 return Err(ProtocolError::MalformedPaddedFrame);
             }
             let seg_len = usize::from(u16::from_be_bytes([media_bytes[i], media_bytes[i + 1]]));
-            if seg_len < 2 || i + seg_len > media_bytes.len() {
+            let next_i = i
+                .checked_add(seg_len)
+                .ok_or(ProtocolError::MalformedPaddedFrame)?;
+            if seg_len < 2 || next_i > media_bytes.len() {
                 return Err(ProtocolError::MalformedPaddedFrame);
             }
 
-            // Strip APP1..APP15 (0xE1..=0xEF: EXIF, GPS, XMP, Adobe, ICC) and COM (0xFE)
-            if (0xE1..=0xEF).contains(&marker) || marker == 0xFE {
+            // Strip APP0..APP15 (0xE0..=0xEF: JFIF, EXIF, GPS, XMP, Adobe, ICC) and COM (0xFE)
+            if (0xE0..=0xEF).contains(&marker) || marker == 0xFE {
                 stripped = stripped.saturating_add(1);
-                i += seg_len;
+                i = next_i;
                 continue;
             }
 
             out.push(0xFF);
             out.push(marker);
-            out.extend_from_slice(&media_bytes[i..i + seg_len]);
-            i += seg_len;
+            out.extend_from_slice(&media_bytes[i..next_i]);
+            i = next_i;
 
-            // SOS (Start of Scan, 0xDA): copy entropy-coded image stream until EOI
+            // SOS (Start of Scan, 0xDA): scan entropy-coded data (skipping 0xFF 0x00 and RST0..RST7)
+            // until the next real marker so post-SOS or inter-scan APPn/COM segments are also stripped.
             if marker == 0xDA {
-                out.extend_from_slice(&media_bytes[i..]);
-                break;
+                saw_sos = true;
+                while i < media_bytes.len() {
+                    let b = media_bytes[i];
+                    if b != 0xFF {
+                        out.push(b);
+                        i += 1;
+                        continue;
+                    }
+                    if i + 1 >= media_bytes.len() {
+                        return Err(ProtocolError::MalformedPaddedFrame);
+                    }
+                    let next_b = media_bytes[i + 1];
+                    if next_b == 0x00 || (0xD0..=0xD7).contains(&next_b) {
+                        out.push(0xFF);
+                        out.push(next_b);
+                        i += 2;
+                    } else {
+                        break;
+                    }
+                }
             }
+        }
+
+        if !saw_sos || !saw_eoi {
+            return Err(ProtocolError::MalformedPaddedFrame);
         }
 
         return Ok(CleanedMedia {
@@ -733,10 +772,14 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
         let mut stripped = 0usize;
         let mut i = 8usize;
         let mut chunk_index = 0usize;
+        let mut saw_idat = false;
         let mut saw_iend = false;
 
         while i < media_bytes.len() {
-            if i + 12 > media_bytes.len() {
+            let header_end = i
+                .checked_add(12)
+                .ok_or(ProtocolError::MalformedPaddedFrame)?;
+            if header_end > media_bytes.len() {
                 return Err(ProtocolError::MalformedPaddedFrame);
             }
             let data_len = u32::from_be_bytes([
@@ -746,20 +789,36 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
                 media_bytes[i + 3],
             ]) as usize;
             let chunk_type = &media_bytes[i + 4..i + 8];
-            if chunk_index == 0 && chunk_type != b"IHDR" {
+            if chunk_index == 0 {
+                if chunk_type != b"IHDR" || data_len != 13 {
+                    return Err(ProtocolError::MalformedPaddedFrame);
+                }
+            } else if chunk_type == b"IHDR" {
                 return Err(ProtocolError::MalformedPaddedFrame);
             }
-            let total_chunk = 12usize.saturating_add(data_len);
-            if i + total_chunk > media_bytes.len() {
+            let total_chunk = 12usize
+                .checked_add(data_len)
+                .ok_or(ProtocolError::MalformedPaddedFrame)?;
+            let next_i = i
+                .checked_add(total_chunk)
+                .ok_or(ProtocolError::MalformedPaddedFrame)?;
+            if next_i > media_bytes.len() {
                 return Err(ProtocolError::MalformedPaddedFrame);
+            }
+
+            if chunk_type == b"IDAT" {
+                if data_len == 0 {
+                    return Err(ProtocolError::MalformedPaddedFrame);
+                }
+                saw_idat = true;
             }
 
             if matches!(chunk_type, b"eXIf" | b"tEXt" | b"zTXt" | b"iTXt" | b"tIME") {
                 stripped = stripped.saturating_add(1);
             } else {
-                out.extend_from_slice(&media_bytes[i..i + total_chunk]);
+                out.extend_from_slice(&media_bytes[i..next_i]);
             }
-            i += total_chunk;
+            i = next_i;
             chunk_index += 1;
             if chunk_type == b"IEND" {
                 if data_len != 0 || i != media_bytes.len() {
@@ -770,7 +829,7 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
             }
         }
 
-        if !saw_iend {
+        if !saw_iend || !saw_idat {
             return Err(ProtocolError::MalformedPaddedFrame);
         }
 
@@ -1183,16 +1242,18 @@ impl GroupChatSession {
         if update_entropy == &[0u8; 32] {
             return Err(ProtocolError::InvalidReplyQueueId);
         }
-        self.epoch = self.epoch.saturating_add(1);
+        let next_epoch = self.epoch.saturating_add(1);
         let mut next_secret = [0u8; 32];
         hkdf_sha256(
             self.epoch_secret.as_slice(),
             update_entropy,
-            &self.epoch.to_be_bytes(),
+            &next_epoch.to_be_bytes(),
             &mut next_secret,
         )
         .map_err(|_| ProtocolError::MalformedPaddedFrame)?;
+        self.epoch = next_epoch;
         self.epoch_secret = ZeroizingBuffer::new(next_secret.to_vec());
+        next_secret.fill(0);
         Ok(self.epoch)
     }
 
@@ -1205,31 +1266,36 @@ impl GroupChatSession {
         member_ik: [u8; 32],
         update_entropy: &[u8; 32],
     ) -> Result<u64, ProtocolError> {
-        if member_ik == [0u8; 32] || self.members.contains(&member_ik) {
+        if member_ik == [0u8; 32]
+            || update_entropy == &[0u8; 32]
+            || self.members.contains(&member_ik)
+        {
             return Err(ProtocolError::InvalidReplyQueueId);
         }
+        let epoch = self.rotate_epoch_secret(update_entropy)?;
         self.members.push(member_ik);
-        self.rotate_epoch_secret(update_entropy)
+        Ok(epoch)
     }
 
     /// Removes a member and advances the group to `epoch + 1` so the removed member cannot decrypt
     /// any future messages (post-compromise & forward secrecy).
     ///
     /// # Errors
-    /// Returns [`ProtocolError`] if the member is not found or would leave the group empty.
+    /// Returns [`ProtocolError`] if the member is not found, `update_entropy` is all-zero, or would leave the group empty.
     pub fn remove_member(
         &mut self,
         member_ik: &[u8; 32],
         update_entropy: &[u8; 32],
     ) -> Result<u64, ProtocolError> {
-        if self.members.len() <= 1 {
+        if self.members.len() <= 1 || update_entropy == &[0u8; 32] {
             return Err(ProtocolError::InvalidReplyQueueId);
         }
         let Some(pos) = self.members.iter().position(|m| m == member_ik) else {
             return Err(ProtocolError::InvalidReplyQueueId);
         };
+        let epoch = self.rotate_epoch_secret(update_entropy)?;
         self.members.remove(pos);
-        self.rotate_epoch_secret(update_entropy)
+        Ok(epoch)
     }
 
     /// Encrypts and pads a group message bound to the current `(group_id, epoch)`.
@@ -1511,17 +1577,22 @@ mod tests {
         assert!(!cleaned_jpeg.bytes.windows(3).any(|w| w == b"gps"));
         assert!(cleaned_jpeg.bytes.ends_with(&[0xAA, 0xBB, 0xFF, 0xD9]));
 
-        // Synthetic PNG: Signature + IHDR (4 bytes) + eXIf (4 bytes "GPS!") + IEND (0 bytes)
+        // Synthetic PNG: Signature + IHDR (13 bytes) + eXIf (4 bytes "GPS!") + IDAT (4 bytes) + IEND (0 bytes)
         let mut png_with_exif = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        // IHDR chunk: len=4, type=IHDR, data=[1,2,3,4], crc=[0,0,0,0]
-        png_with_exif.extend_from_slice(&4u32.to_be_bytes());
+        // IHDR chunk: len=13, type=IHDR, data=[13 bytes], crc=[0,0,0,0]
+        png_with_exif.extend_from_slice(&13u32.to_be_bytes());
         png_with_exif.extend_from_slice(b"IHDR");
-        png_with_exif.extend_from_slice(&[1, 2, 3, 4, 0, 0, 0, 0]);
+        png_with_exif.extend_from_slice(&[0u8; 13]);
+        png_with_exif.extend_from_slice(&[0, 0, 0, 0]);
         // eXIf chunk: len=4, type=eXIf, data=b"GPS!", crc=[0,0,0,0]
         png_with_exif.extend_from_slice(&4u32.to_be_bytes());
         png_with_exif.extend_from_slice(b"eXIf");
         png_with_exif.extend_from_slice(b"GPS!");
         png_with_exif.extend_from_slice(&[0, 0, 0, 0]);
+        // IDAT chunk: len=4, type=IDAT, data=[1,2,3,4], crc=[0,0,0,0]
+        png_with_exif.extend_from_slice(&4u32.to_be_bytes());
+        png_with_exif.extend_from_slice(b"IDAT");
+        png_with_exif.extend_from_slice(&[1, 2, 3, 4, 0, 0, 0, 0]);
         // IEND chunk: len=0, type=IEND, crc=[0,0,0,0]
         png_with_exif.extend_from_slice(&0u32.to_be_bytes());
         png_with_exif.extend_from_slice(b"IEND");
@@ -1624,5 +1695,104 @@ mod tests {
             4_000
         )
         .is_err());
+    }
+
+    #[test]
+    fn b0041_jpeg_metadata_stripper_scans_post_sos_segments_and_requires_sos_and_clean_eoi() {
+        // Progressive JPEG with stuffed 0xFF 0x00 and RST0 (0xFF 0xD0) inside scan 1,
+        // followed by an injected APP1 EXIF segment and COM segment before scan 2 and EOI.
+        let progressive_jpeg: Vec<u8> = vec![
+            0xFF, 0xD8, // SOI
+            0xFF, 0xE0, 0x00, 0x06, b'J', b'F', b'I', b'F', // APP0 stripped
+            0xFF, 0xDA, 0x00, 0x04, 0x01, 0x02, // SOS #1
+            0x11, 0xFF, 0x00, 0x22, 0xFF, 0xD0, 0x33, // entropy with stuffed FF 00 and RST0
+            0xFF, 0xE1, 0x00, 0x06, b'L', b'E', b'A', b'K', // Post-SOS APP1 EXIF
+            0xFF, 0xFE, 0x00, 0x05, b'G', b'P', b'S', // Post-SOS COM
+            0xFF, 0xDA, 0x00, 0x04, 0x03, 0x04, // SOS #2
+            0x44, 0x55, // entropy #2
+            0xFF, 0xD9, // EOI
+        ];
+        let cleaned = strip_media_metadata(&progressive_jpeg).unwrap();
+        assert_eq!(cleaned.stripped_segments_count, 3);
+        assert!(!cleaned.bytes.windows(4).any(|w| w == b"JFIF"));
+        assert!(!cleaned.bytes.windows(4).any(|w| w == b"LEAK"));
+        assert!(!cleaned.bytes.windows(3).any(|w| w == b"GPS"));
+        assert!(cleaned.bytes.ends_with(&[0x44, 0x55, 0xFF, 0xD9]));
+
+        // Reject JPEG without SOS (only SOI + EOI)
+        assert_eq!(
+            strip_media_metadata(&[0xFF, 0xD8, 0xFF, 0xD9]),
+            Err(ProtocolError::MalformedPaddedFrame)
+        );
+
+        // Reject JPEG with trailing garbage after EOI
+        let mut trailing_garbage = progressive_jpeg.clone();
+        trailing_garbage.extend_from_slice(b"HIDDEN_EXIF");
+        assert_eq!(
+            strip_media_metadata(&trailing_garbage),
+            Err(ProtocolError::MalformedPaddedFrame)
+        );
+    }
+
+    #[test]
+    fn b0042_png_metadata_stripper_requires_13_byte_ihdr_and_idat_chunk() {
+        let png_sig = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+        // 1. Reject PNG where IHDR length != 13
+        let mut bad_ihdr = png_sig.to_vec();
+        bad_ihdr.extend_from_slice(&4u32.to_be_bytes());
+        bad_ihdr.extend_from_slice(b"IHDR");
+        bad_ihdr.extend_from_slice(&[1, 2, 3, 4, 0, 0, 0, 0]);
+        bad_ihdr.extend_from_slice(&4u32.to_be_bytes());
+        bad_ihdr.extend_from_slice(b"IDAT");
+        bad_ihdr.extend_from_slice(&[1, 2, 3, 4, 0, 0, 0, 0]);
+        bad_ihdr.extend_from_slice(&0u32.to_be_bytes());
+        bad_ihdr.extend_from_slice(b"IEND");
+        bad_ihdr.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(
+            strip_media_metadata(&bad_ihdr),
+            Err(ProtocolError::MalformedPaddedFrame)
+        );
+
+        // 2. Reject PNG with valid 13-byte IHDR + IEND but missing IDAT
+        let mut no_idat = png_sig.to_vec();
+        no_idat.extend_from_slice(&13u32.to_be_bytes());
+        no_idat.extend_from_slice(b"IHDR");
+        no_idat.extend_from_slice(&[0u8; 13]);
+        no_idat.extend_from_slice(&[0, 0, 0, 0]);
+        no_idat.extend_from_slice(&0u32.to_be_bytes());
+        no_idat.extend_from_slice(b"IEND");
+        no_idat.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(
+            strip_media_metadata(&no_idat),
+            Err(ProtocolError::MalformedPaddedFrame)
+        );
+    }
+
+    #[test]
+    fn b0043_group_chat_does_not_mutate_members_when_update_entropy_is_invalid() {
+        let alice = [0xAA; 32];
+        let bob = [0xBB; 32];
+        let mut group = GroupChatSession::new([0x99; 32], alice, [0x77; 32]).unwrap();
+
+        // Attempting to add Bob with all-zero entropy must fail AND leave members untouched
+        assert_eq!(
+            group.add_member(bob, &[0u8; 32]),
+            Err(ProtocolError::InvalidReplyQueueId)
+        );
+        assert_eq!(group.members(), &[alice]);
+        assert_eq!(group.epoch(), 1);
+
+        // Valid add succeeds
+        assert_eq!(group.add_member(bob, &[0x55; 32]).unwrap(), 2);
+        assert_eq!(group.members(), &[alice, bob]);
+
+        // Attempting to remove Bob with all-zero entropy must fail AND keep Bob in members at epoch 2
+        assert_eq!(
+            group.remove_member(&bob, &[0u8; 32]),
+            Err(ProtocolError::InvalidReplyQueueId)
+        );
+        assert_eq!(group.members(), &[alice, bob]);
+        assert_eq!(group.epoch(), 2);
     }
 }

@@ -40,6 +40,7 @@ fun AegisComposeApp(
     }
     var pendingLeakWarning by remember { mutableStateOf<AegisRustBridge.LeakWarningUi?>(null) }
     var calculatorDisplay by remember { mutableStateOf("") }
+    var chatPinInput by remember { mutableStateOf("") }
     var generatedNickname by remember { mutableStateOf(bridge.generateAnonymousNickname()) }
     var onboardingPassword by remember { mutableStateOf("AEGis#StrongKey2026!") }
     var launcherTarget by remember { mutableStateOf("VPS_DOCKER") }
@@ -59,6 +60,11 @@ fun AegisComposeApp(
             color = Color(0xFF0B0F17)
         ) {
             if (bridge.wipedByPanicOrDuress) {
+                draftText = ""
+                pendingLeakWarning = null
+                calculatorDisplay = ""
+                chatPinInput = ""
+                onboardingPassword = ""
                 Column(
                     modifier = Modifier.fillMaxSize().padding(24.dp),
                     verticalArrangement = Arrangement.Center,
@@ -129,7 +135,14 @@ fun AegisComposeApp(
                             Text("🧮 Маскировка")
                         }
                         Button(
-                            onClick = onPanicWipeTriggered,
+                            onClick = {
+                                draftText = ""
+                                pendingLeakWarning = null
+                                calculatorDisplay = ""
+                                chatPinInput = ""
+                                onboardingPassword = ""
+                                onPanicWipeTriggered()
+                            },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDA3633))
                         ) {
                             Text("🚨 ПАНИК-СБРОС")
@@ -177,6 +190,43 @@ fun AegisComposeApp(
 
                         Spacer(modifier = Modifier.height(8.dp))
 
+                        if (currentChat.isLocked) {
+                            Card(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF2D2111))
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        "🔒 Чат заблокирован персональным PIN-кодом",
+                                        color = Color(0xFFD29922),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    OutlinedTextField(
+                                        value = chatPinInput,
+                                        onValueChange = { chatPinInput = it },
+                                        label = { Text("Введите PIN чата") },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Button(onClick = {
+                                        if (currentChat.perChatPin != null && chatPinInput == currentChat.perChatPin) {
+                                            currentChat.isLocked = false
+                                            chatPinInput = ""
+                                            statusBanner = "Чат разблокирован персональным PIN-кодом."
+                                        } else {
+                                            chatPinInput = ""
+                                            statusBanner = "⛔ Неверный PIN-код чата."
+                                        }
+                                    }) {
+                                        Text("Разблокировать чат")
+                                    }
+                                }
+                            }
+                            return@Column
+                        }
+
                         // LeakGuard Modal Dialog (D-0009)
                         pendingLeakWarning?.let { warning ->
                             Card(
@@ -192,17 +242,23 @@ fun AegisComposeApp(
                                     Text("Маскировка: ${warning.maskedPreview}", color = Color.White)
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         Button(onClick = {
-                                            currentChat.messages.add(
-                                                AegisRustBridge.ChatMessageUi(
-                                                    outgoing = true,
-                                                    text = warning.maskedPreview,
-                                                    paddedBucketBytes = 256,
-                                                    ttlSeconds = 3600
+                                            if (!currentChat.isSavedNotes &&
+                                                bridge.shieldState == AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED
+                                            ) {
+                                                statusBanner = "⛔ Отправка заблокирована Kill Switch (обнаружена утечка маршрута)."
+                                            } else {
+                                                currentChat.messages.add(
+                                                    AegisRustBridge.ChatMessageUi(
+                                                        outgoing = true,
+                                                        text = warning.maskedPreview,
+                                                        paddedBucketBytes = 256,
+                                                        ttlSeconds = 3600
+                                                    )
                                                 )
-                                            )
-                                            pendingLeakWarning = null
-                                            draftText = ""
-                                            statusBanner = "Данные замаскированы (****) и отправлены (256 B)."
+                                                pendingLeakWarning = null
+                                                draftText = ""
+                                                statusBanner = "Данные замаскированы (****) и отправлены (256 B)."
+                                            }
                                         }) {
                                             Text("Скрыть (****) и отправить")
                                         }
@@ -243,41 +299,57 @@ fun AegisComposeApp(
 
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             Button(onClick = {
-                                val leak = bridge.scanMessageForLeaks(draftText)
-                                if (leak != null) {
-                                    pendingLeakWarning = leak
-                                } else if (draftText.isNotBlank()) {
-                                    currentChat.messages.add(
-                                        AegisRustBridge.ChatMessageUi(
-                                            outgoing = true,
-                                            text = draftText,
-                                            paddedBucketBytes = 256,
-                                            ttlSeconds = 3600
+                                if (!currentChat.isSavedNotes &&
+                                    bridge.shieldState == AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED
+                                ) {
+                                    statusBanner = "⛔ Отправка заблокирована Kill Switch (обнаружена утечка маршрута)."
+                                } else {
+                                    val leak = bridge.scanMessageForLeaks(draftText)
+                                    if (leak != null) {
+                                        pendingLeakWarning = leak
+                                    } else if (draftText.isNotBlank()) {
+                                        currentChat.messages.add(
+                                            AegisRustBridge.ChatMessageUi(
+                                                outgoing = true,
+                                                text = draftText,
+                                                paddedBucketBytes = 256,
+                                                ttlSeconds = 3600
+                                            )
                                         )
-                                    )
-                                    draftText = ""
+                                        draftText = ""
+                                    }
                                 }
                             }) {
                                 Text("Отправить E2EE")
                             }
                             Button(onClick = {
-                                val att = bridge.createExifStrippedAttachment("view_once.jpg", 4096, true)
-                                currentChat.messages.add(
-                                    AegisRustBridge.ChatMessageUi(
-                                        outgoing = true,
-                                        text = "📷 View-Once фото (${att.filename}: EXIF очищен ${att.originalBytes}->${att.strippedBytes} B)",
-                                        paddedBucketBytes = 4096,
-                                        ttlSeconds = 60,
-                                        attachment = att
+                                if (!currentChat.isSavedNotes &&
+                                    bridge.shieldState == AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED
+                                ) {
+                                    statusBanner = "⛔ Отправка заблокирована Kill Switch (обнаружена утечка маршрута)."
+                                } else {
+                                    val att = bridge.createExifStrippedAttachment("view_once.jpg", 4096, true)
+                                    currentChat.messages.add(
+                                        AegisRustBridge.ChatMessageUi(
+                                            outgoing = true,
+                                            text = "📷 View-Once фото (${att.filename}: EXIF очищен ${att.originalBytes}->${att.strippedBytes} B)",
+                                            paddedBucketBytes = 4096,
+                                            ttlSeconds = 60,
+                                            attachment = att
+                                        )
                                     )
-                                )
-                                statusBanner = "EXIF/GPS удалены, отправлено одноразовое фото."
+                                    statusBanner = "EXIF/GPS удалены, отправлено одноразовое фото."
+                                }
                             }) {
                                 Text("📷 View-Once")
                             }
                             Button(onClick = {
-                                bridge.callActive = true
-                                statusBanner = "📞 Звонок E2EE (TURN Relay-Only, тембр ${bridge.voicePitchSemitones} пт)"
+                                if (bridge.shieldState == AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED) {
+                                    statusBanner = "⛔ Звонок заблокирован Kill Switch."
+                                } else {
+                                    bridge.callActive = true
+                                    statusBanner = "📞 Звонок E2EE (TURN Relay-Only, тембр ${bridge.voicePitchSemitones} пт)"
+                                }
                             }) {
                                 Text("📞 Звонок")
                             }
@@ -311,8 +383,11 @@ fun AegisComposeApp(
                                 Text("+ Создать аккаунт")
                             }
                             Button(onClick = {
-                                bridge.activateSupporterPass("BLIND_TOKEN_ED25519_VERIFIED_2026")
-                                statusBanner = "🎫 SupporterPass активирован! Доступно 5 слотов."
+                                if (bridge.activateSupporterPass("BLIND_TOKEN_ED25519_VERIFIED_2026")) {
+                                    statusBanner = "🎫 SupporterPass активирован! Доступно 5 слотов."
+                                } else {
+                                    statusBanner = "⛔ Недействительный или уже использованный токен SupporterPass."
+                                }
                             }) {
                                 Text("🎫 SupporterPass")
                             }

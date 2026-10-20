@@ -182,6 +182,60 @@ pub enum TransportProfile {
     },
 }
 
+impl TransportProfile {
+    /// Validates the transport profile parameters.
+    ///
+    /// # Errors
+    /// Fail-closed: rejects port `0`, untrimmed or oversized hostnames (`> 253` bytes),
+    /// control/whitespace characters, or all-zero `bridge_public_key`.
+    pub fn validate(&self) -> Result<(), TransportError> {
+        match self {
+            Self::DirectTls | Self::TorArtiEmbedded => Ok(()),
+            Self::Socks5Proxy { host, port } => {
+                if *port == 0 {
+                    return Err(TransportError::InvalidPort);
+                }
+                if host != host.trim()
+                    || host.is_empty()
+                    || host.len() > 253
+                    || host.chars().any(|c| c.is_control() || c.is_whitespace())
+                {
+                    return Err(TransportError::InvalidEndpoint);
+                }
+                Ok(())
+            }
+            Self::TorOrbotLocal { socks_port } => {
+                if *socks_port == 0 {
+                    return Err(TransportError::InvalidPort);
+                }
+                Ok(())
+            }
+            Self::ObfuscatedBridge {
+                bridge_endpoint,
+                bridge_public_key,
+            } => {
+                if *bridge_public_key == [0u8; 32] || bridge_endpoint != bridge_endpoint.trim() {
+                    return Err(TransportError::InvalidEndpoint);
+                }
+                let Some((host, port_str)) = bridge_endpoint.rsplit_once(':') else {
+                    return Err(TransportError::InvalidEndpoint);
+                };
+                if host.is_empty()
+                    || host.len() > 253
+                    || host.chars().any(|c| c.is_control() || c.is_whitespace())
+                {
+                    return Err(TransportError::InvalidEndpoint);
+                }
+                let port: u16 = port_str.parse().map_err(|_| TransportError::InvalidPort)?;
+                if port == 0 {
+                    return Err(TransportError::InvalidPort);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Full client proxy and censorship-bypass configuration (D-0008, PLAN.md §14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyConfig {
@@ -202,48 +256,7 @@ impl ProxyConfig {
         if self.pinned_server_key == [0u8; 32] {
             return Err(TransportError::InvalidEndpoint);
         }
-        match &self.profile {
-            TransportProfile::DirectTls | TransportProfile::TorArtiEmbedded => Ok(()),
-            TransportProfile::Socks5Proxy { host, port } => {
-                if *port == 0 {
-                    return Err(TransportError::InvalidPort);
-                }
-                let trimmed = host.trim();
-                if trimmed.is_empty()
-                    || trimmed.len() > 253
-                    || trimmed.chars().any(|c| c.is_control() || c.is_whitespace())
-                {
-                    return Err(TransportError::InvalidEndpoint);
-                }
-                Ok(())
-            }
-            TransportProfile::TorOrbotLocal { socks_port } => {
-                if *socks_port == 0 {
-                    return Err(TransportError::InvalidPort);
-                }
-                Ok(())
-            }
-            TransportProfile::ObfuscatedBridge {
-                bridge_endpoint,
-                bridge_public_key,
-            } => {
-                if *bridge_public_key == [0u8; 32] {
-                    return Err(TransportError::InvalidEndpoint);
-                }
-                let trimmed = bridge_endpoint.trim();
-                let Some((host, port_str)) = trimmed.rsplit_once(':') else {
-                    return Err(TransportError::InvalidEndpoint);
-                };
-                if host.is_empty() || host.chars().any(|c| c.is_control() || c.is_whitespace()) {
-                    return Err(TransportError::InvalidEndpoint);
-                }
-                let port: u16 = port_str.parse().map_err(|_| TransportError::InvalidPort)?;
-                if port == 0 {
-                    return Err(TransportError::InvalidPort);
-                }
-                Ok(())
-            }
-        }
+        self.profile.validate()
     }
 
     /// Builds a [`RouteProbe`] from the active proxy configuration and IP echo hashes.
@@ -299,11 +312,13 @@ impl CoverTrafficConfig {
     /// Validates the cover traffic interval bounds.
     ///
     /// # Errors
-    /// Returns [`TransportError::InvalidCoverTrafficInterval`] if `min_interval_ms == 0` or `min > max`.
+    /// Returns [`TransportError::InvalidCoverTrafficInterval`] if `min_interval_ms == 0`, `min > max`,
+    /// `max_interval_ms > 3_600_000`, or `idle_grace_ms > 3_600_000`.
     pub fn validate(&self) -> Result<(), TransportError> {
         if self.min_interval_ms == 0
             || self.min_interval_ms > self.max_interval_ms
             || self.max_interval_ms > 3_600_000
+            || self.idle_grace_ms > 3_600_000
         {
             return Err(TransportError::InvalidCoverTrafficInterval);
         }
@@ -466,8 +481,10 @@ impl ServerMigrationNotice {
         {
             return Err(TransportError::InvalidMigrationNotice);
         }
-        let ep = self.new_server_endpoint.trim();
-        if ep.is_empty()
+        let ep = &self.new_server_endpoint;
+        if ep != ep.trim()
+            || !ep.starts_with("aegis://")
+            || ep.len() <= "aegis://".len()
             || ep.len() > 256
             || ep.chars().any(|c| c.is_control() || c.is_whitespace())
         {
@@ -630,6 +647,63 @@ mod tests {
                 false,
             ),
             Err(TransportError::InvalidMigrationNotice)
+        );
+    }
+
+    #[test]
+    fn b0044_b0045_transport_rejects_untrimmed_oversized_bridge_non_aegis_uri_and_excessive_idle_grace(
+    ) {
+        // B-0044: Untrimmed Socks5Proxy host and ObfuscatedBridge endpoint rejected
+        assert_eq!(
+            TransportProfile::Socks5Proxy {
+                host: " 127.0.0.1 ".to_owned(),
+                port: 9050,
+            }
+            .validate(),
+            Err(TransportError::InvalidEndpoint)
+        );
+        let long_host = format!("{}:8443", "a".repeat(254));
+        assert_eq!(
+            TransportProfile::ObfuscatedBridge {
+                bridge_endpoint: long_host,
+                bridge_public_key: [0xBB; 32],
+            }
+            .validate(),
+            Err(TransportError::InvalidEndpoint)
+        );
+
+        // B-0044: ServerMigrationNotice requires trimmed `aegis://` URI
+        assert_eq!(
+            ServerMigrationNotice::new_verified(
+                [0x11; 32],
+                [0x22; 32],
+                "https://relay.example:8443".to_owned(),
+                [0x33; 32],
+                true,
+            ),
+            Err(TransportError::InvalidMigrationNotice)
+        );
+        assert_eq!(
+            ServerMigrationNotice::new_verified(
+                [0x11; 32],
+                [0x22; 32],
+                " aegis://relay.example:8443 ".to_owned(),
+                [0x33; 32],
+                true,
+            ),
+            Err(TransportError::InvalidMigrationNotice)
+        );
+
+        // B-0045: CoverTrafficConfig rejects idle_grace_ms > 3_600_000
+        let bad_cover = CoverTrafficConfig {
+            enabled: true,
+            min_interval_ms: 2_000,
+            max_interval_ms: 10_000,
+            idle_grace_ms: 3_600_001,
+        };
+        assert_eq!(
+            bad_cover.validate(),
+            Err(TransportError::InvalidCoverTrafficInterval)
         );
     }
 }

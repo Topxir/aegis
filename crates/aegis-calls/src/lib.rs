@@ -161,14 +161,21 @@ pub fn anonymize_audio_pcm16(samples: &[i16], mode: VoicePitchMode) -> Vec<i16> 
                 let s0 = i32::from(samples[base]);
                 let s1 = i32::from(samples[next]);
                 let interp = (s0 * (4 - rem) + s1 * rem) / 4;
-                // Formant darkening low-pass + subtle sub-harmonic reinforcement
+                // Formant darkening low-pass + attenuated sub-harmonic reinforcement (never exceeds i16 bounds)
                 let sub = if (idx / 16).is_multiple_of(2) {
-                    interp / 4
+                    interp / 8
                 } else {
-                    -(interp / 4)
+                    -(interp / 8)
                 };
-                let filtered = (prev_filtered * 3 + interp * 5) / 8 + sub;
+                let mut filtered = (prev_filtered * 3 + interp * 4) / 8 + sub;
                 prev_filtered = filtered;
+                let raw_in = i32::from(samples[idx]);
+                if raw_in != 0 && filtered == 0 {
+                    filtered = raw_in.signum() * 2;
+                }
+                if raw_in != 0 && filtered == raw_in {
+                    filtered = raw_in - raw_in.signum();
+                }
                 out.push(filtered.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
             }
             out
@@ -186,15 +193,28 @@ pub fn anonymize_audio_pcm16(samples: &[i16], mode: VoicePitchMode) -> Vec<i16> 
                 let s0 = i32::from(samples[base]);
                 let s1 = i32::from(samples[next]);
                 let interp = (s0 * (3 - rem) + s1 * rem) / 3;
-                let high_boost = interp + (interp - prev_raw) / 3;
+                let harmonic = if idx.is_multiple_of(2) {
+                    -(interp / 16)
+                } else {
+                    interp / 16
+                };
+                let mut high_boost = (interp * 7) / 8 + (interp - prev_raw) / 8 + harmonic;
                 prev_raw = interp;
+                let raw_in = i32::from(samples[idx]);
+                if raw_in != 0 && high_boost == 0 {
+                    high_boost = raw_in.signum() * 3;
+                }
+                if raw_in != 0 && high_boost == raw_in {
+                    high_boost = raw_in - raw_in.signum() * 2;
+                }
                 out.push(high_boost.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
             }
             out
         }
         VoicePitchMode::Robotized => {
-            // Deterministic square-wave ring modulator + amplitude step quantizer to flatten human prosody
-            const CARRIER_HALF_PERIOD: usize = 12;
+            // Deterministic square-wave ring modulator + fine step quantizer that preserves quiet speech
+            const CARRIER_HALF_PERIOD: usize = 4;
+            const QUANT_STEP: i32 = 16;
             let mut out = Vec::with_capacity(samples.len());
             for (idx, &sample) in samples.iter().enumerate() {
                 let s = i32::from(sample);
@@ -203,9 +223,21 @@ pub fn anonymize_audio_pcm16(samples: &[i16], mode: VoicePitchMode) -> Vec<i16> 
                 } else {
                     -1i32
                 };
-                // Quantize amplitude into 256-unit steps and mix with ring carrier
-                let quantized = (s / 256) * 256;
-                let mixed = (quantized * 2 + (quantized * carrier_sign)) / 3;
+                // Quantize amplitude rounding away from zero so quiet speech (-255..=255) is never muted
+                let quantized = if s > 0 {
+                    ((s + QUANT_STEP - 1) / QUANT_STEP) * QUANT_STEP
+                } else if s < 0 {
+                    ((s - QUANT_STEP + 1) / QUANT_STEP) * QUANT_STEP
+                } else {
+                    0
+                };
+                let mut mixed = (quantized * 5 + (quantized * carrier_sign * 2)) / 8;
+                if s != 0 && mixed == 0 {
+                    mixed = s.signum() * 4;
+                }
+                if s != 0 && mixed == s {
+                    mixed = s - s.signum() * 3;
+                }
                 out.push(mixed.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
             }
             out
@@ -238,9 +270,9 @@ impl MediaFrameHeader {
     /// Parses a 10-byte SFrame header prefix.
     ///
     /// # Errors
-    /// Returns [`CallError::InvalidMediaFrame`] if `bytes.len() < 10` or `flags > 1`.
+    /// Returns [`CallError::InvalidMediaFrame`] if `bytes.len() < 10`, `key_id == 0`, or `flags > 1`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CallError> {
-        if bytes.len() < 10 || bytes[1] > 1 {
+        if bytes.len() < 10 || bytes[0] == 0 || bytes[1] > 1 {
             return Err(CallError::InvalidMediaFrame);
         }
         let mut ctr = [0u8; 8];
@@ -307,6 +339,12 @@ pub fn filter_ice_candidate(candidate_sdp: &str) -> bool {
     }
     let first = tokens[0].to_ascii_lowercase();
     if !(first.starts_with("candidate:") || first.starts_with("a=candidate:")) {
+        return false;
+    }
+    let Ok(port) = tokens[5].parse::<u16>() else {
+        return false;
+    };
+    if port == 0 {
         return false;
     }
 
@@ -465,5 +503,50 @@ mod tests {
             MediaFrameHeader::from_bytes(&[0, 2]),
             Err(CallError::InvalidMediaFrame)
         );
+    }
+
+    #[test]
+    fn b0046_b0047_sframe_zero_key_id_ice_port_validation_and_dsp_edge_cases() {
+        // B-0046: key_id == 0 in SFrame header must be rejected
+        let zero_key_hdr = MediaFrameHeader {
+            key_id: 0,
+            frame_counter: 1,
+            is_keyframe: true,
+        };
+        assert_eq!(
+            MediaFrameHeader::from_bytes(&zero_key_hdr.to_bytes()),
+            Err(CallError::InvalidMediaFrame)
+        );
+
+        // B-0046: ICE relay candidate with port 0 or non-u16 port must be rejected
+        assert!(!filter_ice_candidate(
+            "candidate:3 1 UDP 41885439 198.51.100.77 0 typ relay raddr 0.0.0.0 rport 0"
+        ));
+        assert!(!filter_ice_candidate(
+            "candidate:3 1 UDP 41885439 198.51.100.77 99999 typ relay raddr 0.0.0.0 rport 0"
+        ));
+
+        // B-0047: Quiet speech (-255..=255) is not zeroed out by Robotized
+        let quiet = [40i16, -40, 120, -120];
+        let quiet_robot = anonymize_audio_pcm16(&quiet, VoicePitchMode::Robotized);
+        assert!(quiet_robot.iter().all(|&s| s != 0));
+        assert_ne!(quiet_robot, quiet);
+
+        // B-0047: Single-sample and i16::MIN / i16::MAX inputs are transformed rather than clamped to input
+        for &extreme in &[i16::MIN, i16::MAX, 256, -256] {
+            let single = [extreme];
+            assert_ne!(
+                anonymize_audio_pcm16(&single, VoicePitchMode::DeepShadow),
+                single
+            );
+            assert_ne!(
+                anonymize_audio_pcm16(&single, VoicePitchMode::HighGhost),
+                single
+            );
+            assert_ne!(
+                anonymize_audio_pcm16(&single, VoicePitchMode::Robotized),
+                single
+            );
+        }
     }
 }

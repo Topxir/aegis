@@ -53,6 +53,7 @@ class MainActivity : ComponentActivity() {
                 },
                 onPanicWipeTriggered = {
                     rustBridge.triggerEmergencyPanicWipe()
+                    stopService(Intent(this, AegisBackgroundService::class.java))
                 }
             )
         }
