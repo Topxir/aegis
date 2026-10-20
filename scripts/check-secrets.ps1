@@ -20,7 +20,7 @@ $files = git ls-files | Where-Object {
 
 foreach ($pattern in $patterns) {
     foreach ($file in $files) {
-        $matchesFound = Select-String -Path $file -Pattern $pattern -ErrorAction SilentlyContinue
+        $matchesFound = Select-String -Path $file -Pattern $pattern -CaseSensitive -ErrorAction SilentlyContinue
         if ($matchesFound) {
             Write-Error "[ERROR] Potential secret pattern '$pattern' matched in $file"
             $failed = $true

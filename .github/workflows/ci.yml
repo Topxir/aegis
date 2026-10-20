@@ -26,7 +26,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.1"
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache Cargo registry & build
@@ -54,7 +54,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.1"
+          toolchain: stable
 
       - name: Run cargo-deny (licenses, bans, advisories, sources)
         uses: EmbarkStudios/cargo-deny-action@v2

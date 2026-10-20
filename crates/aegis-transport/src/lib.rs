@@ -44,20 +44,43 @@ pub struct ShieldEvaluation {
 /// Evaluates the current network anonymity status and kill-switch policy (D-0008).
 #[must_use]
 pub fn evaluate_network_shield(probe: &RouteProbe) -> ShieldEvaluation {
+    // Fail-closed: missing or all-zero server-observed IP hash means no verified circuit / offline.
     let Some(observed) = probe.server_observed_ip_hash else {
-        if probe.via_tor {
-            return ShieldEvaluation {
-                status: NetworkRouteStatus::TorAnonymized,
-                tunnel_leak_detected: false,
-                traffic_permitted: true,
-            };
-        }
         return ShieldEvaluation {
             status: NetworkRouteStatus::Offline,
             tunnel_leak_detected: false,
             traffic_permitted: false,
         };
     };
+
+    if observed == [0u8; 32] {
+        return ShieldEvaluation {
+            status: NetworkRouteStatus::Offline,
+            tunnel_leak_detected: false,
+            traffic_permitted: false,
+        };
+    }
+
+    // Fail-closed: all-zero baseline ISP hash is invalid and treated as a potential leak.
+    if probe.baseline_isp_ip_hash == Some([0u8; 32]) {
+        return ShieldEvaluation {
+            status: NetworkRouteStatus::DirectWarning,
+            tunnel_leak_detected: true,
+            traffic_permitted: false,
+        };
+    }
+
+    // Under kill-switch, a VPN/proxy/Tor tunnel without a known baseline ISP hash cannot verify non-leakage.
+    if (probe.via_vpn_or_proxy || probe.via_tor)
+        && probe.kill_switch_enabled
+        && probe.baseline_isp_ip_hash.is_none()
+    {
+        return ShieldEvaluation {
+            status: NetworkRouteStatus::DirectWarning,
+            tunnel_leak_detected: false,
+            traffic_permitted: false,
+        };
+    }
 
     let leak_detected =
         (probe.via_vpn_or_proxy || probe.via_tor) && probe.baseline_isp_ip_hash == Some(observed);
@@ -124,5 +147,40 @@ mod tests {
         assert_eq!(leak_eval.status, NetworkRouteStatus::DirectWarning);
         assert!(leak_eval.tunnel_leak_detected);
         assert!(!leak_eval.traffic_permitted);
+    }
+
+    #[test]
+    fn b0013_shield_blocks_missing_echo_zero_hashes_and_unverified_baseline() {
+        // Missing server echo even when via_tor == true must be Offline & blocked
+        let no_echo = evaluate_network_shield(&RouteProbe {
+            via_tor: true,
+            via_vpn_or_proxy: false,
+            baseline_isp_ip_hash: Some([0x11; 32]),
+            server_observed_ip_hash: None,
+            kill_switch_enabled: true,
+        });
+        assert_eq!(no_echo.status, NetworkRouteStatus::Offline);
+        assert!(!no_echo.traffic_permitted);
+
+        // All-zero server observed hash must be rejected
+        let zero_echo = evaluate_network_shield(&RouteProbe {
+            via_tor: true,
+            via_vpn_or_proxy: false,
+            baseline_isp_ip_hash: Some([0x11; 32]),
+            server_observed_ip_hash: Some([0u8; 32]),
+            kill_switch_enabled: false,
+        });
+        assert_eq!(zero_echo.status, NetworkRouteStatus::Offline);
+        assert!(!zero_echo.traffic_permitted);
+
+        // Missing baseline ISP hash with kill_switch_enabled must block unverified tunnel
+        let missing_baseline = evaluate_network_shield(&RouteProbe {
+            via_tor: false,
+            via_vpn_or_proxy: true,
+            baseline_isp_ip_hash: None,
+            server_observed_ip_hash: Some([0x22; 32]),
+            kill_switch_enabled: true,
+        });
+        assert!(!missing_baseline.traffic_permitted);
     }
 }

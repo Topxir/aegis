@@ -1,6 +1,8 @@
 //! `aegis-server` — Zero-knowledge federation server policies, unidirectional queue TTLs,
 //! and anti-DDoS adaptive Proof-of-Work difficulty calculation without IP logging (D-0007, PLAN.md §6).
 
+use aegis_protocol::PADDING_BUCKETS;
+
 /// Default message queue time-to-live on the server: 30 days in seconds (PLAN.md §5).
 pub const DEFAULT_QUEUE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
@@ -42,10 +44,21 @@ pub struct QueueQuota {
 }
 
 impl QueueQuota {
-    /// Returns `true` if the queue can accept another padded frame.
+    /// Returns `true` if the queue configuration is valid and has capacity for another frame.
     #[must_use]
     pub fn can_enqueue(&self) -> bool {
-        self.current_buffered_frames < self.max_buffered_frames
+        self.queue_id != [0u8; 32]
+            && self.max_buffered_frames > 0
+            && self.ttl_secs > 0
+            && self.ttl_secs <= DEFAULT_QUEUE_TTL_SECS
+            && self.current_buffered_frames < self.max_buffered_frames
+    }
+
+    /// Returns `true` if the queue can accept an incoming frame of `frame_len_bytes`,
+    /// enforcing fixed metadata-hiding padding buckets (`[256, 1024, 4096, 16384]`).
+    #[must_use]
+    pub fn can_accept_frame(&self, frame_len_bytes: usize) -> bool {
+        self.can_enqueue() && PADDING_BUCKETS.contains(&frame_len_bytes)
     }
 }
 
@@ -63,5 +76,33 @@ mod tests {
             compute_pow_difficulty(10_000, true),
             MAX_POW_DIFFICULTY_BITS
         );
+    }
+
+    #[test]
+    fn b0015_queue_quota_enforces_valid_queue_id_ttl_and_padding_buckets() {
+        let valid_quota = QueueQuota {
+            queue_id: [0x11; 32],
+            max_buffered_frames: 100,
+            current_buffered_frames: 10,
+            ttl_secs: DEFAULT_QUEUE_TTL_SECS,
+        };
+        assert!(valid_quota.can_enqueue());
+        assert!(valid_quota.can_accept_frame(256));
+        assert!(valid_quota.can_accept_frame(16384));
+        assert!(!valid_quota.can_accept_frame(0));
+        assert!(!valid_quota.can_accept_frame(512));
+
+        // All-zero queue_id or zero TTL must be rejected
+        let zero_id = QueueQuota {
+            queue_id: [0u8; 32],
+            ..valid_quota
+        };
+        assert!(!zero_id.can_enqueue());
+
+        let zero_ttl = QueueQuota {
+            ttl_secs: 0,
+            ..valid_quota
+        };
+        assert!(!zero_ttl.can_enqueue());
     }
 }

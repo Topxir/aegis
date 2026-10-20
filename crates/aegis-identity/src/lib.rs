@@ -23,6 +23,8 @@ pub enum PasswordPolicyError {
     TooShort { min: usize, actual: usize },
     /// Password exceeds [`MAX_PASSWORD_CHARS`].
     TooLong { max: usize, actual: usize },
+    /// Password contains ASCII or Unicode control characters (`\0`, `\n`, `\r`, `\x1b`, etc.).
+    ContainsControlCharacters,
     /// Fewer than [`MIN_UPPERCASE_COUNT`] uppercase letters.
     InsufficientUppercase { required: usize, actual: usize },
     /// Missing at least one lowercase letter.
@@ -45,6 +47,9 @@ impl fmt::Display for PasswordPolicyError {
             }
             Self::TooLong { max, actual } => {
                 write!(f, "password too long: maximum {max} chars, got {actual}")
+            }
+            Self::ContainsControlCharacters => {
+                write!(f, "password must not contain control characters")
             }
             Self::InsufficientUppercase { required, actual } => write!(
                 f,
@@ -70,11 +75,12 @@ impl std::error::Error for PasswordPolicyError {}
 
 /// Validates a candidate password against D-0006 requirements:
 /// - Length in `12..=256` characters
+/// - No control characters (`\0`, `\n`, `\r`, etc.)
 /// - At least **3 uppercase letters** (`A-Z` or Unicode uppercase)
 /// - At least 1 lowercase letter
 /// - At least 1 digit
-/// - At least 1 special character (punctuation / symbol)
-/// - Does not contain the user's `nickname`
+/// - At least 1 printable special character (punctuation / symbol)
+/// - Does not contain the user's `nickname` (raw or separator-stripped)
 /// - Does not contain 4+ identical consecutive characters or common weak substrings
 ///
 /// # Errors
@@ -103,13 +109,16 @@ pub fn validate_password(password: &str, nickname: &str) -> Result<u8, PasswordP
     let mut repeat_run = 1usize;
 
     for ch in password.chars() {
+        if ch.is_control() {
+            return Err(PasswordPolicyError::ContainsControlCharacters);
+        }
         if ch.is_uppercase() {
             uppercase_count = uppercase_count.saturating_add(1);
         } else if ch.is_lowercase() {
             has_lowercase = true;
         } else if ch.is_ascii_digit() {
             has_digit = true;
-        } else if !ch.is_whitespace() {
+        } else if !ch.is_whitespace() && !ch.is_alphanumeric() {
             has_special = true;
         }
 
@@ -142,7 +151,19 @@ pub fn validate_password(password: &str, nickname: &str) -> Result<u8, PasswordP
 
     let lower_pwd = password.to_lowercase();
     let trimmed_nick = nickname.trim().to_lowercase();
-    if trimmed_nick.len() >= 3 && lower_pwd.contains(&trimmed_nick) {
+    if trimmed_nick.chars().count() >= 3 && lower_pwd.contains(&trimmed_nick) {
+        return Err(PasswordPolicyError::ContainsNickname);
+    }
+
+    let stripped_nick: String = trimmed_nick
+        .chars()
+        .filter(|&c| c != '-' && c != '_' && !c.is_whitespace())
+        .collect();
+    let stripped_pwd: String = lower_pwd
+        .chars()
+        .filter(|&c| c != '-' && c != '_' && !c.is_whitespace())
+        .collect();
+    if stripped_nick.chars().count() >= 3 && stripped_pwd.contains(&stripped_nick) {
         return Err(PasswordPolicyError::ContainsNickname);
     }
 
@@ -234,10 +255,14 @@ pub struct SupporterPass {
 pub enum AccountSlotError {
     /// Device reached the free limit of 3 accounts; a `SupporterPass` is required.
     FreeQuotaExceeded { max_free: usize },
-    /// Provided `SupporterPass` signature is invalid or unverified.
+    /// Provided `SupporterPass` signature is invalid, unverified, or would downgrade active slots.
     InvalidSupporterPass,
+    /// Provided `SupporterPass` `token_id` was already redeemed.
+    DuplicateSupporterPassToken,
     /// Even with the supporter pass, the slot limit was reached.
     SupporterQuotaExceeded { max_allowed: usize },
+    /// Account ID is all-zero (`[0u8; 16]`).
+    InvalidAccountId,
     /// Account with the same local profile ID already exists.
     DuplicateAccountId,
 }
@@ -250,9 +275,13 @@ impl fmt::Display for AccountSlotError {
                 "free limit of {max_free} accounts reached; SupporterPass required"
             ),
             Self::InvalidSupporterPass => write!(f, "supporter pass signature is invalid"),
+            Self::DuplicateSupporterPassToken => {
+                write!(f, "supporter pass token has already been redeemed")
+            }
             Self::SupporterQuotaExceeded { max_allowed } => {
                 write!(f, "supporter pass quota of {max_allowed} accounts reached")
             }
+            Self::InvalidAccountId => write!(f, "account ID must not be all-zero"),
             Self::DuplicateAccountId => write!(f, "account ID already registered on device"),
         }
     }
@@ -265,6 +294,7 @@ impl std::error::Error for AccountSlotError {}
 #[derive(Debug, Default, Clone)]
 pub struct AccountSlotManager {
     active_account_ids: Vec<[u8; 16]>,
+    redeemed_token_ids: Vec<[u8; 16]>,
     supporter_pass: Option<SupporterPass>,
 }
 
@@ -278,11 +308,20 @@ impl AccountSlotManager {
     /// Attaches a verified `SupporterPass` to unlock 4+ account slots.
     ///
     /// # Errors
-    /// Fail-closed: returns [`AccountSlotError::InvalidSupporterPass`] if `signature_verified` is false.
+    /// Fail-closed: rejects unverified passes, all-zero `token_id`, replayed `token_id`,
+    /// or `max_accounts` below currently active accounts.
     pub fn activate_supporter_pass(&mut self, pass: SupporterPass) -> Result<(), AccountSlotError> {
-        if !pass.signature_verified || pass.max_accounts <= MAX_FREE_ACCOUNTS {
+        if !pass.signature_verified
+            || pass.max_accounts <= MAX_FREE_ACCOUNTS
+            || pass.token_id == [0u8; 16]
+            || pass.max_accounts < self.active_account_ids.len()
+        {
             return Err(AccountSlotError::InvalidSupporterPass);
         }
+        if self.redeemed_token_ids.contains(&pass.token_id) {
+            return Err(AccountSlotError::DuplicateSupporterPassToken);
+        }
+        self.redeemed_token_ids.push(pass.token_id);
         self.supporter_pass = Some(pass);
         Ok(())
     }
@@ -290,8 +329,11 @@ impl AccountSlotManager {
     /// Attempts to register a new local account profile on this device.
     ///
     /// # Errors
-    /// Returns [`AccountSlotError`] if the free or supporter quota is exceeded.
+    /// Returns [`AccountSlotError`] if the ID is all-zero, duplicate, or exceeds quota.
     pub fn register_account(&mut self, account_id: [u8; 16]) -> Result<usize, AccountSlotError> {
+        if account_id == [0u8; 16] {
+            return Err(AccountSlotError::InvalidAccountId);
+        }
         if self.active_account_ids.contains(&account_id) {
             return Err(AccountSlotError::DuplicateAccountId);
         }
@@ -345,6 +387,8 @@ pub enum PinSetupError {
     DuressPinCollision,
     /// Empty PIN digest or empty wrapped database key is rejected.
     EmptyKeyOrPinMaterial,
+    /// `max_attempts` must be at least 1.
+    InvalidMaxAttempts,
 }
 
 impl fmt::Display for PinSetupError {
@@ -354,6 +398,7 @@ impl fmt::Display for PinSetupError {
             Self::EmptyKeyOrPinMaterial => {
                 write!(f, "PIN digest and wrapped DB key must not be empty")
             }
+            Self::InvalidMaxAttempts => write!(f, "max PIN attempts must be greater than zero"),
         }
     }
 }
@@ -406,17 +451,21 @@ impl PinGuard {
         }
     }
 
-    /// Validated constructor that rejects empty key/PIN material or a Duress PIN equal to the primary PIN.
+    /// Validated constructor that rejects empty key/PIN material, `max_attempts == 0`,
+    /// or a Duress PIN equal to the primary PIN.
     ///
     /// # Errors
     /// Returns [`PinSetupError`] if `primary_pin_digest` or `wrapped_db_key` is empty,
-    /// or if `duress_pin_digest` matches `primary_pin_digest`.
+    /// `max_attempts == 0`, or if `duress_pin_digest` matches `primary_pin_digest`.
     pub fn try_new(
         primary_pin_digest: Vec<u8>,
         duress_pin_digest: Option<Vec<u8>>,
         wrapped_db_key: Vec<u8>,
         max_attempts: u8,
     ) -> Result<Self, PinSetupError> {
+        if max_attempts == 0 {
+            return Err(PinSetupError::InvalidMaxAttempts);
+        }
         if primary_pin_digest.is_empty() || wrapped_db_key.is_empty() {
             return Err(PinSetupError::EmptyKeyOrPinMaterial);
         }
@@ -436,20 +485,28 @@ impl PinGuard {
         ))
     }
 
-    /// Verifies a candidate PIN digest in constant time and updates the lockout counter.
+    /// Verifies a candidate PIN digest in constant time (always evaluating both duress and primary digests)
+    /// and updates the lockout counter.
     pub fn verify_pin_digest(&mut self, candidate_digest: &[u8]) -> PinUnlockOutcome {
         if self.wiped {
             return PinUnlockOutcome::PinWrapperWiped;
         }
 
-        if let Some(duress) = &self.duress_pin_digest {
-            if constant_time_eq(duress.as_slice(), candidate_digest) {
-                self.wipe_wrapper();
-                return PinUnlockOutcome::DuressTriggered;
+        let duress_match = match &self.duress_pin_digest {
+            Some(duress) => constant_time_eq(duress.as_slice(), candidate_digest),
+            None => {
+                let _ = constant_time_eq(self.primary_pin_digest.as_slice(), candidate_digest);
+                false
             }
+        };
+        let primary_match = constant_time_eq(self.primary_pin_digest.as_slice(), candidate_digest);
+
+        if duress_match {
+            self.wipe_wrapper();
+            return PinUnlockOutcome::DuressTriggered;
         }
 
-        if constant_time_eq(self.primary_pin_digest.as_slice(), candidate_digest) {
+        if primary_match {
             self.failed_attempts = 0;
             return PinUnlockOutcome::Unlocked;
         }
@@ -526,6 +583,32 @@ mod tests {
     }
 
     #[test]
+    fn b0007_password_rejects_control_characters() {
+        assert_eq!(
+            validate_password("ABCdef123456\0", "user123"),
+            Err(PasswordPolicyError::ContainsControlCharacters)
+        );
+        assert_eq!(
+            validate_password("ABCdef123456\n", "user123"),
+            Err(PasswordPolicyError::ContainsControlCharacters)
+        );
+        assert_eq!(
+            validate_password("ABCdef123456\x1b", "user123"),
+            Err(PasswordPolicyError::ContainsControlCharacters)
+        );
+    }
+
+    #[test]
+    fn b0008_password_rejects_separator_stripped_nickname() {
+        assert_eq!(
+            validate_password("SILentVortex4821!@#", "silent-vortex-4821"),
+            Err(PasswordPolicyError::ContainsNickname)
+        );
+        // 2-char Cyrillic nickname (4 bytes in UTF-8) must NOT trigger >= 3 char nickname rule
+        assert!(validate_password("AEGis#Secure987!яя", "яя").is_ok());
+    }
+
+    #[test]
     fn nickname_generator_produces_valid_nicknames() {
         let nick = generate_nickname([3, 7, 0x12, 0x34]);
         assert!(validate_nickname(&nick).is_ok());
@@ -575,6 +658,54 @@ mod tests {
     }
 
     #[test]
+    fn b0009_account_slot_manager_rejects_zero_ids_replayed_tokens_and_downgrades() {
+        let mut mgr = AccountSlotManager::new();
+        assert_eq!(
+            mgr.register_account([0u8; 16]),
+            Err(AccountSlotError::InvalidAccountId)
+        );
+        assert_eq!(
+            mgr.activate_supporter_pass(SupporterPass {
+                token_id: [0u8; 16],
+                max_accounts: 5,
+                signature_verified: true,
+            }),
+            Err(AccountSlotError::InvalidSupporterPass)
+        );
+
+        assert!(mgr
+            .activate_supporter_pass(SupporterPass {
+                token_id: [0xAA; 16],
+                max_accounts: 5,
+                signature_verified: true,
+            })
+            .is_ok());
+
+        // Replay of the same token_id must be rejected
+        assert_eq!(
+            mgr.activate_supporter_pass(SupporterPass {
+                token_id: [0xAA; 16],
+                max_accounts: 6,
+                signature_verified: true,
+            }),
+            Err(AccountSlotError::DuplicateSupporterPassToken)
+        );
+
+        for id in 1..=5u8 {
+            assert!(mgr.register_account([id; 16]).is_ok());
+        }
+        // Downgrading max_accounts (4) below currently active accounts (5) must fail
+        assert_eq!(
+            mgr.activate_supporter_pass(SupporterPass {
+                token_id: [0xBB; 16],
+                max_accounts: 4,
+                signature_verified: true,
+            }),
+            Err(AccountSlotError::InvalidSupporterPass)
+        );
+    }
+
+    #[test]
     fn pin_guard_wipes_on_max_attempts_or_duress() {
         let mut guard = PinGuard::new(
             b"primary-pin-hash".to_vec(),
@@ -611,6 +742,12 @@ mod tests {
             )
             .unwrap_err(),
             PinSetupError::DuressPinCollision
+        );
+
+        // Zero max_attempts rejected by try_new (B-0010)
+        assert_eq!(
+            PinGuard::try_new(b"primary".to_vec(), None, vec![0x42; 32], 0).unwrap_err(),
+            PinSetupError::InvalidMaxAttempts
         );
 
         // Max attempts lockout wipes wrapper

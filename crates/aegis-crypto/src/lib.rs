@@ -12,6 +12,12 @@ use std::hint::black_box;
 /// Current cryptographic suite version (D-0012).
 pub const CRYPTO_SUITE_VERSION: u16 = 1;
 
+/// Minimum allowed Proof-of-Work difficulty in leading zero bits (prevents 0-bit PoW bypass).
+pub const MIN_POW_DIFFICULTY_BITS: u8 = 1;
+
+/// Maximum allowed Proof-of-Work difficulty in leading zero bits (prevents CPU DoS).
+pub const MAX_POW_DIFFICULTY_BITS: u8 = 32;
+
 /// Typed errors returned by cryptographic operations.
 /// Fail-closed by design: any verification failure aborts processing (AGENTS.md §2.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,7 +210,11 @@ impl PowVerifier for DeterministicPowVerifier {
         nonce: u64,
         current_unix_secs: u64,
     ) -> Result<(), CryptoError> {
-        if current_unix_secs > challenge.expires_at_unix_secs {
+        if challenge.difficulty_bits < MIN_POW_DIFFICULTY_BITS
+            || challenge.difficulty_bits > MAX_POW_DIFFICULTY_BITS
+            || challenge.challenge == [0u8; 32]
+            || current_unix_secs > challenge.expires_at_unix_secs
+        {
             return Err(CryptoError::InvalidPowSolution);
         }
         let digest = Self::digest_for_test(&challenge.challenge, nonce);
@@ -252,7 +262,7 @@ mod tests {
     fn pow_verifier_rejects_expired_and_accepts_valid_nonce() {
         let verifier = DeterministicPowVerifier;
         let challenge = PowChallenge {
-            challenge: [0u8; 32],
+            challenge: [0xA5; 32],
             difficulty_bits: 4,
             expires_at_unix_secs: 1_000,
         };
@@ -264,6 +274,47 @@ mod tests {
         assert!(verifier.verify_pow(&challenge, solved_nonce, 500).is_ok());
         assert_eq!(
             verifier.verify_pow(&challenge, solved_nonce, 1_001),
+            Err(CryptoError::InvalidPowSolution)
+        );
+    }
+
+    #[test]
+    fn b0011_pow_verifier_rejects_zero_difficulty_excessive_difficulty_and_zero_challenge() {
+        let verifier = DeterministicPowVerifier;
+        assert_eq!(
+            verifier.verify_pow(
+                &PowChallenge {
+                    challenge: [0xA5; 32],
+                    difficulty_bits: 0,
+                    expires_at_unix_secs: 1_000,
+                },
+                0,
+                500
+            ),
+            Err(CryptoError::InvalidPowSolution)
+        );
+        assert_eq!(
+            verifier.verify_pow(
+                &PowChallenge {
+                    challenge: [0xA5; 32],
+                    difficulty_bits: 33,
+                    expires_at_unix_secs: 1_000,
+                },
+                0,
+                500
+            ),
+            Err(CryptoError::InvalidPowSolution)
+        );
+        assert_eq!(
+            verifier.verify_pow(
+                &PowChallenge {
+                    challenge: [0u8; 32],
+                    difficulty_bits: 4,
+                    expires_at_unix_secs: 1_000,
+                },
+                0,
+                500
+            ),
             Err(CryptoError::InvalidPowSolution)
         );
     }
