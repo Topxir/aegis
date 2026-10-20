@@ -1,0 +1,40 @@
+# Секреты (НИКОГДА не коммитить)
+*.key
+*.pem
+*.p12
+*.jks
+*.keystore
+.env
+.env.*
+secrets/
+*.secret
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Android / Kotlin
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+captures/
+.cxx/
+
+# Node (desktop/web, если появятся)
+node_modules/
+dist/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Данные и логи
+*.db
+*.sqlite
+*.log
