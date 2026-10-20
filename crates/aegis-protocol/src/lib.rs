@@ -1,6 +1,7 @@
 //! `aegis-protocol` — Wire framing with fixed metadata-hiding padding buckets (D-0002),
 //! `LeakGuard` zero-false-positive local DLP scanner (D-0009), and encrypted support tickets (D-0006).
 
+use aegis_crypto::{aead_open, aead_seal, constant_time_eq, hkdf_sha256, sha256, ZeroizingBuffer};
 use core::cmp::Reverse;
 use core::fmt;
 
@@ -633,6 +634,645 @@ impl SupportTicket {
     }
 }
 
+// ============================================================================
+// EXIF / GPS / XMP Media Metadata Stripper (D-0015)
+// ============================================================================
+
+/// Result of stripping EXIF/GPS/XMP/comment metadata from an outgoing media file (D-0015).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanedMedia {
+    /// Sanitized media bytes with all privacy-leaking metadata segments removed.
+    pub bytes: Vec<u8>,
+    /// Number of metadata segments/chunks stripped from the file.
+    pub stripped_segments_count: usize,
+}
+
+/// Strips EXIF, GPS, XMP, ICC, and comment metadata segments from JPEG (`0xFF 0xD8`)
+/// and PNG (`\x89PNG\r\n\x1a\n`) images before encryption so camera serial numbers
+/// and GPS coordinates never leak to contacts (D-0015).
+///
+/// # Errors
+/// Fail-closed: returns [`ProtocolError::MalformedPaddedFrame`] if the media container is empty or truncated.
+pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, ProtocolError> {
+    if media_bytes.is_empty() {
+        return Err(ProtocolError::MalformedPaddedFrame);
+    }
+
+    // 1. JPEG container: SOI = 0xFF 0xD8
+    if media_bytes.len() >= 4 && media_bytes[0] == 0xFF && media_bytes[1] == 0xD8 {
+        let mut out = Vec::with_capacity(media_bytes.len());
+        out.push(0xFF);
+        out.push(0xD8);
+        let mut stripped = 0usize;
+        let mut i = 2usize;
+
+        while i < media_bytes.len() {
+            if media_bytes[i] != 0xFF {
+                return Err(ProtocolError::MalformedPaddedFrame);
+            }
+            while i < media_bytes.len() && media_bytes[i] == 0xFF {
+                i += 1;
+            }
+            if i >= media_bytes.len() {
+                return Err(ProtocolError::MalformedPaddedFrame);
+            }
+            let marker = media_bytes[i];
+            i += 1;
+
+            // EOI (End of Image)
+            if marker == 0xD9 {
+                out.push(0xFF);
+                out.push(0xD9);
+                break;
+            }
+            // Standalone markers without length (RST0..RST7, TEM)
+            if (0xD0..=0xD7).contains(&marker) || marker == 0x01 {
+                out.push(0xFF);
+                out.push(marker);
+                continue;
+            }
+
+            if i + 2 > media_bytes.len() {
+                return Err(ProtocolError::MalformedPaddedFrame);
+            }
+            let seg_len = usize::from(u16::from_be_bytes([media_bytes[i], media_bytes[i + 1]]));
+            if seg_len < 2 || i + seg_len > media_bytes.len() {
+                return Err(ProtocolError::MalformedPaddedFrame);
+            }
+
+            // Strip APP1..APP15 (0xE1..=0xEF: EXIF, GPS, XMP, Adobe, ICC) and COM (0xFE)
+            if (0xE1..=0xEF).contains(&marker) || marker == 0xFE {
+                stripped = stripped.saturating_add(1);
+                i += seg_len;
+                continue;
+            }
+
+            out.push(0xFF);
+            out.push(marker);
+            out.extend_from_slice(&media_bytes[i..i + seg_len]);
+            i += seg_len;
+
+            // SOS (Start of Scan, 0xDA): copy entropy-coded image stream until EOI
+            if marker == 0xDA {
+                out.extend_from_slice(&media_bytes[i..]);
+                break;
+            }
+        }
+
+        return Ok(CleanedMedia {
+            bytes: out,
+            stripped_segments_count: stripped,
+        });
+    }
+
+    // 2. PNG container: \x89PNG\r\n\x1a\n
+    const PNG_SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    if media_bytes.len() >= 8 && media_bytes[0..8] == PNG_SIG {
+        let mut out = Vec::with_capacity(media_bytes.len());
+        out.extend_from_slice(&PNG_SIG);
+        let mut stripped = 0usize;
+        let mut i = 8usize;
+        let mut chunk_index = 0usize;
+        let mut saw_iend = false;
+
+        while i < media_bytes.len() {
+            if i + 12 > media_bytes.len() {
+                return Err(ProtocolError::MalformedPaddedFrame);
+            }
+            let data_len = u32::from_be_bytes([
+                media_bytes[i],
+                media_bytes[i + 1],
+                media_bytes[i + 2],
+                media_bytes[i + 3],
+            ]) as usize;
+            let chunk_type = &media_bytes[i + 4..i + 8];
+            if chunk_index == 0 && chunk_type != b"IHDR" {
+                return Err(ProtocolError::MalformedPaddedFrame);
+            }
+            let total_chunk = 12usize.saturating_add(data_len);
+            if i + total_chunk > media_bytes.len() {
+                return Err(ProtocolError::MalformedPaddedFrame);
+            }
+
+            if matches!(chunk_type, b"eXIf" | b"tEXt" | b"zTXt" | b"iTXt" | b"tIME") {
+                stripped = stripped.saturating_add(1);
+            } else {
+                out.extend_from_slice(&media_bytes[i..i + total_chunk]);
+            }
+            i += total_chunk;
+            chunk_index += 1;
+            if chunk_type == b"IEND" {
+                if data_len != 0 || i != media_bytes.len() {
+                    return Err(ProtocolError::MalformedPaddedFrame);
+                }
+                saw_iend = true;
+                break;
+            }
+        }
+
+        if !saw_iend {
+            return Err(ProtocolError::MalformedPaddedFrame);
+        }
+
+        return Ok(CleanedMedia {
+            bytes: out,
+            stripped_segments_count: stripped,
+        });
+    }
+
+    // Fail-closed: unknown/unhandled media formats are rejected so unparsed metadata (WebP/HEIC/TIFF/PDF) never leaks
+    Err(ProtocolError::MalformedPaddedFrame)
+}
+
+// ============================================================================
+// View-Once Media, Disappearing Timers, and Rich Message Types (D-0015, D-0016)
+// ============================================================================
+
+/// Per-message or per-chat expiration policy (D-0015, PLAN.md §9, §14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageExpirationPolicy {
+    /// Message does not expire automatically.
+    Never,
+    /// Message expires `seconds` after being read (e.g., 5s, 60s, 3600s, 86400s, 604800s).
+    AfterReadSecs(u32),
+    /// View-once payload: immediately zeroized and destroyed after the first read.
+    ViewOnce,
+}
+
+/// Self-destructing container for a `ViewOnce` media or text payload (D-0015).
+#[derive(Debug)]
+pub struct ViewOncePayload {
+    secret_payload: ZeroizingBuffer,
+    consumed: bool,
+}
+
+impl ViewOncePayload {
+    /// Wraps plaintext bytes in a view-once self-destructing container.
+    #[must_use]
+    pub fn new(payload: Vec<u8>) -> Self {
+        Self {
+            secret_payload: ZeroizingBuffer::new(payload),
+            consumed: false,
+        }
+    }
+
+    /// Returns `true` if the payload has already been opened and zeroized.
+    #[must_use]
+    pub fn is_consumed(&self) -> bool {
+        self.consumed
+    }
+}
+
+/// Opens a [`ViewOncePayload`] exactly once, immediately zeroizing the stored buffer so it can
+/// never be read a second time (D-0015).
+///
+/// # Errors
+/// Returns [`ProtocolError::MalformedPaddedFrame`] if the payload was already viewed.
+pub fn open_view_once_payload(
+    container: &mut ViewOncePayload,
+) -> Result<ZeroizingBuffer, ProtocolError> {
+    if container.consumed {
+        return Err(ProtocolError::MalformedPaddedFrame);
+    }
+    let extracted = ZeroizingBuffer::new(container.secret_payload.as_slice().to_vec());
+    container.secret_payload.zeroize();
+    container.consumed = true;
+    Ok(extracted)
+}
+
+/// Rich E2EE message content variants supported by Aegis (PLAN.md §14, D-0015, D-0016).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageContent {
+    /// Standard UTF-8 text message.
+    Text(String),
+    /// Encrypted voice message with waveform preview and optional pitch-shift anonymization (D-0016).
+    VoiceNote {
+        /// Duration in milliseconds.
+        duration_ms: u32,
+        /// Normalized 0..=100 waveform amplitude bars.
+        waveform_peaks: Vec<u8>,
+        /// True if formant/pitch voice anonymization was applied before encoding (D-0016).
+        pitch_anonymized: bool,
+        /// Per-attachment encrypted audio payload.
+        encrypted_audio: Vec<u8>,
+    },
+    /// Circular instant video message ("видео-кружок").
+    VideoCircle {
+        /// Duration in milliseconds.
+        duration_ms: u32,
+        /// Display diameter in pixels.
+        diameter_px: u16,
+        /// Per-attachment encrypted video payload.
+        encrypted_video: Vec<u8>,
+    },
+    /// Separately encrypted file attachment with per-file AEAD key and SHA-256 integrity digest (PLAN.md §9).
+    FileAttachment {
+        /// Sanitized filename without path traversal characters.
+        filename: String,
+        /// MIME type.
+        mime_type: String,
+        /// Unique 32-byte per-file AEAD encryption key.
+        file_key: [u8; 32],
+        /// SHA-256 digest of the encrypted file blob.
+        sha256_digest: [u8; 32],
+        /// Encrypted file size in bytes.
+        size_bytes: u64,
+    },
+    /// Deterministic sticker reference.
+    Sticker {
+        /// Sticker pack identifier.
+        pack_id: [u8; 16],
+        /// Sticker index within the pack.
+        sticker_id: u32,
+    },
+    /// Reaction to an existing message in the chat.
+    Reaction {
+        /// Target message identifier.
+        target_message_id: [u8; 32],
+        /// Reaction emoji.
+        emoji: String,
+    },
+    /// Quoted reply to a specific message.
+    Reply {
+        /// Referenced message identifier.
+        reply_to_message_id: [u8; 32],
+        /// Reply body text.
+        text: String,
+    },
+    /// In-place edit of a previously sent message.
+    Edit {
+        /// Target message identifier.
+        target_message_id: [u8; 32],
+        /// Updated message text.
+        new_text: String,
+    },
+    /// Notification that the conversation's disappearing message timer was updated.
+    DisappearingTimerChange {
+        /// New expiration policy for the chat.
+        new_policy: MessageExpirationPolicy,
+    },
+}
+
+/// High-level E2EE chat message envelope combining rich content and expiration policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessageEnvelope {
+    /// Unique message identifier.
+    pub message_id: [u8; 32],
+    /// Rich message content.
+    pub content: MessageContent,
+    /// Expiration policy (`Never`, `AfterReadSecs`, `ViewOnce`).
+    pub expiration: MessageExpirationPolicy,
+    /// Sender timestamp (Unix seconds).
+    pub sent_at_unix_secs: u64,
+}
+
+// ============================================================================
+// One-Time Invite Links / QR Payloads & 60-Digit Safety Numbers (PLAN.md §7.1)
+// ============================================================================
+
+/// One-time or bounded-use contact invitation payload encoded in `aegis://invite/...` links and QR codes (PLAN.md §7.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactInvite {
+    /// Recipient's federation server endpoint (hostname:port or `.onion`).
+    pub server_endpoint: String,
+    /// Anonymous unidirectional queue identifier for initial handshake delivery.
+    pub recipient_queue_id: [u8; 32],
+    /// Classical X25519 ephemeral prekey.
+    pub x25519_public: [u8; 32],
+    /// SHA-256 commitment of the post-quantum ML-KEM-768 encapsulation key.
+    pub ml_kem_public_hash: [u8; 32],
+    /// Expiration timestamp (Unix seconds).
+    pub expires_at_unix_secs: u64,
+    /// Maximum allowed activations (1 = strict one-time link).
+    pub max_activations: u16,
+    /// If true, this invite may only be scanned via in-person offline QR (PLAN.md §14).
+    pub offline_qr_only: bool,
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(char::from(HEX[usize::from(b >> 4)]));
+        s.push(char::from(HEX[usize::from(b & 0x0F)]));
+    }
+    s
+}
+
+fn hex_decode_32(hex_str: &str) -> Result<[u8; 32], ProtocolError> {
+    if hex_str.len() != 64 {
+        return Err(ProtocolError::MalformedPaddedFrame);
+    }
+    let mut out = [0u8; 32];
+    let bytes = hex_str.as_bytes();
+    for i in 0..32 {
+        let hi = (bytes[i * 2] as char)
+            .to_digit(16)
+            .ok_or(ProtocolError::MalformedPaddedFrame)?;
+        let lo = (bytes[i * 2 + 1] as char)
+            .to_digit(16)
+            .ok_or(ProtocolError::MalformedPaddedFrame)?;
+        out[i] = ((hi << 4) | lo) as u8;
+    }
+    Ok(out)
+}
+
+fn is_valid_invite_endpoint(endpoint: &str) -> bool {
+    if endpoint.is_empty() || endpoint.len() > 253 {
+        return false;
+    }
+    let Some((host, port_str)) = endpoint.rsplit_once(':') else {
+        return false;
+    };
+    if host.is_empty()
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.contains("..")
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return false;
+    }
+    let Ok(port) = port_str.parse::<u16>() else {
+        return false;
+    };
+    port > 0
+}
+
+impl ContactInvite {
+    /// Serializes the invite into a self-contained `aegis://invite/v1/...` URI string.
+    ///
+    /// # Errors
+    /// Returns [`ProtocolError`] if any key/queue is all-zero, `max_activations == 0`, or the server endpoint is empty/invalid.
+    pub fn to_uri(&self) -> Result<String, ProtocolError> {
+        let endpoint = self.server_endpoint.trim();
+        if !is_valid_invite_endpoint(endpoint)
+            || self.recipient_queue_id == [0u8; 32]
+            || self.x25519_public == [0u8; 32]
+            || self.ml_kem_public_hash == [0u8; 32]
+            || self.max_activations == 0
+        {
+            return Err(ProtocolError::InvalidReplyQueueId);
+        }
+        let qr_flag = u8::from(self.offline_qr_only);
+        Ok(format!(
+            "aegis://invite/v1/{}/{}/{}/{}/{}/{}/{}",
+            endpoint,
+            hex_encode(&self.recipient_queue_id),
+            hex_encode(&self.x25519_public),
+            hex_encode(&self.ml_kem_public_hash),
+            self.expires_at_unix_secs,
+            self.max_activations,
+            qr_flag
+        ))
+    }
+
+    /// Parses and validates an `aegis://invite/v1/...` URI string at `current_unix_secs`.
+    ///
+    /// # Errors
+    /// Fail-closed: rejects expired invites, zero keys, or malformed URI segments.
+    pub fn from_uri(uri: &str, current_unix_secs: u64) -> Result<Self, ProtocolError> {
+        let Some(rest) = uri.trim().strip_prefix("aegis://invite/v1/") else {
+            return Err(ProtocolError::MalformedPaddedFrame);
+        };
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() != 7 || !is_valid_invite_endpoint(parts[0]) {
+            return Err(ProtocolError::MalformedPaddedFrame);
+        }
+        let recipient_queue_id = hex_decode_32(parts[1])?;
+        let x25519_public = hex_decode_32(parts[2])?;
+        let ml_kem_public_hash = hex_decode_32(parts[3])?;
+        let expires_at_unix_secs = parts[4]
+            .parse::<u64>()
+            .map_err(|_| ProtocolError::MalformedPaddedFrame)?;
+        let max_activations = parts[5]
+            .parse::<u16>()
+            .map_err(|_| ProtocolError::MalformedPaddedFrame)?;
+        let offline_qr_only = match parts[6] {
+            "0" => false,
+            "1" => true,
+            _ => return Err(ProtocolError::MalformedPaddedFrame),
+        };
+
+        if recipient_queue_id == [0u8; 32]
+            || x25519_public == [0u8; 32]
+            || ml_kem_public_hash == [0u8; 32]
+            || max_activations == 0
+            || current_unix_secs > expires_at_unix_secs
+        {
+            return Err(ProtocolError::InvalidReplyQueueId);
+        }
+
+        Ok(Self {
+            server_endpoint: parts[0].to_owned(),
+            recipient_queue_id,
+            x25519_public,
+            ml_kem_public_hash,
+            expires_at_unix_secs,
+            max_activations,
+            offline_qr_only,
+        })
+    }
+}
+
+/// Computes an order-independent 60-digit numeric Safety Number (12 groups of 5 digits)
+/// from two peers' 32-byte identity public keys for QR/manual verification (PLAN.md §7.1).
+#[must_use]
+pub fn compute_safety_number(our_ik: &[u8; 32], peer_ik: &[u8; 32]) -> String {
+    let (first, second) = if our_ik <= peer_ik {
+        (our_ik, peer_ik)
+    } else {
+        (peer_ik, our_ik)
+    };
+    let mut combined = [0u8; 64];
+    combined[0..32].copy_from_slice(first);
+    combined[32..64].copy_from_slice(second);
+
+    let d1 = sha256(&combined);
+    let d2 = sha256(&d1);
+
+    let mut groups = Vec::with_capacity(12);
+    for i in 0..12 {
+        let src = if i < 6 { &d1 } else { &d2 };
+        let offset = (i % 6) * 5;
+        let chunk = u32::from_be_bytes([
+            src[offset],
+            src[offset + 1],
+            src[offset + 2],
+            src[offset + 3],
+        ]) % 100_000;
+        groups.push(format!("{chunk:05}"));
+    }
+    groups.join(" ")
+}
+
+/// Tamper-detection warning emitted when a contact's identity key changes unexpectedly (PLAN.md §7.1, §14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyChangeWarning {
+    /// Previously pinned 32-byte identity key.
+    pub previous_identity_key: [u8; 32],
+    /// Newly presented 32-byte identity key.
+    pub new_identity_key: [u8; 32],
+}
+
+/// Checks if a peer's identity key changed compared to the pinned key in storage.
+#[must_use]
+pub fn detect_identity_key_change(
+    pinned_key: Option<&[u8; 32]>,
+    presented_key: &[u8; 32],
+) -> Option<KeyChangeWarning> {
+    let prev = pinned_key?;
+    if constant_time_eq(prev, presented_key) {
+        None
+    } else {
+        Some(KeyChangeWarning {
+            previous_identity_key: *prev,
+            new_identity_key: *presented_key,
+        })
+    }
+}
+
+// ============================================================================
+// MLS-Style Epoch Group Chat Session (PLAN.md §5, §13 Phase 6)
+// ============================================================================
+
+/// MLS-style epoch-based E2EE group chat state with automatic key rotation on membership changes.
+#[derive(Debug, Clone)]
+pub struct GroupChatSession {
+    group_id: [u8; 32],
+    epoch: u64,
+    members: Vec<[u8; 32]>,
+    epoch_secret: ZeroizingBuffer,
+}
+
+impl GroupChatSession {
+    /// Creates a new E2EE group session at `epoch = 1` with `creator_ik` as the initial member.
+    ///
+    /// # Errors
+    /// Returns [`ProtocolError::InvalidReplyQueueId`] if `group_id`, `creator_ik`, or `initial_secret` is all-zero.
+    pub fn new(
+        group_id: [u8; 32],
+        creator_ik: [u8; 32],
+        initial_secret: [u8; 32],
+    ) -> Result<Self, ProtocolError> {
+        if group_id == [0u8; 32] || creator_ik == [0u8; 32] || initial_secret == [0u8; 32] {
+            return Err(ProtocolError::InvalidReplyQueueId);
+        }
+        Ok(Self {
+            group_id,
+            epoch: 1,
+            members: vec![creator_ik],
+            epoch_secret: ZeroizingBuffer::new(initial_secret.to_vec()),
+        })
+    }
+
+    /// Returns the current MLS epoch counter.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Returns the current member identity keys.
+    #[must_use]
+    pub fn members(&self) -> &[[u8; 32]] {
+        &self.members
+    }
+
+    fn rotate_epoch_secret(&mut self, update_entropy: &[u8; 32]) -> Result<u64, ProtocolError> {
+        if update_entropy == &[0u8; 32] {
+            return Err(ProtocolError::InvalidReplyQueueId);
+        }
+        self.epoch = self.epoch.saturating_add(1);
+        let mut next_secret = [0u8; 32];
+        hkdf_sha256(
+            self.epoch_secret.as_slice(),
+            update_entropy,
+            &self.epoch.to_be_bytes(),
+            &mut next_secret,
+        )
+        .map_err(|_| ProtocolError::MalformedPaddedFrame)?;
+        self.epoch_secret = ZeroizingBuffer::new(next_secret.to_vec());
+        Ok(self.epoch)
+    }
+
+    /// Adds a member and advances the group to `epoch + 1` with a freshly derived epoch key.
+    ///
+    /// # Errors
+    /// Returns [`ProtocolError`] if `member_ik` or `update_entropy` is all-zero or already a member.
+    pub fn add_member(
+        &mut self,
+        member_ik: [u8; 32],
+        update_entropy: &[u8; 32],
+    ) -> Result<u64, ProtocolError> {
+        if member_ik == [0u8; 32] || self.members.contains(&member_ik) {
+            return Err(ProtocolError::InvalidReplyQueueId);
+        }
+        self.members.push(member_ik);
+        self.rotate_epoch_secret(update_entropy)
+    }
+
+    /// Removes a member and advances the group to `epoch + 1` so the removed member cannot decrypt
+    /// any future messages (post-compromise & forward secrecy).
+    ///
+    /// # Errors
+    /// Returns [`ProtocolError`] if the member is not found or would leave the group empty.
+    pub fn remove_member(
+        &mut self,
+        member_ik: &[u8; 32],
+        update_entropy: &[u8; 32],
+    ) -> Result<u64, ProtocolError> {
+        if self.members.len() <= 1 {
+            return Err(ProtocolError::InvalidReplyQueueId);
+        }
+        let Some(pos) = self.members.iter().position(|m| m == member_ik) else {
+            return Err(ProtocolError::InvalidReplyQueueId);
+        };
+        self.members.remove(pos);
+        self.rotate_epoch_secret(update_entropy)
+    }
+
+    /// Encrypts and pads a group message bound to the current `(group_id, epoch)`.
+    ///
+    /// # Errors
+    /// Propagates any [`ProtocolError`] from encryption or bucket padding.
+    pub fn seal_group_message(
+        &self,
+        nonce: &[u8; 12],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(self.epoch_secret.as_slice());
+        let mut aad = [0u8; 40];
+        aad[0..32].copy_from_slice(&self.group_id);
+        aad[32..40].copy_from_slice(&self.epoch.to_be_bytes());
+        let ct = aead_seal(&key, nonce, &aad, plaintext)
+            .map_err(|_| ProtocolError::MalformedPaddedFrame)?;
+        key.fill(0);
+        pad_frame(&ct)
+    }
+
+    /// Unpads, verifies, and decrypts a group message for the current `(group_id, epoch)`.
+    ///
+    /// # Errors
+    /// Fail-closed: rejects messages from a different epoch or tampered frames.
+    pub fn open_group_message(
+        &self,
+        nonce: &[u8; 12],
+        padded_frame: &[u8],
+    ) -> Result<ZeroizingBuffer, ProtocolError> {
+        let ct = unpad_frame(padded_frame)?;
+        let mut key = [0u8; 32];
+        key.copy_from_slice(self.epoch_secret.as_slice());
+        let mut aad = [0u8; 40];
+        aad[0..32].copy_from_slice(&self.group_id);
+        aad[32..40].copy_from_slice(&self.epoch.to_be_bytes());
+        let res = aead_open(&key, nonce, &aad, ct).map_err(|_| ProtocolError::MalformedPaddedFrame);
+        key.fill(0);
+        res
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -851,5 +1491,138 @@ mod tests {
             valid_payload
         )
         .is_ok());
+    }
+
+    #[test]
+    fn exif_and_gps_metadata_stripper_cleans_jpeg_and_png() {
+        // Synthetic JPEG: SOI (FF D8) + APP1 EXIF/GPS (FF E1 00 08 "Exif\0\0") + COM (FF FE 00 05 "gps")
+        // + DQT (FF DB 00 04 01 02) + SOS (FF DA 00 04 00 00) + scan bytes (AA BB) + EOI (FF D9)
+        let jpeg_with_exif: Vec<u8> = vec![
+            0xFF, 0xD8, // SOI
+            0xFF, 0xE1, 0x00, 0x08, b'E', b'x', b'i', b'f', 0x00, 0x00, // APP1 EXIF
+            0xFF, 0xFE, 0x00, 0x05, b'g', b'p', b's', // COM comment
+            0xFF, 0xDB, 0x00, 0x04, 0x01, 0x02, // DQT kept
+            0xFF, 0xDA, 0x00, 0x04, 0x00, 0x00, // SOS kept
+            0xAA, 0xBB, 0xFF, 0xD9, // scan data + EOI
+        ];
+        let cleaned_jpeg = strip_media_metadata(&jpeg_with_exif).unwrap();
+        assert_eq!(cleaned_jpeg.stripped_segments_count, 2);
+        assert!(!cleaned_jpeg.bytes.windows(4).any(|w| w == b"Exif"));
+        assert!(!cleaned_jpeg.bytes.windows(3).any(|w| w == b"gps"));
+        assert!(cleaned_jpeg.bytes.ends_with(&[0xAA, 0xBB, 0xFF, 0xD9]));
+
+        // Synthetic PNG: Signature + IHDR (4 bytes) + eXIf (4 bytes "GPS!") + IEND (0 bytes)
+        let mut png_with_exif = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        // IHDR chunk: len=4, type=IHDR, data=[1,2,3,4], crc=[0,0,0,0]
+        png_with_exif.extend_from_slice(&4u32.to_be_bytes());
+        png_with_exif.extend_from_slice(b"IHDR");
+        png_with_exif.extend_from_slice(&[1, 2, 3, 4, 0, 0, 0, 0]);
+        // eXIf chunk: len=4, type=eXIf, data=b"GPS!", crc=[0,0,0,0]
+        png_with_exif.extend_from_slice(&4u32.to_be_bytes());
+        png_with_exif.extend_from_slice(b"eXIf");
+        png_with_exif.extend_from_slice(b"GPS!");
+        png_with_exif.extend_from_slice(&[0, 0, 0, 0]);
+        // IEND chunk: len=0, type=IEND, crc=[0,0,0,0]
+        png_with_exif.extend_from_slice(&0u32.to_be_bytes());
+        png_with_exif.extend_from_slice(b"IEND");
+        png_with_exif.extend_from_slice(&[0, 0, 0, 0]);
+
+        let cleaned_png = strip_media_metadata(&png_with_exif).unwrap();
+        assert_eq!(cleaned_png.stripped_segments_count, 1);
+        assert!(!cleaned_png.bytes.windows(4).any(|w| w == b"GPS!"));
+
+        // B-0023: Unknown format (e.g., WebP/TIFF with unparsed EXIF) must fail closed
+        assert_eq!(
+            strip_media_metadata(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+            Err(ProtocolError::MalformedPaddedFrame)
+        );
+    }
+
+    #[test]
+    fn view_once_payload_destroys_secret_after_first_read() {
+        let mut vo = ViewOncePayload::new(b"one-time-photo-bytes".to_vec());
+        assert!(!vo.is_consumed());
+        let first = open_view_once_payload(&mut vo).unwrap();
+        assert_eq!(first.as_slice(), b"one-time-photo-bytes");
+        assert!(vo.is_consumed());
+        // Second read must fail closed
+        assert_eq!(
+            open_view_once_payload(&mut vo),
+            Err(ProtocolError::MalformedPaddedFrame)
+        );
+    }
+
+    #[test]
+    fn contact_invite_uri_safety_number_and_group_chat_epoch_rotation() {
+        let invite = ContactInvite {
+            server_endpoint: "relay.aegis.example:443".to_owned(),
+            recipient_queue_id: [0x11; 32],
+            x25519_public: [0x22; 32],
+            ml_kem_public_hash: [0x33; 32],
+            expires_at_unix_secs: 5_000,
+            max_activations: 1,
+            offline_qr_only: true,
+        };
+        let uri = invite.to_uri().unwrap();
+        assert!(uri.starts_with("aegis://invite/v1/"));
+        let decoded = ContactInvite::from_uri(&uri, 4_000).unwrap();
+        assert_eq!(decoded, invite);
+        // Expired invite rejected
+        assert!(ContactInvite::from_uri(&uri, 5_001).is_err());
+
+        // Order-independent 60-digit safety number (12 groups of 5 digits)
+        let alice_ik = [0xAA; 32];
+        let bob_ik = [0xBB; 32];
+        let sn_ab = compute_safety_number(&alice_ik, &bob_ik);
+        let sn_ba = compute_safety_number(&bob_ik, &alice_ik);
+        assert_eq!(sn_ab, sn_ba);
+        assert_eq!(sn_ab.split(' ').count(), 12);
+        assert!(detect_identity_key_change(Some(&alice_ik), &alice_ik).is_none());
+        assert!(detect_identity_key_change(Some(&alice_ik), &bob_ik).is_some());
+
+        // MLS-style GroupChatSession key rotation on add/remove member
+        let mut group = GroupChatSession::new([0x99; 32], alice_ik, [0x77; 32]).unwrap();
+        assert_eq!(group.epoch(), 1);
+        assert_eq!(group.add_member(bob_ik, &[0x55; 32]).unwrap(), 2);
+
+        let old_group_snapshot = group.clone();
+        let frame_e2 = group
+            .seal_group_message(&[0x01; 12], b"epoch-2-secret")
+            .unwrap();
+        assert_eq!(
+            old_group_snapshot
+                .open_group_message(&[0x01; 12], &frame_e2)
+                .unwrap()
+                .as_slice(),
+            b"epoch-2-secret"
+        );
+
+        // Remove Bob -> rotates to epoch 3; Bob's epoch 2 snapshot cannot decrypt epoch 3 messages!
+        assert_eq!(group.remove_member(&bob_ik, &[0x66; 32]).unwrap(), 3);
+        let frame_e3 = group
+            .seal_group_message(&[0x02; 12], b"epoch-3-post-bob")
+            .unwrap();
+        assert!(old_group_snapshot
+            .open_group_message(&[0x02; 12], &frame_e3)
+            .is_err());
+        assert_eq!(
+            group
+                .open_group_message(&[0x02; 12], &frame_e3)
+                .unwrap()
+                .as_slice(),
+            b"epoch-3-post-bob"
+        );
+
+        // B-0024: ContactInvite rejects control characters, whitespace, and missing/zero port in endpoint
+        let bad_invite = ContactInvite {
+            server_endpoint: "bad host:0".to_owned(),
+            ..invite
+        };
+        assert!(bad_invite.to_uri().is_err());
+        assert!(ContactInvite::from_uri(
+            "aegis://invite/v1/bad\nhost:443/1111111111111111111111111111111111111111111111111111111111111111/2222222222222222222222222222222222222222222222222222222222222222/3333333333333333333333333333333333333333333333333333333333333333/5000/1/1",
+            4_000
+        )
+        .is_err());
     }
 }

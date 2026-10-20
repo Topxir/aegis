@@ -88,3 +88,10 @@ version = "0.1.0"
 dependencies = [
  "aegis-protocol",
 ]
+
+[[package]]
+name = "aegis-ui-desktop"
+version = "0.1.0"
+dependencies = [
+ "aegis-ffi",
+]

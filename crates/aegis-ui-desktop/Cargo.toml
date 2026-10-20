@@ -1,0 +1,20 @@
+[package]
+name = "aegis-ui-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "aegis_ui_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aegis-desktop"
+path = "src/main.rs"
+
+[dependencies]
+aegis-ffi = { path = "../aegis-ffi" }
+
+[lints]
+workspace = true

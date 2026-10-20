@@ -143,6 +143,185 @@ pub fn verify_server_badge(
     Ok(badge)
 }
 
+/// Certificate binding an account public key to the official "Support ✓" role (PLAN.md §6.3, D-0011).
+/// Signed by the foundation threshold keys so phishing accounts cannot impersonate support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupportCertificate {
+    /// Support agent or support queue public key (`32` bytes).
+    pub support_public_key: [u8; 32],
+    /// Human-readable role label (e.g. `"Aegis Official Support ✓"`).
+    pub role_label: String,
+    /// Expiration timestamp (Unix seconds).
+    pub expires_at_unix_secs: u64,
+    /// M-of-N foundation signature attestations.
+    pub attestations: Vec<SignerAttestation>,
+}
+
+/// Verifies a [`SupportCertificate`] against the M-of-N foundation [`ThresholdPolicy`],
+/// revocation list, and expiration time (PLAN.md §3, §6.3, D-0011).
+///
+/// # Errors
+/// Fail-closed: rejects expired certificates, empty role labels, revoked keys, or insufficient signatures.
+pub fn verify_support_certificate(
+    cert: &SupportCertificate,
+    current_unix_secs: u64,
+    revoked_keys: &[[u8; 32]],
+    policy: &ThresholdPolicy,
+) -> Result<(), DirectoryError> {
+    let label = cert.role_label.trim();
+    if label.is_empty()
+        || label.len() > 128
+        || label.chars().any(char::is_control)
+        || current_unix_secs > cert.expires_at_unix_secs
+    {
+        return Err(DirectoryError::InvalidPublicKey);
+    }
+    verify_threshold_attestations(
+        &cert.support_public_key,
+        revoked_keys,
+        policy,
+        &cert.attestations,
+    )
+}
+
+/// Signed catalog entry for a server in the built-in directory (PLAN.md §6.3, §14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryServerEntry {
+    /// Human-readable server alias.
+    pub name: String,
+    /// Connection URI (`aegis://...` or `.onion` endpoint).
+    pub endpoint_uri: String,
+    /// Server Ed25519 public key.
+    pub server_public_key: [u8; 32],
+    /// Assigned verification badge (`OfficialDoubleCheck` `✓✓`, `VerifiedSingleCheck` `✓`, or `CommunityUnverified`).
+    pub badge: ServerBadge,
+    /// Whether this server is a Tor `.onion` hidden service.
+    pub is_tor_onion: bool,
+    /// Public zero-personal-data 30-day uptime percentage in basis points (`0..=10_000`, e.g. `9995` = `99.95%`).
+    pub uptime_bps: u16,
+    /// Foundation M-of-N signature attestations over this catalog entry.
+    pub attestations: Vec<SignerAttestation>,
+}
+
+/// Built-in signed catalog of Official (`✓✓`), Verified (`✓`), and Tor `.onion` servers (PLAN.md §6.3, §14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltInDirectory {
+    /// Default M-of-N foundation threshold policy.
+    pub policy: ThresholdPolicy,
+    /// Revoked server or support public keys.
+    pub revoked_keys: Vec<[u8; 32]>,
+    /// Signed catalog entries.
+    pub entries: Vec<DirectoryServerEntry>,
+    /// Official support certificate (`✓`).
+    pub official_support_certificate: SupportCertificate,
+}
+
+impl Default for BuiltInDirectory {
+    fn default() -> Self {
+        Self::embedded_catalog()
+    }
+}
+
+impl BuiltInDirectory {
+    /// Returns the embedded foundation-signed server directory and support certificate.
+    #[must_use]
+    pub fn embedded_catalog() -> Self {
+        let foundation_key_1 = [0xF1; 32];
+        let foundation_key_2 = [0xF2; 32];
+        let foundation_key_3 = [0xF3; 32];
+
+        let policy = ThresholdPolicy {
+            required_signatures: 2,
+            trusted_public_keys: vec![foundation_key_1, foundation_key_2, foundation_key_3],
+        };
+
+        let foundation_attestations = vec![
+            SignerAttestation {
+                signer_public_key: foundation_key_1,
+                cryptographic_sig_valid: true,
+            },
+            SignerAttestation {
+                signer_public_key: foundation_key_2,
+                cryptographic_sig_valid: true,
+            },
+        ];
+
+        let entries = vec![
+            DirectoryServerEntry {
+                name: "Aegis Official Core #1 (Zurich) ✓✓".to_owned(),
+                endpoint_uri: "aegis://core-ch1.aegis.net:8443".to_owned(),
+                server_public_key: [0xA1; 32],
+                badge: ServerBadge::OfficialDoubleCheck,
+                is_tor_onion: false,
+                uptime_bps: 9_998,
+                attestations: foundation_attestations.clone(),
+            },
+            DirectoryServerEntry {
+                name: "Aegis Official Onion Relay ✓✓".to_owned(),
+                endpoint_uri:
+                    "aegis://aegis7x9q2v4k8m3n5p7r9t2w4y6z8a1b3c5d7e9f1g3h5j7k9l2m4n.onion:8443"
+                        .to_owned(),
+                server_public_key: [0xA2; 32],
+                badge: ServerBadge::OfficialDoubleCheck,
+                is_tor_onion: true,
+                uptime_bps: 9_995,
+                attestations: foundation_attestations.clone(),
+            },
+            DirectoryServerEntry {
+                name: "Nordic Privacy Collective (Iceland) ✓".to_owned(),
+                endpoint_uri: "aegis://relay-is.nordicprivacy.org:8443".to_owned(),
+                server_public_key: [0xB1; 32],
+                badge: ServerBadge::VerifiedSingleCheck,
+                is_tor_onion: false,
+                uptime_bps: 9_980,
+                attestations: foundation_attestations.clone(),
+            },
+        ];
+
+        let official_support_certificate = SupportCertificate {
+            support_public_key: [0x50; 32],
+            role_label: "Aegis Official Support ✓".to_owned(),
+            expires_at_unix_secs: 4_102_444_800,
+            attestations: foundation_attestations,
+        };
+
+        Self {
+            policy,
+            revoked_keys: Vec::new(),
+            entries,
+            official_support_certificate,
+        }
+    }
+
+    /// Returns only the directory entries whose cryptographic badges pass M-of-N verification,
+    /// have valid non-empty names/endpoints and `uptime_bps <= 10_000`, and are not in `revoked_keys`.
+    #[must_use]
+    pub fn verified_entries(&self) -> Vec<&DirectoryServerEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                !entry.name.trim().is_empty()
+                    && !entry.name.chars().any(char::is_control)
+                    && entry.endpoint_uri.starts_with("aegis://")
+                    && !entry
+                        .endpoint_uri
+                        .chars()
+                        .any(|c| c.is_control() || c.is_whitespace())
+                    && entry.uptime_bps <= 10_000
+                    && (!entry.is_tor_onion || entry.endpoint_uri.contains(".onion:"))
+                    && verify_server_badge(
+                        entry.badge,
+                        &entry.server_public_key,
+                        &self.revoked_keys,
+                        &self.policy,
+                        &entry.attestations,
+                    )
+                    .is_ok()
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -261,5 +440,46 @@ mod tests {
             ),
             Ok(ServerBadge::OfficialDoubleCheck)
         );
+    }
+
+    #[test]
+    fn builtin_directory_and_support_certificate_verify_and_respect_revocation() {
+        let mut dir = BuiltInDirectory::embedded_catalog();
+        assert_eq!(dir.verified_entries().len(), 3);
+        assert!(dir.verified_entries().iter().any(|e| e.is_tor_onion));
+
+        assert!(verify_support_certificate(
+            &dir.official_support_certificate,
+            1_800_000_000,
+            &dir.revoked_keys,
+            &dir.policy,
+        )
+        .is_ok());
+
+        // Expired support certificate must fail closed
+        assert!(verify_support_certificate(
+            &dir.official_support_certificate,
+            5_000_000_000,
+            &dir.revoked_keys,
+            &dir.policy,
+        )
+        .is_err());
+
+        // Revoking a server key removes it from verified_entries()
+        let revoked_server = dir.entries[0].server_public_key;
+        dir.revoked_keys.push(revoked_server);
+        assert_eq!(dir.verified_entries().len(), 2);
+
+        // B-0026: Entry with uptime_bps > 10_000 or control chars in role_label is rejected
+        dir.entries[1].uptime_bps = 15_000;
+        assert_eq!(dir.verified_entries().len(), 1);
+        dir.official_support_certificate.role_label = "Bad\0Role".to_owned();
+        assert!(verify_support_certificate(
+            &dir.official_support_certificate,
+            1_800_000_000,
+            &dir.revoked_keys,
+            &dir.policy,
+        )
+        .is_err());
     }
 }

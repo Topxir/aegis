@@ -1,8 +1,11 @@
 //! `aegis-storage` — Local encrypted database abstraction, schema migrations,
 //! and emergency crypto-erase / wipe guarantees (PLAN.md §9, D-0012).
 
-use aegis_crypto::ZeroizingBuffer;
+use aegis_crypto::{aead_open, aead_seal, hkdf_sha256, sha256, ZeroizingBuffer};
 use core::fmt;
+
+/// Magic header prefix for encrypted local backups (`AEGISBAK`).
+pub const BACKUP_MAGIC: &[u8; 8] = b"AEGISBAK";
 
 /// Current local storage schema version (`AGENTS.md §4`).
 pub const SCHEMA_VERSION: u32 = 1;
@@ -101,6 +104,548 @@ impl EncryptedStoreHeader {
     }
 }
 
+/// Contact record stored inside [`EncryptedVaultDb`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredContact {
+    /// Pairwise anonymous contact identifier.
+    pub contact_id: [u8; 32],
+    /// Local E2EE display name.
+    pub display_name: String,
+    /// Peer's Ed25519/X25519 identity public key.
+    pub peer_identity_key: [u8; 32],
+    /// Outgoing unidirectional queue ID on peer's server.
+    pub send_queue_id: [u8; 32],
+    /// Incoming unidirectional queue ID on our server.
+    pub recv_queue_id: [u8; 32],
+    /// Whether the contact's safety number was verified via QR/out-of-band.
+    pub verified: bool,
+}
+
+/// Chat message record stored inside [`EncryptedVaultDb`] with optional disappearing TTL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMessage {
+    /// Unique message identifier.
+    pub message_id: [u8; 32],
+    /// Conversation / chat identifier.
+    pub chat_id: [u8; 32],
+    /// True if authored by the local user.
+    pub sender_is_self: bool,
+    /// Decrypted message text (encrypted at rest when serialized in the vault).
+    pub plaintext_body: String,
+    /// Creation timestamp (Unix seconds).
+    pub created_at_unix_secs: u64,
+    /// Optional expiration timestamp (Unix seconds) for disappearing messages.
+    pub expires_at_unix_secs: Option<u64>,
+}
+
+/// Device-only encrypted note ("Избранное" / Favorites, PLAN.md §14).
+/// Never leaves the device over the network unless explicitly exported in an encrypted backup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptedNote {
+    /// Unique note identifier.
+    pub note_id: [u8; 32],
+    /// Note title.
+    pub title: String,
+    /// Note body content.
+    pub body: String,
+    /// Last updated timestamp (Unix seconds).
+    pub updated_at_unix_secs: u64,
+}
+
+/// Encrypted local database (`EncryptedVaultDb`) backed by `DB_KEY` and ChaCha20-Poly1305 AEAD.
+/// Supports contacts, disappearing messages, local full-text search, device-only notes,
+/// encrypted backup export/import, and instant `crypto_wipe` (PLAN.md §9, §14).
+#[derive(Debug)]
+pub struct EncryptedVaultDb {
+    header: EncryptedStoreHeader,
+    record_counter: u64,
+    kv_ciphertext: Vec<(String, [u8; 12], Vec<u8>)>,
+    contacts: Vec<StoredContact>,
+    messages: Vec<StoredMessage>,
+    notes: Vec<EncryptedNote>,
+}
+
+impl EncryptedVaultDb {
+    /// Opens a new `EncryptedVaultDb` with the specified `schema_version` and 32-byte `db_key`.
+    ///
+    /// # Errors
+    /// Propagates any [`StorageError`] from [`EncryptedStoreHeader::open`].
+    pub fn open(schema_version: u32, db_key: Vec<u8>) -> Result<Self, StorageError> {
+        let header = EncryptedStoreHeader::open(schema_version, db_key)?;
+        Ok(Self {
+            header,
+            record_counter: 0,
+            kv_ciphertext: Vec::new(),
+            contacts: Vec::new(),
+            messages: Vec::new(),
+            notes: Vec::new(),
+        })
+    }
+
+    fn ensure_unlocked(&self) -> Result<[u8; 32], StorageError> {
+        if self.header.is_wiped() {
+            return Err(StorageError::StorageLockedOrWiped);
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(self.header.master_db_key.as_slice());
+        Ok(key)
+    }
+
+    fn next_nonce(&mut self, domain: &[u8]) -> [u8; 12] {
+        self.record_counter = self.record_counter.saturating_add(1);
+        let digest = sha256(domain);
+        let mut nonce = [0u8; 12];
+        nonce[0..4].copy_from_slice(&digest[0..4]);
+        nonce[4..12].copy_from_slice(&self.record_counter.to_be_bytes());
+        nonce
+    }
+
+    /// Performs an emergency cryptographic wipe, zeroizing `DB_KEY` and purging all in-memory tables.
+    pub fn crypto_wipe(&mut self) {
+        self.header.crypto_wipe();
+        self.kv_ciphertext.clear();
+        self.contacts.clear();
+        self.messages.clear();
+        self.notes.clear();
+    }
+
+    /// Returns `true` if the database has been cryptographically wiped.
+    #[must_use]
+    pub fn is_wiped(&self) -> bool {
+        self.header.is_wiped()
+    }
+
+    /// Encrypts and stores an arbitrary key-value record under `DB_KEY`.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::StorageLockedOrWiped`] if wiped.
+    pub fn put_encrypted_record(
+        &mut self,
+        key: &str,
+        plaintext: &[u8],
+    ) -> Result<(), StorageError> {
+        let mut db_key = self.ensure_unlocked()?;
+        let nonce = self.next_nonce(key.as_bytes());
+        let ct = aead_seal(&db_key, &nonce, key.as_bytes(), plaintext)
+            .map_err(|_| StorageError::CorruptedRecord)?;
+        db_key.fill(0);
+
+        if let Some(slot) = self.kv_ciphertext.iter_mut().find(|(k, _, _)| k == key) {
+            slot.1 = nonce;
+            slot.2 = ct;
+        } else {
+            self.kv_ciphertext.push((key.to_owned(), nonce, ct));
+        }
+        Ok(())
+    }
+
+    /// Decrypts and authenticates a stored key-value record.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::NotFound`] if missing, or [`StorageError::CorruptedRecord`] if tampered.
+    pub fn get_encrypted_record(&self, key: &str) -> Result<ZeroizingBuffer, StorageError> {
+        let mut db_key = self.ensure_unlocked()?;
+        let Some((_, nonce, ct)) = self.kv_ciphertext.iter().find(|(k, _, _)| k == key) else {
+            db_key.fill(0);
+            return Err(StorageError::NotFound);
+        };
+        let res = aead_open(&db_key, nonce, key.as_bytes(), ct)
+            .map_err(|_| StorageError::CorruptedRecord);
+        db_key.fill(0);
+        res
+    }
+
+    /// Inserts or updates a contact in the encrypted store.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::StorageLockedOrWiped`] if wiped.
+    pub fn upsert_contact(&mut self, contact: StoredContact) -> Result<(), StorageError> {
+        let _ = self.ensure_unlocked()?;
+        if let Some(existing) = self
+            .contacts
+            .iter_mut()
+            .find(|c| c.contact_id == contact.contact_id)
+        {
+            *existing = contact;
+        } else {
+            self.contacts.push(contact);
+        }
+        Ok(())
+    }
+
+    /// Lists all contacts in the encrypted store.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::StorageLockedOrWiped`] if wiped.
+    pub fn list_contacts(&self) -> Result<&[StoredContact], StorageError> {
+        let _ = self.ensure_unlocked()?;
+        Ok(&self.contacts)
+    }
+
+    /// Stores a chat message (with optional disappearing expiration timestamp).
+    ///
+    /// # Errors
+    /// Returns [`StorageError::StorageLockedOrWiped`] if wiped.
+    pub fn insert_message(&mut self, message: StoredMessage) -> Result<(), StorageError> {
+        let _ = self.ensure_unlocked()?;
+        if let Some(existing) = self
+            .messages
+            .iter_mut()
+            .find(|m| m.message_id == message.message_id)
+        {
+            *existing = message;
+        } else {
+            self.messages.push(message);
+        }
+        Ok(())
+    }
+
+    /// Purges all disappearing messages whose `expires_at_unix_secs <= now_unix_secs` (PLAN.md §9, §14).
+    /// Returns the number of deleted messages.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::StorageLockedOrWiped`] if wiped.
+    pub fn purge_expired_messages(&mut self, now_unix_secs: u64) -> Result<usize, StorageError> {
+        let _ = self.ensure_unlocked()?;
+        let before = self.messages.len();
+        self.messages
+            .retain(|m| m.expires_at_unix_secs.is_none_or(|exp| exp > now_unix_secs));
+        Ok(before.saturating_sub(self.messages.len()))
+    }
+
+    /// Performs local case-insensitive full-text search across non-expired messages (PLAN.md §14).
+    ///
+    /// # Errors
+    /// Returns [`StorageError::StorageLockedOrWiped`] if wiped.
+    pub fn search_messages_locally(
+        &self,
+        query: &str,
+        now_unix_secs: u64,
+    ) -> Result<Vec<StoredMessage>, StorageError> {
+        let _ = self.ensure_unlocked()?;
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .messages
+            .iter()
+            .filter(|m| {
+                m.expires_at_unix_secs.is_none_or(|exp| exp > now_unix_secs)
+                    && m.plaintext_body.to_lowercase().contains(&q)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Saves a device-only encrypted note ("Избранное", PLAN.md §14).
+    ///
+    /// # Errors
+    /// Returns [`StorageError::StorageLockedOrWiped`] if wiped.
+    pub fn put_local_note(&mut self, note: EncryptedNote) -> Result<(), StorageError> {
+        let _ = self.ensure_unlocked()?;
+        if let Some(existing) = self.notes.iter_mut().find(|n| n.note_id == note.note_id) {
+            *existing = note;
+        } else {
+            self.notes.push(note);
+        }
+        Ok(())
+    }
+
+    /// Lists all device-only notes ("Избранное").
+    ///
+    /// # Errors
+    /// Returns [`StorageError::StorageLockedOrWiped`] if wiped.
+    pub fn list_local_notes(&self) -> Result<&[EncryptedNote], StorageError> {
+        let _ = self.ensure_unlocked()?;
+        Ok(&self.notes)
+    }
+
+    /// Exports an AEAD-authenticated encrypted backup (`AEGISBAK` magic + `SCHEMA_VERSION` + nonce + ciphertext)
+    /// for migration to a new device (PLAN.md §14).
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the database is wiped or `backup_key` is all-zero.
+    pub fn export_encrypted_backup(
+        &self,
+        backup_key: &[u8; 32],
+        nonce: &[u8; 12],
+    ) -> Result<Vec<u8>, StorageError> {
+        let _ = self.ensure_unlocked()?;
+        if backup_key == &[0u8; 32] {
+            return Err(StorageError::InvalidKeyMaterial);
+        }
+
+        let mut payload = Vec::new();
+        let contacts_count = u32::try_from(self.contacts.len()).unwrap_or(0);
+        payload.extend_from_slice(&contacts_count.to_be_bytes());
+        for c in self.contacts.iter().take(contacts_count as usize) {
+            payload.extend_from_slice(&c.contact_id);
+            payload.extend_from_slice(&c.peer_identity_key);
+            payload.extend_from_slice(&c.send_queue_id);
+            payload.extend_from_slice(&c.recv_queue_id);
+            payload.push(u8::from(c.verified));
+            let name_bytes = c.display_name.as_bytes();
+            payload.extend_from_slice(&(name_bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(name_bytes);
+        }
+
+        let notes_count = u32::try_from(self.notes.len()).unwrap_or(0);
+        payload.extend_from_slice(&notes_count.to_be_bytes());
+        for note in self.notes.iter().take(notes_count as usize) {
+            payload.extend_from_slice(&note.note_id);
+            payload.extend_from_slice(&note.updated_at_unix_secs.to_be_bytes());
+            let title_bytes = note.title.as_bytes();
+            let body_bytes = note.body.as_bytes();
+            payload.extend_from_slice(&(title_bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(title_bytes);
+            payload.extend_from_slice(&(body_bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(body_bytes);
+        }
+
+        let msg_count = u32::try_from(self.messages.len()).unwrap_or(0);
+        payload.extend_from_slice(&msg_count.to_be_bytes());
+        for m in self.messages.iter().take(msg_count as usize) {
+            payload.extend_from_slice(&m.message_id);
+            payload.extend_from_slice(&m.chat_id);
+            payload.push(u8::from(m.sender_is_self));
+            payload.extend_from_slice(&m.created_at_unix_secs.to_be_bytes());
+            match m.expires_at_unix_secs {
+                Some(exp) => {
+                    payload.push(1);
+                    payload.extend_from_slice(&exp.to_be_bytes());
+                }
+                None => payload.push(0),
+            }
+            let body_bytes = m.plaintext_body.as_bytes();
+            payload.extend_from_slice(&(body_bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(body_bytes);
+        }
+
+        let mut derived_key = [0u8; 32];
+        hkdf_sha256(
+            BACKUP_MAGIC,
+            backup_key,
+            &SCHEMA_VERSION.to_be_bytes(),
+            &mut derived_key,
+        )
+        .map_err(|_| StorageError::InvalidKeyMaterial)?;
+
+        let mut header_aad = Vec::with_capacity(12);
+        header_aad.extend_from_slice(BACKUP_MAGIC);
+        header_aad.extend_from_slice(&SCHEMA_VERSION.to_be_bytes());
+
+        let ct = aead_seal(&derived_key, nonce, &header_aad, &payload)
+            .map_err(|_| StorageError::CorruptedRecord)?;
+        derived_key.fill(0);
+
+        let mut out = Vec::with_capacity(24 + ct.len());
+        out.extend_from_slice(&header_aad);
+        out.extend_from_slice(nonce);
+        out.extend_from_slice(&ct);
+        Ok(out)
+    }
+
+    /// Imports and verifies an encrypted backup (`AEGISBAK`), restoring notes and messages.
+    ///
+    /// # Errors
+    /// Fail-closed: returns [`StorageError`] if the magic header, schema version, or AEAD tag is invalid.
+    pub fn import_encrypted_backup(
+        backup_bytes: &[u8],
+        backup_key: &[u8; 32],
+        db_key: Vec<u8>,
+    ) -> Result<Self, StorageError> {
+        if backup_key == &[0u8; 32] {
+            return Err(StorageError::InvalidKeyMaterial);
+        }
+        if backup_bytes.len() < 24 + 16 || &backup_bytes[0..8] != BACKUP_MAGIC {
+            return Err(StorageError::CorruptedRecord);
+        }
+        let found_version = u32::from_be_bytes([
+            backup_bytes[8],
+            backup_bytes[9],
+            backup_bytes[10],
+            backup_bytes[11],
+        ]);
+        if found_version != SCHEMA_VERSION {
+            return Err(StorageError::IncompatibleSchema {
+                found: found_version,
+                expected: SCHEMA_VERSION,
+            });
+        }
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&backup_bytes[12..24]);
+
+        let mut derived_key = [0u8; 32];
+        hkdf_sha256(
+            BACKUP_MAGIC,
+            backup_key,
+            &SCHEMA_VERSION.to_be_bytes(),
+            &mut derived_key,
+        )
+        .map_err(|_| StorageError::InvalidKeyMaterial)?;
+
+        let decrypted = aead_open(
+            &derived_key,
+            &nonce,
+            &backup_bytes[0..12],
+            &backup_bytes[24..],
+        )
+        .map_err(|_| StorageError::CorruptedRecord)?;
+        derived_key.fill(0);
+
+        let mut db = Self::open(SCHEMA_VERSION, db_key)?;
+        let bytes = decrypted.as_slice();
+        let mut cursor = 0usize;
+
+        let read_u32 = |buf: &[u8], cur: &mut usize| -> Result<u32, StorageError> {
+            if *cur + 4 > buf.len() {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let val = u32::from_be_bytes([buf[*cur], buf[*cur + 1], buf[*cur + 2], buf[*cur + 3]]);
+            *cur += 4;
+            Ok(val)
+        };
+        let read_u64 = |buf: &[u8], cur: &mut usize| -> Result<u64, StorageError> {
+            if *cur + 8 > buf.len() {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let val = u64::from_be_bytes([
+                buf[*cur],
+                buf[*cur + 1],
+                buf[*cur + 2],
+                buf[*cur + 3],
+                buf[*cur + 4],
+                buf[*cur + 5],
+                buf[*cur + 6],
+                buf[*cur + 7],
+            ]);
+            *cur += 8;
+            Ok(val)
+        };
+
+        let contacts_count = read_u32(bytes, &mut cursor)? as usize;
+        for _ in 0..contacts_count {
+            if cursor + 129 > bytes.len() {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let mut contact_id = [0u8; 32];
+            contact_id.copy_from_slice(&bytes[cursor..cursor + 32]);
+            cursor += 32;
+            let mut peer_identity_key = [0u8; 32];
+            peer_identity_key.copy_from_slice(&bytes[cursor..cursor + 32]);
+            cursor += 32;
+            let mut send_queue_id = [0u8; 32];
+            send_queue_id.copy_from_slice(&bytes[cursor..cursor + 32]);
+            cursor += 32;
+            let mut recv_queue_id = [0u8; 32];
+            recv_queue_id.copy_from_slice(&bytes[cursor..cursor + 32]);
+            cursor += 32;
+            if bytes[cursor] > 1 {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let verified = bytes[cursor] == 1;
+            cursor += 1;
+            let name_len = read_u32(bytes, &mut cursor)? as usize;
+            if cursor + name_len > bytes.len() {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let display_name = String::from_utf8(bytes[cursor..cursor + name_len].to_vec())
+                .map_err(|_| StorageError::CorruptedRecord)?;
+            cursor += name_len;
+            db.upsert_contact(StoredContact {
+                contact_id,
+                display_name,
+                peer_identity_key,
+                send_queue_id,
+                recv_queue_id,
+                verified,
+            })?;
+        }
+
+        let notes_count = read_u32(bytes, &mut cursor)? as usize;
+        for _ in 0..notes_count {
+            if cursor + 32 > bytes.len() {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let mut note_id = [0u8; 32];
+            note_id.copy_from_slice(&bytes[cursor..cursor + 32]);
+            cursor += 32;
+            let updated_at_unix_secs = read_u64(bytes, &mut cursor)?;
+            let title_len = read_u32(bytes, &mut cursor)? as usize;
+            if cursor + title_len > bytes.len() {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let title = String::from_utf8(bytes[cursor..cursor + title_len].to_vec())
+                .map_err(|_| StorageError::CorruptedRecord)?;
+            cursor += title_len;
+            let body_len = read_u32(bytes, &mut cursor)? as usize;
+            if cursor + body_len > bytes.len() {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let body = String::from_utf8(bytes[cursor..cursor + body_len].to_vec())
+                .map_err(|_| StorageError::CorruptedRecord)?;
+            cursor += body_len;
+            db.put_local_note(EncryptedNote {
+                note_id,
+                title,
+                body,
+                updated_at_unix_secs,
+            })?;
+        }
+
+        let msg_count = read_u32(bytes, &mut cursor)? as usize;
+        for _ in 0..msg_count {
+            if cursor + 65 > bytes.len() {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let mut message_id = [0u8; 32];
+            message_id.copy_from_slice(&bytes[cursor..cursor + 32]);
+            cursor += 32;
+            let mut chat_id = [0u8; 32];
+            chat_id.copy_from_slice(&bytes[cursor..cursor + 32]);
+            cursor += 32;
+            if bytes[cursor] > 1 {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let sender_is_self = bytes[cursor] == 1;
+            cursor += 1;
+            let created_at_unix_secs = read_u64(bytes, &mut cursor)?;
+            if cursor >= bytes.len() || bytes[cursor] > 1 {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let has_exp = bytes[cursor] == 1;
+            cursor += 1;
+            let expires_at_unix_secs = if has_exp {
+                Some(read_u64(bytes, &mut cursor)?)
+            } else {
+                None
+            };
+            let body_len = read_u32(bytes, &mut cursor)? as usize;
+            if cursor + body_len > bytes.len() {
+                return Err(StorageError::CorruptedRecord);
+            }
+            let plaintext_body = String::from_utf8(bytes[cursor..cursor + body_len].to_vec())
+                .map_err(|_| StorageError::CorruptedRecord)?;
+            cursor += body_len;
+            db.insert_message(StoredMessage {
+                message_id,
+                chat_id,
+                sender_is_self,
+                plaintext_body,
+                created_at_unix_secs,
+                expires_at_unix_secs,
+            })?;
+        }
+
+        if cursor != bytes.len() {
+            return Err(StorageError::CorruptedRecord);
+        }
+
+        Ok(db)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -141,6 +686,120 @@ mod tests {
         assert_eq!(
             EncryptedStoreHeader::open(SCHEMA_VERSION, vec![0u8; 32]).unwrap_err(),
             StorageError::InvalidKeyMaterial
+        );
+    }
+
+    #[test]
+    fn encrypted_vault_db_kv_contacts_notes_disappearing_search_and_backup() {
+        let mut db = EncryptedVaultDb::open(SCHEMA_VERSION, vec![0x77; 32]).unwrap();
+
+        // 1. Encrypted KV store
+        db.put_encrypted_record("session_ratchet", b"secret-ratchet-state")
+            .unwrap();
+        let rec = db.get_encrypted_record("session_ratchet").unwrap();
+        assert_eq!(rec.as_slice(), b"secret-ratchet-state");
+
+        // 2. Local device-only notes ("Избранное")
+        db.put_local_note(EncryptedNote {
+            note_id: [0x01; 32],
+            title: "Избранное".to_owned(),
+            body: "Offline recovery backup location".to_owned(),
+            updated_at_unix_secs: 1_000,
+        })
+        .unwrap();
+        assert_eq!(db.list_local_notes().unwrap().len(), 1);
+
+        // 3. Disappearing messages + local full-text search
+        db.insert_message(StoredMessage {
+            message_id: [0x10; 32],
+            chat_id: [0xCC; 32],
+            sender_is_self: true,
+            plaintext_body: "Meet me at the northern glacier".to_owned(),
+            created_at_unix_secs: 1_000,
+            expires_at_unix_secs: Some(1_060),
+        })
+        .unwrap();
+        db.insert_message(StoredMessage {
+            message_id: [0x20; 32],
+            chat_id: [0xCC; 32],
+            sender_is_self: false,
+            plaintext_body: "Permanent glacier coordinates".to_owned(),
+            created_at_unix_secs: 1_005,
+            expires_at_unix_secs: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.search_messages_locally("glacier", 1_030).unwrap().len(),
+            2
+        );
+        // After t=1_060, the first message expires and is excluded from search and purged
+        assert_eq!(
+            db.search_messages_locally("glacier", 1_061).unwrap().len(),
+            1
+        );
+        assert_eq!(db.purge_expired_messages(1_061).unwrap(), 1);
+
+        // 4. Encrypted backup export/import + tamper rejection
+        let backup_key = [0xAB; 32];
+        let backup_bytes = db
+            .export_encrypted_backup(&backup_key, &[0x12; 12])
+            .unwrap();
+        assert_eq!(&backup_bytes[0..8], BACKUP_MAGIC);
+
+        let mut tampered = backup_bytes.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xFF;
+        assert_eq!(
+            EncryptedVaultDb::import_encrypted_backup(&tampered, &backup_key, vec![0x88; 32])
+                .unwrap_err(),
+            StorageError::CorruptedRecord
+        );
+
+        let restored =
+            EncryptedVaultDb::import_encrypted_backup(&backup_bytes, &backup_key, vec![0x88; 32])
+                .unwrap();
+        assert_eq!(restored.list_local_notes().unwrap().len(), 1);
+        assert_eq!(
+            restored
+                .search_messages_locally("Permanent", 2_000)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 5. Crypto wipe locks all operations
+        db.crypto_wipe();
+        assert!(db.is_wiped());
+        assert_eq!(
+            db.list_local_notes(),
+            Err(StorageError::StorageLockedOrWiped)
+        );
+    }
+
+    #[test]
+    fn b0022_backup_roundtrips_contacts_and_rejects_trailing_garbage() {
+        let mut db = EncryptedVaultDb::open(SCHEMA_VERSION, vec![0x77; 32]).unwrap();
+        db.upsert_contact(StoredContact {
+            contact_id: [0x11; 32],
+            display_name: "nordic-falcon".to_owned(),
+            peer_identity_key: [0x22; 32],
+            send_queue_id: [0x33; 32],
+            recv_queue_id: [0x44; 32],
+            verified: true,
+        })
+        .unwrap();
+
+        let backup_key = [0xAB; 32];
+        let nonce = [0x12; 12];
+        let backup = db.export_encrypted_backup(&backup_key, &nonce).unwrap();
+        let restored =
+            EncryptedVaultDb::import_encrypted_backup(&backup, &backup_key, vec![0x88; 32])
+                .unwrap();
+        assert_eq!(restored.list_contacts().unwrap().len(), 1);
+        assert_eq!(
+            restored.list_contacts().unwrap()[0].display_name,
+            "nordic-falcon"
         );
     }
 }

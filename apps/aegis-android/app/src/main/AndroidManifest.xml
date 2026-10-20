@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.aegis.messenger">
+
+    <!-- Network & QUIC/WebSocket transport permissions (No GPS / Location / Contacts permissions!) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+        AGENTS.md §2.4: Cloud / ADB plaintext backups strictly disabled.
+        Only encrypted Aegis exports (.aegisbak) are allowed.
+    -->
+    <application
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/no_backup_rules"
+        android:hasFragileUserData="false"
+        android:label="Aegis"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="false">
+
+        <!-- Primary Aegis Launcher Activity -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:excludeFromRecents="false"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Stealth App Disguise Alias (PLAN.md §14):
+            When Calculator Disguise is toggled in Settings, MainActivity disables its default launcher
+            component and enables CalculatorDisguiseAlias so the app appears as "Инженерный калькулятор"
+            on the Android home screen.
+        -->
+        <activity-alias
+            android:name="org.aegis.messenger.CalculatorDisguiseAlias"
+            android:enabled="false"
+            android:exported="true"
+            android:label="Калькулятор"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!--
+            Zero-GMS Persistent Foreground Service for Low-Latency Calls & Messages,
+            Cover Traffic dummy frames, and UnifiedPush wakeup (PLAN.md §7.2).
+        -->
+        <service
+            android:name=".service.AegisBackgroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse|microphone|camera|mediaProjection">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Zero-knowledge E2EE persistent QUIC/Tor message and voice call transport without Google Play Services" />
+        </service>
+
+    </application>
+</manifest>

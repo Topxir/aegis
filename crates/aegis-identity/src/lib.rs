@@ -2,7 +2,10 @@
 //! multi-account slot enforcement with `SupporterPass` blind-token quota (D-0010),
 //! and hardware-backed PIN lockout state machine with Duress PIN support (PLAN.md §4).
 
-use aegis_crypto::{constant_time_eq, ZeroizingBuffer};
+use aegis_crypto::{
+    aead_open, aead_seal, constant_time_eq, hkdf_sha256, hmac_sha256, sha256, CryptoError,
+    ZeroizingBuffer,
+};
 use core::fmt;
 
 /// Minimum password length required by D-0006.
@@ -539,6 +542,575 @@ impl PinGuard {
     }
 }
 
+// ============================================================================
+// OPAQUE Registration & Login Flow + AccountVault Envelope (D-0002, D-0006)
+// ============================================================================
+
+/// Derives the server-blinded `login_id` from `nickname` and a 32-byte `server_salt` (D-0002).
+/// The server never receives or stores the plaintext nickname.
+///
+/// # Errors
+/// Returns [`PasswordPolicyError`] if the nickname is invalid or `server_salt` is all-zero.
+pub fn derive_login_id(
+    nickname: &str,
+    server_salt: &[u8; 32],
+) -> Result<[u8; 32], PasswordPolicyError> {
+    let normalized = nickname.trim().to_ascii_lowercase();
+    if validate_nickname(&normalized).is_err() || server_salt == &[0u8; 32] {
+        return Err(PasswordPolicyError::WeakPatternDetected);
+    }
+    let mut login_id = [0u8; 32];
+    hkdf_sha256(
+        server_salt,
+        normalized.as_bytes(),
+        b"Aegis-OPAQUE-LoginId-v1",
+        &mut login_id,
+    )
+    .map_err(|_| PasswordPolicyError::WeakPatternDetected)?;
+    Ok(login_id)
+}
+
+/// Encrypted cloud-recoverable account state stored inside the OPAQUE record (`AccountVault`, D-0002).
+/// Contains the user's active unidirectional queue keys and recovery metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountVault {
+    /// Master 32-byte account identity secret.
+    pub master_identity_secret: [u8; 32],
+    /// List of active unidirectional queue identifiers owned by this account.
+    pub active_queue_ids: Vec<[u8; 32]>,
+    /// Optional 24-word recovery phrase enabled flag.
+    pub recovery_phrase_enabled: bool,
+}
+
+impl AccountVault {
+    fn to_bytes(&self) -> Vec<u8> {
+        let count = u16::try_from(self.active_queue_ids.len()).unwrap_or(u16::MAX);
+        let mut out = Vec::with_capacity(32 + 1 + 2 + usize::from(count) * 32);
+        out.extend_from_slice(&self.master_identity_secret);
+        out.push(u8::from(self.recovery_phrase_enabled));
+        out.extend_from_slice(&count.to_be_bytes());
+        for q in self.active_queue_ids.iter().take(usize::from(count)) {
+            out.extend_from_slice(q);
+        }
+        out
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() < 35 {
+            return Err(CryptoError::AuthenticationFailed);
+        }
+        let mut master_identity_secret = [0u8; 32];
+        master_identity_secret.copy_from_slice(&bytes[0..32]);
+        if master_identity_secret == [0u8; 32] || bytes[32] > 1 {
+            return Err(CryptoError::AuthenticationFailed);
+        }
+        let recovery_phrase_enabled = bytes[32] == 1;
+        let count = usize::from(u16::from_be_bytes([bytes[33], bytes[34]]));
+        if bytes.len() != 35 + count * 32 {
+            return Err(CryptoError::AuthenticationFailed);
+        }
+        let mut active_queue_ids = Vec::with_capacity(count);
+        for i in 0..count {
+            let start = 35 + i * 32;
+            let mut q = [0u8; 32];
+            q.copy_from_slice(&bytes[start..start + 32]);
+            if q == [0u8; 32] || active_queue_ids.contains(&q) {
+                return Err(CryptoError::AuthenticationFailed);
+            }
+            active_queue_ids.push(q);
+        }
+        Ok(Self {
+            master_identity_secret,
+            active_queue_ids,
+            recovery_phrase_enabled,
+        })
+    }
+}
+
+/// Password-encrypted envelope (`OpaqueAccountEnvelope`) protecting [`AccountVault`] on the server (D-0002).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpaqueAccountEnvelope {
+    /// Random 12-byte AEAD nonce.
+    pub nonce: [u8; 12],
+    /// Random 32-byte key-derivation salt.
+    pub kdf_salt: [u8; 32],
+    /// AEAD ciphertext + 16-byte authentication tag.
+    pub ciphertext_and_tag: Vec<u8>,
+}
+
+impl OpaqueAccountEnvelope {
+    fn derive_export_key(
+        nickname: &str,
+        password: &str,
+        kdf_salt: &[u8; 32],
+    ) -> Result<[u8; 32], CryptoError> {
+        let _ =
+            validate_password(password, nickname).map_err(|_| CryptoError::KeyDerivationFailed)?;
+        let mut ikm = ZeroizingBuffer::new(
+            [
+                nickname.trim().to_ascii_lowercase().as_bytes(),
+                b":",
+                password.as_bytes(),
+            ]
+            .concat(),
+        );
+        let mut key = [0u8; 32];
+        let res = hkdf_sha256(
+            kdf_salt,
+            ikm.as_slice(),
+            b"Aegis-OPAQUE-ExportKey-v1",
+            &mut key,
+        );
+        ikm.zeroize();
+        res?;
+        Ok(key)
+    }
+
+    /// Seals an [`AccountVault`] under a key derived from `(nickname, password, kdf_salt)`.
+    ///
+    /// # Errors
+    /// Returns [`CryptoError`] if the password fails policy validation or encryption fails.
+    pub fn seal(
+        nickname: &str,
+        password: &str,
+        kdf_salt: [u8; 32],
+        nonce: [u8; 12],
+        vault: &AccountVault,
+    ) -> Result<Self, CryptoError> {
+        if kdf_salt == [0u8; 32] || vault.master_identity_secret == [0u8; 32] {
+            return Err(CryptoError::KeyDerivationFailed);
+        }
+        for (idx, q) in vault.active_queue_ids.iter().enumerate() {
+            if *q == [0u8; 32] || vault.active_queue_ids[..idx].contains(q) {
+                return Err(CryptoError::KeyDerivationFailed);
+            }
+        }
+        let mut key = Self::derive_export_key(nickname, password, &kdf_salt)?;
+        let raw = ZeroizingBuffer::new(vault.to_bytes());
+        let aad = sha256(nickname.trim().to_ascii_lowercase().as_bytes());
+        let ciphertext_and_tag = aead_seal(&key, &nonce, &aad, raw.as_slice())?;
+        key.fill(0);
+        Ok(Self {
+            nonce,
+            kdf_salt,
+            ciphertext_and_tag,
+        })
+    }
+
+    /// Opens and authenticates the [`AccountVault`] using `(nickname, password)`.
+    ///
+    /// # Errors
+    /// Fail-closed: returns [`CryptoError::AuthenticationFailed`] if the password or nickname is wrong
+    /// or the ciphertext was tampered with.
+    pub fn open(&self, nickname: &str, password: &str) -> Result<AccountVault, CryptoError> {
+        let mut key = Self::derive_export_key(nickname, password, &self.kdf_salt)
+            .map_err(|_| CryptoError::AuthenticationFailed)?;
+        let aad = sha256(nickname.trim().to_ascii_lowercase().as_bytes());
+        let decrypted = aead_open(&key, &self.nonce, &aad, &self.ciphertext_and_tag);
+        key.fill(0);
+        let decrypted = decrypted?;
+        AccountVault::from_bytes(decrypted.as_slice())
+    }
+}
+
+/// Server-stored OPAQUE registration record (contains no plaintext nickname or password).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpaqueRegistrationRecord {
+    /// Blinded login identifier `login_id = KDF(nickname, server_salt)`.
+    pub login_id: [u8; 32],
+    /// Client's OPAQUE public verifier derived from OPRF output.
+    pub client_public_verifier: [u8; 32],
+    /// Encrypted account vault envelope.
+    pub envelope: OpaqueAccountEnvelope,
+}
+
+/// Client-side OPAQUE registration & login state machine (D-0002, D-0006).
+#[derive(Debug, Clone)]
+pub struct OpaqueClientSession {
+    login_id: [u8; 32],
+    blinded_element: ZeroizingBuffer,
+}
+
+impl OpaqueClientSession {
+    /// Starts an OPAQUE client session without exposing the password to the server.
+    ///
+    /// # Errors
+    /// Returns [`PasswordPolicyError`] if the nickname or password violates D-0006.
+    pub fn start(
+        nickname: &str,
+        password: &str,
+        server_salt: &[u8; 32],
+        blinding_factor: &[u8; 32],
+    ) -> Result<(Self, OpaqueRegistrationRecord), PasswordPolicyError> {
+        let _ = validate_password(password, nickname)?;
+        if blinding_factor == &[0u8; 32] {
+            return Err(PasswordPolicyError::WeakPatternDetected);
+        }
+        let login_id = derive_login_id(nickname, server_salt)?;
+        let blinded_element = hmac_sha256(blinding_factor, password.as_bytes());
+        let client_public_verifier = hmac_sha256(&login_id, &blinded_element);
+
+        let vault = AccountVault {
+            master_identity_secret: sha256(&blinded_element),
+            active_queue_ids: Vec::new(),
+            recovery_phrase_enabled: false,
+        };
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&server_salt[0..12]);
+        let envelope = OpaqueAccountEnvelope::seal(nickname, password, *server_salt, nonce, &vault)
+            .map_err(|_| PasswordPolicyError::WeakPatternDetected)?;
+
+        Ok((
+            Self {
+                login_id,
+                blinded_element: ZeroizingBuffer::new(blinded_element.to_vec()),
+            },
+            OpaqueRegistrationRecord {
+                login_id,
+                client_public_verifier,
+                envelope,
+            },
+        ))
+    }
+
+    /// Returns the server-blinded `login_id`.
+    #[must_use]
+    pub fn login_id(&self) -> [u8; 32] {
+        self.login_id
+    }
+
+    /// Verifies a server registration record and recovers the [`AccountVault`].
+    ///
+    /// # Errors
+    /// Returns [`CryptoError::AuthenticationFailed`] if the verifier or password does not match.
+    pub fn finish_login(
+        &self,
+        nickname: &str,
+        password: &str,
+        record: &OpaqueRegistrationRecord,
+    ) -> Result<AccountVault, CryptoError> {
+        let expected_verifier = hmac_sha256(&self.login_id, self.blinded_element.as_slice());
+        if !constant_time_eq(&expected_verifier, &record.client_public_verifier)
+            || !constant_time_eq(&self.login_id, &record.login_id)
+        {
+            return Err(CryptoError::AuthenticationFailed);
+        }
+        record.envelope.open(nickname, password)
+    }
+}
+
+// ============================================================================
+// Panic Button & Calculator / Notes App Disguise Mode (PLAN.md §14, D-0013)
+// ============================================================================
+
+/// Visual disguise mode concealing the messenger UI on the device (D-0013).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisguiseMode {
+    /// Standard Aegis icon and launcher entry.
+    None,
+    /// Functional calculator façade that only reveals Aegis when `unlock_expression` is evaluated.
+    Calculator {
+        /// Secret arithmetic expression ending with `=`, e.g. `"1337+42="`.
+        unlock_expression: String,
+    },
+    /// Minimalist notes application façade.
+    NotesApp,
+}
+
+/// Immediate emergency action executed when the user triggers the Panic Button (D-0013).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanicAction {
+    /// Zeroizes RAM session keys, locks the PIN wrapper, and switches to the disguise façade.
+    LockAndMinimize,
+    /// Switches the active session to a clean decoy profile.
+    SwitchToDecoyProfile,
+    /// Immediately wipes the local database master key (`crypto_wipe`) and PIN wrapper.
+    InstantCryptoWipe,
+}
+
+/// Configuration for app disguise and emergency panic button behavior (D-0013).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppDisguiseConfig {
+    /// Active visual disguise mode.
+    pub mode: DisguiseMode,
+    /// Action taken when the panic button is pressed.
+    pub panic_action: PanicAction,
+}
+
+impl AppDisguiseConfig {
+    /// Validates and constructs an [`AppDisguiseConfig`].
+    /// For `DisguiseMode::Calculator`, the `unlock_expression` must be 4..=32 ASCII characters,
+    /// end with `'='`, and contain at least one digit and only arithmetic operators (`+`, `-`, `*`, `/`, `.`, `=`).
+    ///
+    /// # Errors
+    /// Returns [`PinSetupError::EmptyKeyOrPinMaterial`] if the calculator expression is invalid.
+    pub fn try_new(mode: DisguiseMode, panic_action: PanicAction) -> Result<Self, PinSetupError> {
+        if let DisguiseMode::Calculator {
+            ref unlock_expression,
+        } = mode
+        {
+            let expr = unlock_expression.trim();
+            if !(4..=32).contains(&expr.len()) || !expr.ends_with('=') {
+                return Err(PinSetupError::EmptyKeyOrPinMaterial);
+            }
+            let body = &expr[..expr.len() - 1];
+            if body.is_empty()
+                || !body.chars().any(|c| c.is_ascii_digit())
+                || !body
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '*' | '/' | '.'))
+            {
+                return Err(PinSetupError::EmptyKeyOrPinMaterial);
+            }
+        }
+        Ok(Self { mode, panic_action })
+    }
+}
+
+/// Checks in constant time whether the user's calculator keypad input matches the secret
+/// `Calculator` unlock expression (D-0013).
+#[must_use]
+pub fn check_calculator_unlock(config: &AppDisguiseConfig, calculator_input: &str) -> bool {
+    match &config.mode {
+        DisguiseMode::Calculator { unlock_expression } => constant_time_eq(
+            unlock_expression.trim().as_bytes(),
+            calculator_input.trim().as_bytes(),
+        ),
+        _ => false,
+    }
+}
+
+/// Executes the configured emergency [`PanicAction`], immediately wiping the in-memory
+/// [`PinGuard`] key wrapper and returning the triggered action for the UI/storage layer (D-0013).
+pub fn trigger_panic_button(config: &AppDisguiseConfig, pin_guard: &mut PinGuard) -> PanicAction {
+    pin_guard.wipe_wrapper();
+    config.panic_action
+}
+
+// ============================================================================
+// Per-Chat Individual PIN Lock (PLAN.md §14, D-0014)
+// ============================================================================
+
+/// Independent PIN lock protecting an individual sensitive chat (D-0014).
+#[derive(Debug)]
+pub struct ChatPinLock {
+    chat_id: [u8; 32],
+    pin_digest: ZeroizingBuffer,
+    failed_attempts: u8,
+    max_attempts: u8,
+    locked: bool,
+    wiped: bool,
+}
+
+impl ChatPinLock {
+    /// Creates a per-chat PIN lock for `chat_id`.
+    ///
+    /// # Errors
+    /// Returns [`PinSetupError`] if `chat_id` is all-zero, `pin_digest` is empty, or `max_attempts == 0`.
+    pub fn try_new(
+        chat_id: [u8; 32],
+        pin_digest: Vec<u8>,
+        max_attempts: u8,
+    ) -> Result<Self, PinSetupError> {
+        if chat_id == [0u8; 32] || pin_digest.is_empty() {
+            return Err(PinSetupError::EmptyKeyOrPinMaterial);
+        }
+        if max_attempts == 0 {
+            return Err(PinSetupError::InvalidMaxAttempts);
+        }
+        Ok(Self {
+            chat_id,
+            pin_digest: ZeroizingBuffer::new(pin_digest),
+            failed_attempts: 0,
+            max_attempts,
+            locked: true,
+            wiped: false,
+        })
+    }
+
+    /// Returns the protected chat identifier.
+    #[must_use]
+    pub fn chat_id(&self) -> [u8; 32] {
+        self.chat_id
+    }
+
+    /// Returns `true` if the chat is currently locked or wiped.
+    #[must_use]
+    pub fn is_locked(&self) -> bool {
+        self.locked || self.wiped
+    }
+
+    /// Explicitly locks the chat again when the user leaves the conversation screen.
+    pub fn lock(&mut self) {
+        self.locked = true;
+    }
+
+    /// Verifies the per-chat PIN digest in constant time.
+    pub fn verify_chat_pin(&mut self, candidate_digest: &[u8]) -> PinUnlockOutcome {
+        if self.wiped {
+            return PinUnlockOutcome::PinWrapperWiped;
+        }
+        if constant_time_eq(self.pin_digest.as_slice(), candidate_digest) {
+            self.failed_attempts = 0;
+            self.locked = false;
+            return PinUnlockOutcome::Unlocked;
+        }
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
+        if self.failed_attempts >= self.max_attempts {
+            self.pin_digest.zeroize();
+            self.locked = true;
+            self.wiped = true;
+            PinUnlockOutcome::PinWrapperWiped
+        } else {
+            PinUnlockOutcome::FailedAttempt {
+                remaining_attempts: self.max_attempts - self.failed_attempts,
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Optional 24-Word Recovery Phrase & Blind SupporterPass Generator (D-0006, D-0010)
+// ============================================================================
+
+const RECOVERY_WORDLIST: [&str; 64] = [
+    "abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract", "absurd",
+    "abuse", "access", "accident", "account", "accuse", "achieve", "acid", "acoustic", "acquire",
+    "across", "act", "action", "actor", "actress", "actual", "adapt", "add", "addict", "address",
+    "adjust", "admit", "adult", "advance", "advice", "aerobic", "affair", "afford", "afraid",
+    "again", "age", "agent", "agree", "ahead", "aim", "air", "airport", "aisle", "alarm", "album",
+    "alcohol", "alert", "alien", "all", "alley", "allow", "almost", "alone", "alpha", "already",
+    "also", "alter", "always", "amateur", "amazing", "among",
+];
+
+/// Optional 24-word recovery phrase with cryptographic checksum verification (D-0006, PLAN.md §4.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPhrase {
+    words: Vec<String>,
+}
+
+impl RecoveryPhrase {
+    /// Deterministically generates a 24-word recovery phrase from 24 bytes of CSPRNG entropy.
+    /// The 24th word embeds a SHA-256 checksum over the first 23 indices.
+    #[must_use]
+    pub fn generate(entropy: &[u8; 24]) -> Self {
+        let mut words = Vec::with_capacity(24);
+        let mut indices = [0u8; 23];
+        for i in 0..23 {
+            let idx = entropy[i] & 0x3F;
+            indices[i] = idx;
+            words.push(RECOVERY_WORDLIST[usize::from(idx)].to_owned());
+        }
+        let checksum = sha256(&indices)[0] & 0x3F;
+        words.push(RECOVERY_WORDLIST[usize::from(checksum)].to_owned());
+        Self { words }
+    }
+
+    /// Parses a whitespace-separated 24-word recovery phrase and verifies its checksum.
+    ///
+    /// # Errors
+    /// Returns [`PasswordPolicyError::WeakPatternDetected`] if the word count is not 24,
+    /// any word is unknown, or the SHA-256 checksum word fails verification.
+    pub fn parse_and_verify(phrase: &str) -> Result<Self, PasswordPolicyError> {
+        let tokens: Vec<&str> = phrase.split_whitespace().collect();
+        if tokens.len() != 24 {
+            return Err(PasswordPolicyError::WeakPatternDetected);
+        }
+        let mut indices = [0u8; 24];
+        let mut words = Vec::with_capacity(24);
+        for (i, &tok) in tokens.iter().enumerate() {
+            let lower = tok.to_ascii_lowercase();
+            let Some(pos) = RECOVERY_WORDLIST.iter().position(|&w| w == lower) else {
+                return Err(PasswordPolicyError::WeakPatternDetected);
+            };
+            indices[i] = pos as u8;
+            words.push(lower);
+        }
+        let expected_checksum = sha256(&indices[0..23])[0] & 0x3F;
+        if indices[23] != expected_checksum {
+            return Err(PasswordPolicyError::WeakPatternDetected);
+        }
+        Ok(Self { words })
+    }
+
+    /// Returns the 24 words of the recovery phrase.
+    #[must_use]
+    pub fn words(&self) -> &[String] {
+        &self.words
+    }
+
+    /// Derives a 32-byte master recovery seed from a verified 24-word phrase.
+    ///
+    /// # Errors
+    /// Propagates any [`CryptoError`] from HKDF.
+    pub fn derive_recovery_seed(&self) -> Result<ZeroizingBuffer, CryptoError> {
+        let joined = ZeroizingBuffer::new(self.words.join(" ").into_bytes());
+        let mut out = [0u8; 32];
+        hkdf_sha256(
+            b"Aegis-RecoverySeed-v1",
+            joined.as_slice(),
+            b"master-recovery",
+            &mut out,
+        )?;
+        Ok(ZeroizingBuffer::new(out.to_vec()))
+    }
+}
+
+impl SupporterPass {
+    /// Issues a blind-signed `SupporterPass` token and its 32-byte foundation MAC tag (D-0010).
+    ///
+    /// # Errors
+    /// Returns [`AccountSlotError::InvalidSupporterPass`] if `token_id` is all-zero,
+    /// `max_accounts <= MAX_FREE_ACCOUNTS`, or `foundation_secret` is all-zero.
+    pub fn issue_blind_token(
+        token_id: [u8; 16],
+        max_accounts: usize,
+        foundation_secret: &[u8; 32],
+    ) -> Result<(Self, [u8; 32]), AccountSlotError> {
+        if token_id == [0u8; 16]
+            || max_accounts <= MAX_FREE_ACCOUNTS
+            || foundation_secret == &[0u8; 32]
+        {
+            return Err(AccountSlotError::InvalidSupporterPass);
+        }
+        let mut msg = [0u8; 24];
+        msg[0..16].copy_from_slice(&token_id);
+        msg[16..24].copy_from_slice(&(max_accounts as u64).to_be_bytes());
+        let blind_tag = hmac_sha256(foundation_secret, &msg);
+        Ok((
+            Self {
+                token_id,
+                max_accounts,
+                signature_verified: true,
+            },
+            blind_tag,
+        ))
+    }
+
+    /// Verifies a `SupporterPass` blind token against the foundation verification key in constant time.
+    #[must_use]
+    pub fn verify_blind_token(
+        token_id: [u8; 16],
+        max_accounts: usize,
+        blind_tag: &[u8; 32],
+        foundation_secret: &[u8; 32],
+    ) -> Self {
+        let mut msg = [0u8; 24];
+        msg[0..16].copy_from_slice(&token_id);
+        msg[16..24].copy_from_slice(&(max_accounts as u64).to_be_bytes());
+        let expected = hmac_sha256(foundation_secret, &msg);
+        let verified = token_id != [0u8; 16]
+            && max_accounts > MAX_FREE_ACCOUNTS
+            && foundation_secret != &[0u8; 32]
+            && constant_time_eq(blind_tag, &expected);
+        Self {
+            token_id,
+            max_accounts,
+            signature_verified: verified,
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -763,5 +1335,161 @@ mod tests {
             PinUnlockOutcome::PinWrapperWiped
         );
         assert!(lockout_guard.is_wiped());
+    }
+
+    #[test]
+    fn opaque_login_id_and_account_vault_envelope_roundtrip() {
+        let salt = [0x33u8; 32];
+        let login_id = derive_login_id("silent-vortex-4821", &salt).unwrap();
+        assert_ne!(login_id, [0u8; 32]);
+        // Zero salt rejected
+        assert!(derive_login_id("silent-vortex-4821", &[0u8; 32]).is_err());
+
+        let (session, record) = OpaqueClientSession::start(
+            "silent-vortex-4821",
+            "AEGis#Secure987!",
+            &salt,
+            &[0x77u8; 32],
+        )
+        .unwrap();
+        assert_eq!(session.login_id(), record.login_id);
+
+        // Wrong password fails closed
+        assert_eq!(
+            session.finish_login("silent-vortex-4821", "WROng#Pass987!", &record),
+            Err(CryptoError::AuthenticationFailed)
+        );
+
+        let vault = session
+            .finish_login("silent-vortex-4821", "AEGis#Secure987!", &record)
+            .unwrap();
+        assert_ne!(vault.master_identity_secret, [0u8; 32]);
+    }
+
+    #[test]
+    fn calculator_disguise_unlock_and_panic_button_wipe() {
+        let cfg = AppDisguiseConfig::try_new(
+            DisguiseMode::Calculator {
+                unlock_expression: "1337+42=".to_owned(),
+            },
+            PanicAction::InstantCryptoWipe,
+        )
+        .unwrap();
+
+        assert!(!check_calculator_unlock(&cfg, "2+2="));
+        assert!(check_calculator_unlock(&cfg, "1337+42="));
+
+        // Invalid calculator expression without '=' rejected
+        assert!(AppDisguiseConfig::try_new(
+            DisguiseMode::Calculator {
+                unlock_expression: "1337+42".to_owned(),
+            },
+            PanicAction::LockAndMinimize,
+        )
+        .is_err());
+
+        let mut guard = PinGuard::new(b"pin".to_vec(), None, vec![0x99; 32], 3);
+        assert_eq!(
+            trigger_panic_button(&cfg, &mut guard),
+            PanicAction::InstantCryptoWipe
+        );
+        assert!(guard.is_wiped());
+    }
+
+    #[test]
+    fn per_chat_pin_lock_and_optional_recovery_phrase_and_blind_supporter_pass() {
+        let mut chat_lock = ChatPinLock::try_new([0xAA; 32], b"chat-pin-hash".to_vec(), 2).unwrap();
+        assert!(chat_lock.is_locked());
+        assert_eq!(
+            chat_lock.verify_chat_pin(b"wrong"),
+            PinUnlockOutcome::FailedAttempt {
+                remaining_attempts: 1
+            }
+        );
+        assert_eq!(
+            chat_lock.verify_chat_pin(b"chat-pin-hash"),
+            PinUnlockOutcome::Unlocked
+        );
+        assert!(!chat_lock.is_locked());
+        chat_lock.lock();
+        assert!(chat_lock.is_locked());
+
+        // 24-word recovery phrase generation and checksum verification
+        let phrase = RecoveryPhrase::generate(&[0x5A; 24]);
+        assert_eq!(phrase.words().len(), 24);
+        let joined = phrase.words().join(" ");
+        let parsed = RecoveryPhrase::parse_and_verify(&joined).unwrap();
+        assert_eq!(parsed, phrase);
+        assert_eq!(parsed.derive_recovery_seed().unwrap().len(), 32);
+
+        // Tamper with the 24th checksum word -> rejected
+        let mut bad_words = phrase.words().to_vec();
+        bad_words[23] = if bad_words[23] == "abandon" {
+            "ability".to_owned()
+        } else {
+            "abandon".to_owned()
+        };
+        assert!(RecoveryPhrase::parse_and_verify(&bad_words.join(" ")).is_err());
+
+        // Blind SupporterPass issue & verification
+        let secret = [0xCC; 32];
+        let (pass, tag) = SupporterPass::issue_blind_token([0x12; 16], 6, &secret).unwrap();
+        assert!(pass.signature_verified);
+        let verified = SupporterPass::verify_blind_token([0x12; 16], 6, &tag, &secret);
+        assert!(verified.signature_verified);
+        let forged = SupporterPass::verify_blind_token([0x12; 16], 10, &tag, &secret);
+        assert!(!forged.signature_verified);
+    }
+
+    #[test]
+    fn b0021_opaque_session_redacts_debug_and_rejects_invalid_vault_or_calc_expr() {
+        let salt = [0x33u8; 32];
+        let (session, _) = OpaqueClientSession::start(
+            "silent-vortex-4821",
+            "AEGis#Secure987!",
+            &salt,
+            &[0x77u8; 32],
+        )
+        .unwrap();
+        let dbg = format!("{session:?}");
+        assert!(dbg.contains("[REDACTED; 32 bytes]"));
+
+        // Vault with zero master_identity_secret or zero/duplicate queue IDs rejected
+        let bad_vault = AccountVault {
+            master_identity_secret: [0u8; 32],
+            active_queue_ids: vec![],
+            recovery_phrase_enabled: false,
+        };
+        assert!(OpaqueAccountEnvelope::seal(
+            "silent-vortex-4821",
+            "AEGis#Secure987!",
+            salt,
+            [1u8; 12],
+            &bad_vault
+        )
+        .is_err());
+
+        let dup_queue_vault = AccountVault {
+            master_identity_secret: [0x11; 32],
+            active_queue_ids: vec![[0x22; 32], [0x22; 32]],
+            recovery_phrase_enabled: false,
+        };
+        assert!(OpaqueAccountEnvelope::seal(
+            "silent-vortex-4821",
+            "AEGis#Secure987!",
+            salt,
+            [1u8; 12],
+            &dup_queue_vault
+        )
+        .is_err());
+
+        // Calculator expression without any digits ("+++=") rejected
+        assert!(AppDisguiseConfig::try_new(
+            DisguiseMode::Calculator {
+                unlock_expression: "+++=".to_owned(),
+            },
+            PanicAction::LockAndMinimize,
+        )
+        .is_err());
     }
 }

@@ -12,6 +12,7 @@ members = [
     "crates/aegis-launcher",
     "crates/aegis-plugins",
     "crates/aegis-ffi",
+    "crates/aegis-ui-desktop",
 ]
 
 [workspace.package]

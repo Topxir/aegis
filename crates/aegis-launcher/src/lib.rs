@@ -29,6 +29,8 @@ pub enum LauncherError {
     InvalidBindPort,
     /// Queue TTL in days must be in `1..=365`.
     InsecureQueueTtl { days: u16 },
+    /// Server public key fingerprint is all-zero or hostname is malformed.
+    InvalidServerIdentity,
 }
 
 impl fmt::Display for LauncherError {
@@ -40,6 +42,9 @@ impl fmt::Display for LauncherError {
                     f,
                     "queue TTL must be between 1 and {MAX_QUEUE_TTL_DAYS} days, got {days}"
                 )
+            }
+            Self::InvalidServerIdentity => {
+                write!(f, "server public key or hostname is invalid")
             }
         }
     }
@@ -100,6 +105,178 @@ pub fn validate_launch_config(
     })
 }
 
+fn hex_encode_32(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for &b in bytes {
+        let _ = fmt::Write::write_fmt(&mut out, format_args!("{b:02x}"));
+    }
+    out
+}
+
+fn is_safe_host(host: &str) -> bool {
+    let trimmed = host.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 253
+        && !trimmed.starts_with('.')
+        && !trimmed.ends_with('.')
+        && !trimmed.starts_with('-')
+        && !trimmed.ends_with('-')
+        && !trimmed.contains("..")
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+}
+
+/// Formats a canonical `aegis://server/<host>:<port>?fp=<hex_key>` invite URI with pinned server key (PLAN.md §6.2).
+///
+/// # Errors
+/// Rejects all-zero server keys, port `0`, or unsafe host strings.
+pub fn format_server_invite_uri(
+    host: &str,
+    port: u16,
+    server_public_key: &[u8; 32],
+) -> Result<String, LauncherError> {
+    if port == 0 {
+        return Err(LauncherError::InvalidBindPort);
+    }
+    if *server_public_key == [0u8; 32] || !is_safe_host(host) {
+        return Err(LauncherError::InvalidServerIdentity);
+    }
+    let fp = hex_encode_32(server_public_key);
+    Ok(format!("aegis://server/{}:{port}?fp={fp}", host.trim()))
+}
+
+/// Generates a reproducible, hardened `docker-compose.yml` for 1-click VPS deployment (PLAN.md §6.2).
+/// Includes pinned server public key fingerprint, `read_only: true`, `no-new-privileges`, and `aegis://server/...` invite URI.
+///
+/// # Errors
+/// Rejects invalid plans (`bind_port == 0`), all-zero server keys, or unsafe hostnames.
+pub fn generate_docker_compose(
+    plan: &LaunchPlan,
+    public_host: &str,
+    server_public_key: &[u8; 32],
+) -> Result<String, LauncherError> {
+    if plan.queue_ttl_secs == 0 || plan.queue_ttl_secs > u64::from(MAX_QUEUE_TTL_DAYS) * 86_400 {
+        return Err(LauncherError::InsecureQueueTtl {
+            days: (plan.queue_ttl_secs / 86_400) as u16,
+        });
+    }
+    let invite_uri = format_server_invite_uri(public_host, plan.bind_port, server_public_key)?;
+    let fp = hex_encode_32(server_public_key);
+    let port = plan.bind_port;
+    let ttl = plan.queue_ttl_secs;
+
+    Ok(format!(
+        r#"# Aegis 1-Click Self-Hosted Zero-Knowledge Server
+# Server Key Fingerprint (Ed25519): {fp}
+# Client Invite URI: {invite_uri}
+services:
+  aegis-server:
+    image: ghcr.io/aegis-project/aegis-server:0.1.0
+    container_name: aegis-server
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "{port}:{port}/tcp"
+      - "{port}:{port}/udp"
+    environment:
+      AEGIS_BIND_PORT: "{port}"
+      AEGIS_QUEUE_TTL_SECS: "{ttl}"
+      AEGIS_SERVER_PUBKEY_HEX: "{fp}"
+      AEGIS_IP_LOGGING: "false"
+      AEGIS_TURN_RELAY_ONLY: "true"
+    volumes:
+      - aegis_data:/var/lib/aegis
+volumes:
+  aegis_data:
+"#
+    ))
+}
+
+/// Generates a ready-to-paste Linux VPS `cloud-init.yaml` provisioning script (PLAN.md §6.2).
+///
+/// # Errors
+/// Rejects invalid plans, all-zero server keys, or unsafe hostnames.
+pub fn generate_cloud_init_script(
+    plan: &LaunchPlan,
+    public_host: &str,
+    server_public_key: &[u8; 32],
+) -> Result<String, LauncherError> {
+    let compose = generate_docker_compose(plan, public_host, server_public_key)?;
+    let invite_uri = format_server_invite_uri(public_host, plan.bind_port, server_public_key)?;
+    let fp = hex_encode_32(server_public_key);
+    let mut indented_compose = String::new();
+    for line in compose.lines() {
+        indented_compose.push_str("      ");
+        indented_compose.push_str(line);
+        indented_compose.push('\n');
+    }
+
+    Ok(format!(
+        r#"#cloud-config
+# Aegis Zero-Knowledge VPS Auto-Provisioning (cloud-init)
+# Pinned Server Key: {fp}
+# Invite URI: {invite_uri}
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - ufw
+write_files:
+  - path: /opt/aegis/docker-compose.yml
+    permissions: "0600"
+    content: |
+{indented_compose}runcmd:
+  - ufw default deny incoming
+  - ufw allow {port}/tcp
+  - ufw allow {port}/udp
+  - ufw --force enable
+  - systemctl enable --now docker
+  - docker compose -f /opt/aegis/docker-compose.yml up -d
+"#,
+        port = plan.bind_port
+    ))
+}
+
+/// Generates a hardened Tor `torrc` Hidden Service configuration so the server can run
+/// as a `.onion` service without exposing any public IP address (PLAN.md §6.2, §14).
+///
+/// # Errors
+/// Rejects port `0` or all-zero server keys.
+pub fn generate_torrc_hidden_service(
+    plan: &LaunchPlan,
+    server_public_key: &[u8; 32],
+) -> Result<String, LauncherError> {
+    if plan.bind_port == 0 {
+        return Err(LauncherError::InvalidBindPort);
+    }
+    if plan.queue_ttl_secs == 0 || plan.queue_ttl_secs > u64::from(MAX_QUEUE_TTL_DAYS) * 86_400 {
+        return Err(LauncherError::InsecureQueueTtl {
+            days: (plan.queue_ttl_secs / 86_400) as u16,
+        });
+    }
+    if *server_public_key == [0u8; 32] {
+        return Err(LauncherError::InvalidServerIdentity);
+    }
+    let fp = hex_encode_32(server_public_key);
+    let port = plan.bind_port;
+    Ok(format!(
+        r#"# Aegis Tor v3 Hidden Service Configuration (Onion-Only Mode)
+# Pinned Server Key Fingerprint: {fp}
+# Connect via: aegis://server/<generated-v3-address>.onion:{port}?fp={fp}
+SocksPort 0
+HiddenServiceDir /var/lib/tor/aegis_hidden_service/
+HiddenServiceVersion 3
+HiddenServicePort {port} 127.0.0.1:{port}
+SafeLogging 1
+"#
+    ))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -131,5 +308,46 @@ mod tests {
         let ok_plan = validate_launch_config(LaunchTarget::TorOnionService, 9001, 14).unwrap();
         assert_eq!(ok_plan.bind_port, 9001);
         assert_eq!(ok_plan.queue_ttl_secs, 14 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn launcher_generates_docker_compose_cloud_init_and_torrc_with_pinned_key() {
+        let plan = validate_launch_config(LaunchTarget::VpsDocker, 8443, 30).unwrap();
+        let pubkey = [0xAB; 32];
+
+        let compose = generate_docker_compose(&plan, "node1.aegis.example", &pubkey).unwrap();
+        assert!(compose.contains("aegis://server/node1.aegis.example:8443?fp=abab"));
+        assert!(compose.contains("AEGIS_IP_LOGGING: \"false\""));
+
+        let cloud_init = generate_cloud_init_script(&plan, "node1.aegis.example", &pubkey).unwrap();
+        assert!(cloud_init.starts_with("#cloud-config"));
+        assert!(cloud_init.contains("/opt/aegis/docker-compose.yml"));
+
+        let torrc = generate_torrc_hidden_service(&plan, &pubkey).unwrap();
+        assert!(torrc.contains("HiddenServiceVersion 3"));
+        assert!(torrc.contains("SafeLogging 1"));
+
+        // All-zero key or shell-injection hostname must be rejected
+        assert_eq!(
+            generate_docker_compose(&plan, "node1.aegis.example", &[0u8; 32]),
+            Err(LauncherError::InvalidServerIdentity)
+        );
+        assert_eq!(
+            generate_docker_compose(&plan, "bad host; rm -rf /", &pubkey),
+            Err(LauncherError::InvalidServerIdentity)
+        );
+        // B-0027: Reject `..` hostnames and plans with zero/excessive queue_ttl_secs
+        assert_eq!(
+            generate_docker_compose(&plan, "..", &pubkey),
+            Err(LauncherError::InvalidServerIdentity)
+        );
+        let zero_ttl_plan = LaunchPlan {
+            queue_ttl_secs: 0,
+            ..plan
+        };
+        assert_eq!(
+            generate_docker_compose(&zero_ttl_plan, "node1.aegis.example", &pubkey),
+            Err(LauncherError::InsecureQueueTtl { days: 0 })
+        );
     }
 }
