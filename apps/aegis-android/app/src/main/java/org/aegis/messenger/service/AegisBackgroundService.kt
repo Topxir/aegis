@@ -5,17 +5,18 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 
 /**
- * Persistent Zero-GMS Foreground Service (`PLAN.md §7.2`, `AGENTS.md §2.2`).
+ * Persistent Zero-GMS Foreground Service (`PLAN.md §7.2`, `AGENTS.md §2.2`, `D-0019`).
  *
  * Responsibilities:
- * 1. Maintains the multiplexed QUIC / WebSocket connection to the user's chosen Aegis server
- *    (or Tor `.onion` hidden service) without relying on Google Play Services / Firebase FCM.
+ * 1. Maintains the multiplexed QUIC / TLS 1.3 connection to the user's chosen Aegis static-IP
+ *    starter server (or optional Tor `.onion` hidden service) without Google Play Services / Firebase FCM.
  * 2. Runs the adaptive keep-alive timer and background Cover Traffic dummy frame scheduler (`256 B`).
- * 3. Displays strictly redacted notifications ("Aegis: Новое зашифрованное событие") —
+ * 3. Displays strictly redacted notifications ("Aegis: Активна защита соединения") —
  *    NEVER exposing sender aliases, message previews, or secret material to the OS notification log (`AGENTS.md §2.4`).
  */
 class AegisBackgroundService : Service() {
@@ -27,7 +28,15 @@ class AegisBackgroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val notification = buildZeroKnowledgeNotification()
-        startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
         return START_STICKY
     }
 
@@ -59,7 +68,7 @@ class AegisBackgroundService : Service() {
 
         return builder
             .setContentTitle("Aegis: Активна защита соединения")
-            .setContentText("QUIC / Tor Onion v3 • Без телеметрии • Паддинг трафика")
+            .setContentText("Прямой Static-IP E2EE / Опциональный Tor • Без телеметрии • Паддинг 256B")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
             .setVisibility(Notification.VISIBILITY_SECRET)

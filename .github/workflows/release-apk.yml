@@ -1,0 +1,62 @@
+name: Build Android APK & Release Artifacts
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android-and-core:
+    name: Build Rust Core, Static-IP Server, Desktop & Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry & build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Release Binaries & Run Self-Tests
+        run: |
+          cargo build --release --workspace
+          cargo run --release -p aegis-server --bin aegis-serverd -- --self-test
+          cargo run --release -p aegis-ui-desktop --bin aegis-desktop -- --self-test
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.7"
+
+      - name: Build Signed Android APKs (Debug & Release)
+        run: |
+          gradle -p apps/aegis-android assembleDebug assembleRelease
+
+      - name: Upload Built Android APKs & Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-release-builds
+          path: |
+            apps/aegis-android/app/build/outputs/apk/release/*.apk
+            apps/aegis-android/app/build/outputs/apk/debug/*.apk
+            target/release/aegis-desktop
+            target/release/aegis-serverd

@@ -38,11 +38,13 @@ class MainActivity : ComponentActivity() {
         // 2. Initialize the unified FFI bridge to `aegis-ffi` + Android StrongBox Keystore
         rustBridge = AegisRustBridge(applicationContext)
 
-        // 3. Start persistent zero-GMS background QUIC/WebSocket + Cover Traffic service
-        val serviceIntent = Intent(this, AegisBackgroundService::class.java).apply {
-            action = AegisBackgroundService.ACTION_START_TRANSPORT
+        // 3. Start persistent zero-GMS background QUIC/TLS Static-IP + Cover Traffic service
+        runCatching {
+            val serviceIntent = Intent(this, AegisBackgroundService::class.java).apply {
+                action = AegisBackgroundService.ACTION_START_TRANSPORT
+            }
+            startForegroundService(serviceIntent)
         }
-        startForegroundService(serviceIntent)
 
         // 4. Mount Jetpack Compose UI (Russian & English localized)
         setContent {
@@ -53,7 +55,9 @@ class MainActivity : ComponentActivity() {
                 },
                 onPanicWipeTriggered = {
                     rustBridge.triggerEmergencyPanicWipe()
-                    stopService(Intent(this, AegisBackgroundService::class.java))
+                    runCatching {
+                        stopService(Intent(this, AegisBackgroundService::class.java))
+                    }
                 }
             )
         }

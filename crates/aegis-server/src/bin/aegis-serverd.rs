@@ -17,15 +17,21 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
-fn parse_http_request(raw: &[u8]) -> (&str, &str, &str) {
-    let text = core::str::from_utf8(raw).unwrap_or("");
+fn parse_http_request(raw: &[u8]) -> Option<(&str, &str, &str)> {
+    let text = core::str::from_utf8(raw).ok()?;
     let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text, ""));
     let mut lines = head.lines();
-    let first_line = lines.next().unwrap_or("");
+    let first_line = lines.next()?.trim();
+    if first_line.is_empty() {
+        return None;
+    }
     let mut parts = first_line.split_whitespace();
-    let method = parts.next().unwrap_or("GET");
-    let path = parts.next().unwrap_or("/");
-    (method, path, body)
+    let method = parts.next()?;
+    let path = parts.next()?;
+    if !path.starts_with('/') {
+        return None;
+    }
+    Some((method, path, body))
 }
 
 fn run_self_test() -> Result<(), String> {
@@ -77,13 +83,54 @@ fn main() {
         return;
     }
 
-    let port: u16 = args
-        .iter()
-        .skip(1)
-        .find_map(|arg| arg.strip_prefix("--port=").and_then(|p| p.parse().ok()))
+    let mut bind_host = env::var("AEGIS_BIND_HOST")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "0.0.0.0".to_owned());
+
+    let mut port: u16 = env::var("AEGIS_BIND_PORT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .filter(|&p| p > 0)
         .unwrap_or(8_443);
 
-    let bind_addr = format!("127.0.0.1:{port}");
+    let mut idx = 1usize;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if let Some(p_str) = arg.strip_prefix("--port=") {
+            if let Ok(parsed) = p_str.parse::<u16>() {
+                if parsed > 0 {
+                    port = parsed;
+                }
+            }
+        } else if arg == "--port" {
+            if let Some(next) = args.get(idx + 1) {
+                if let Ok(parsed) = next.parse::<u16>() {
+                    if parsed > 0 {
+                        port = parsed;
+                    }
+                }
+                idx += 1;
+            }
+        } else if let Some(b_str) = arg.strip_prefix("--bind=") {
+            let trimmed = b_str.trim();
+            if !trimmed.is_empty() {
+                bind_host = trimmed.to_owned();
+            }
+        } else if arg == "--bind" {
+            if let Some(next) = args.get(idx + 1) {
+                let trimmed = next.trim();
+                if !trimmed.is_empty() {
+                    bind_host = trimmed.to_owned();
+                }
+                idx += 1;
+            }
+        }
+        idx += 1;
+    }
+
+    let bind_addr = format!("{bind_host}:{port}");
     let Ok(listener) = TcpListener::bind(&bind_addr) else {
         let _ = writeln!(
             std::io::stderr(),
@@ -94,7 +141,7 @@ fn main() {
 
     let _ = writeln!(
         std::io::stdout(),
-        "aegis-serverd listening on http://{bind_addr} (Zero IP Logs, OPAQUE + Queues + Support Portal)"
+        "aegis-serverd listening on http://{bind_addr} (Static-IP & Direct Ready, Zero IP Logs, OPAQUE + Queues + Support Portal)"
     );
 
     let mut server_state = FederationServerState::default();
@@ -115,9 +162,16 @@ fn main() {
         if n == 0 {
             continue;
         }
-        let (method, path, body) = parse_http_request(&buf[..n]);
         let (status, content_type, response_body) =
-            handle_http_request(&mut server_state, &mut portal_state, method, path, body);
+            if let Some((method, path, body)) = parse_http_request(&buf[..n]) {
+                handle_http_request(&mut server_state, &mut portal_state, method, path, body)
+            } else {
+                (
+                    400,
+                    "application/json",
+                    r#"{"error":"bad_request"}"#.to_owned(),
+                )
+            };
         let status_text = match status {
             200 => "OK",
             400 => "Bad Request",

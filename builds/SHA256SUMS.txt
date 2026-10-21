@@ -1,0 +1,4 @@
+98784672c5071b8a2498741daddea9aaea3282aaf9e734ff33d9c3f2c304eac5  builds/android-apk/aegis-messenger-release.apk
+4fc53eabfcfa87d03a6300682a6a89caf3057a217e597d1d2c15e7e6ed7d2c16  builds/android-apk/aegis-messenger-debug.apk
+8782061d0aa9a1539e40a9760ac067dc312bff5d7e14bd40a1e51d8a8be690fd  builds/desktop/aegis-desktop.exe
+192d5bb2512e276e5413bad7289f3ef537f72324c28d88631f993f8f054d8ebc  builds/server/aegis-serverd.exe

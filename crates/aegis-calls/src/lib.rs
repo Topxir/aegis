@@ -170,11 +170,11 @@ pub fn anonymize_audio_pcm16(samples: &[i16], mode: VoicePitchMode) -> Vec<i16> 
                 let mut filtered = (prev_filtered * 3 + interp * 4) / 8 + sub;
                 prev_filtered = filtered;
                 let raw_in = i32::from(samples[idx]);
-                if raw_in != 0 && filtered == 0 {
-                    filtered = raw_in.signum() * 2;
-                }
                 if raw_in != 0 && filtered == raw_in {
                     filtered = raw_in - raw_in.signum();
+                }
+                if raw_in != 0 && filtered == 0 {
+                    filtered = raw_in.signum() * 2;
                 }
                 out.push(filtered.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
             }
@@ -201,11 +201,11 @@ pub fn anonymize_audio_pcm16(samples: &[i16], mode: VoicePitchMode) -> Vec<i16> 
                 let mut high_boost = (interp * 7) / 8 + (interp - prev_raw) / 8 + harmonic;
                 prev_raw = interp;
                 let raw_in = i32::from(samples[idx]);
-                if raw_in != 0 && high_boost == 0 {
-                    high_boost = raw_in.signum() * 3;
-                }
                 if raw_in != 0 && high_boost == raw_in {
                     high_boost = raw_in - raw_in.signum() * 2;
+                }
+                if raw_in != 0 && high_boost == 0 {
+                    high_boost = raw_in.signum() * 3;
                 }
                 out.push(high_boost.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
             }
@@ -232,11 +232,11 @@ pub fn anonymize_audio_pcm16(samples: &[i16], mode: VoicePitchMode) -> Vec<i16> 
                     0
                 };
                 let mut mixed = (quantized * 5 + (quantized * carrier_sign * 2)) / 8;
-                if s != 0 && mixed == 0 {
-                    mixed = s.signum() * 4;
-                }
                 if s != 0 && mixed == s {
                     mixed = s - s.signum() * 3;
+                }
+                if s != 0 && mixed == 0 {
+                    mixed = s.signum() * 4;
                 }
                 out.push(mixed.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
             }
@@ -338,7 +338,38 @@ pub fn filter_ice_candidate(candidate_sdp: &str) -> bool {
         return false;
     }
     let first = tokens[0].to_ascii_lowercase();
-    if !(first.starts_with("candidate:") || first.starts_with("a=candidate:")) {
+    let foundation = if let Some(rest) = first.strip_prefix("a=candidate:") {
+        rest
+    } else if let Some(rest) = first.strip_prefix("candidate:") {
+        rest
+    } else {
+        return false;
+    };
+    if foundation.is_empty() {
+        return false;
+    }
+    let Ok(component_id) = tokens[1].parse::<u16>() else {
+        return false;
+    };
+    if component_id == 0 {
+        return false;
+    }
+    if !(tokens[2].eq_ignore_ascii_case("udp") || tokens[2].eq_ignore_ascii_case("tcp")) {
+        return false;
+    }
+    let Ok(priority) = tokens[3].parse::<u32>() else {
+        return false;
+    };
+    if priority == 0 {
+        return false;
+    }
+    let relay_addr = tokens[4];
+    if relay_addr.is_empty()
+        || relay_addr == "0.0.0.0"
+        || relay_addr == "::"
+        || relay_addr == "127.0.0.1"
+        || relay_addr.eq_ignore_ascii_case("localhost")
+    {
         return false;
     }
     let Ok(port) = tokens[5].parse::<u16>() else {
@@ -347,26 +378,39 @@ pub fn filter_ice_candidate(candidate_sdp: &str) -> bool {
     if port == 0 {
         return false;
     }
+    if !tokens[6].eq_ignore_ascii_case("typ") || !tokens[7].eq_ignore_ascii_case("relay") {
+        return false;
+    }
 
-    let mut found_typ_relay = false;
-    let mut i = 0usize;
+    let mut i = 8usize;
     while i < tokens.len() {
         if tokens[i].eq_ignore_ascii_case("typ") {
-            let Some(kind) = tokens.get(i + 1) else {
+            return false;
+        }
+        if tokens[i].eq_ignore_ascii_case("raddr") {
+            let Some(&raddr) = tokens.get(i + 1) else {
                 return false;
             };
-            if kind.eq_ignore_ascii_case("relay") && !found_typ_relay {
-                found_typ_relay = true;
-                i += 2;
-                continue;
+            if raddr != "0.0.0.0" && raddr != "::" {
+                return false;
             }
-            // Any non-relay `typ` (`host`, `srflx`, `prflx`) or duplicate `typ` is immediately rejected
-            return false;
+            i += 2;
+            continue;
+        }
+        if tokens[i].eq_ignore_ascii_case("rport") {
+            let Some(&rport) = tokens.get(i + 1) else {
+                return false;
+            };
+            if rport != "0" {
+                return false;
+            }
+            i += 2;
+            continue;
         }
         i += 1;
     }
 
-    found_typ_relay
+    true
 }
 
 #[cfg(test)]
@@ -525,6 +569,25 @@ mod tests {
         assert!(!filter_ice_candidate(
             "candidate:3 1 UDP 41885439 198.51.100.77 99999 typ relay raddr 0.0.0.0 rport 0"
         ));
+        // B-0061: ICE relay candidate that leaks a non-zero raddr/rport must be rejected
+        assert!(!filter_ice_candidate(
+            "candidate:3 1 UDP 41885439 198.51.100.77 61000 typ relay raddr 203.0.113.5 rport 54321"
+        ));
+        // B-0061: Small non-zero samples (±1, ±2, ±3) are never muted to 0
+        for &tiny in &[1i16, -1, 2, -2, 3, -3] {
+            assert_ne!(
+                anonymize_audio_pcm16(&[tiny], VoicePitchMode::DeepShadow)[0],
+                0
+            );
+            assert_ne!(
+                anonymize_audio_pcm16(&[tiny], VoicePitchMode::HighGhost)[0],
+                0
+            );
+            assert_ne!(
+                anonymize_audio_pcm16(&[tiny], VoicePitchMode::Robotized)[0],
+                0
+            );
+        }
 
         // B-0047: Quiet speech (-255..=255) is not zeroed out by Robotized
         let quiet = [40i16, -40, 120, -120];

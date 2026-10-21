@@ -24,8 +24,8 @@ pub use aegis_identity::{
 };
 pub use aegis_launcher::{
     build_launch_plan, format_server_invite_uri, generate_cloud_init_script,
-    generate_docker_compose, generate_torrc_hidden_service, validate_launch_config, LaunchPlan,
-    LaunchTarget, LauncherError, ServerLaunchPlan,
+    generate_docker_compose, generate_static_ip_vps_script, generate_torrc_hidden_service,
+    validate_launch_config, LaunchPlan, LaunchTarget, LauncherError, ServerLaunchPlan,
 };
 pub use aegis_plugins::{
     validate_manifest, BotBridgeConfig, BotBridgeDescriptor, BuiltInThemes, PluginError,
@@ -47,9 +47,9 @@ pub use aegis_storage::{
     StoredMessage, BACKUP_MAGIC, DB_KEY_LEN, SCHEMA_VERSION,
 };
 pub use aegis_transport::{
-    evaluate_network_shield, CoverTrafficConfig, CoverTrafficScheduler, NetworkRouteStatus,
-    ProxyConfig, RouteProbe, ServerMigrationNotice, ShieldEvaluation, TransportError,
-    TransportProfile,
+    evaluate_network_shield, format_static_ipv4_endpoint, CoverTrafficConfig,
+    CoverTrafficScheduler, NetworkRouteStatus, ProxyConfig, RouteProbe, ServerMigrationNotice,
+    ShieldEvaluation, TransportError, TransportProfile,
 };
 
 /// Supported UI languages at launch (D-0012).
@@ -193,6 +193,12 @@ impl AegisClientCore {
         self.directory.verified_entries()
     }
 
+    /// Returns the verified direct static-IPv4 starter servers (no Tor required, D-0019).
+    #[must_use]
+    pub fn direct_static_ip_servers(&self) -> Vec<&DirectoryServerEntry> {
+        self.directory.direct_static_ip_entries()
+    }
+
     /// Returns the active [`CallConfig`] (guaranteed `relay_only: true` and `require_e2ee_media: true`).
     #[must_use]
     pub fn call_config(&self) -> &CallConfig {
@@ -251,7 +257,8 @@ mod tests {
     fn aegis_client_core_facade_integrates_all_subsystems() {
         let mut client = AegisClientCore::new(Locale::Ru);
         assert_eq!(client.locale(), Locale::Ru);
-        assert_eq!(client.verified_directory_servers().len(), 3);
+        assert_eq!(client.verified_directory_servers().len(), 4);
+        assert_eq!(client.direct_static_ip_servers().len(), 3);
         assert!(client.call_config().is_privacy_preserving());
 
         // Switch theme to CalculatorStealth

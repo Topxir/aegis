@@ -182,6 +182,37 @@ pub enum TransportProfile {
     },
 }
 
+fn is_valid_transport_host(host: &str) -> bool {
+    if host != host.trim()
+        || host.is_empty()
+        || host.len() > 253
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.starts_with('-')
+        || host.ends_with('-')
+        || host.contains("..")
+        || host == "0.0.0.0"
+        || host == "255.255.255.255"
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return false;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    for label in &labels {
+        if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+    }
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()))
+        && (labels.len() != 4 || labels.iter().any(|l| l.parse::<u8>().is_err()))
+    {
+        return false;
+    }
+    true
+}
+
 impl TransportProfile {
     /// Validates the transport profile parameters.
     ///
@@ -195,11 +226,7 @@ impl TransportProfile {
                 if *port == 0 {
                     return Err(TransportError::InvalidPort);
                 }
-                if host != host.trim()
-                    || host.is_empty()
-                    || host.len() > 253
-                    || host.chars().any(|c| c.is_control() || c.is_whitespace())
-                {
+                if !is_valid_transport_host(host) {
                     return Err(TransportError::InvalidEndpoint);
                 }
                 Ok(())
@@ -220,10 +247,7 @@ impl TransportProfile {
                 let Some((host, port_str)) = bridge_endpoint.rsplit_once(':') else {
                     return Err(TransportError::InvalidEndpoint);
                 };
-                if host.is_empty()
-                    || host.len() > 253
-                    || host.chars().any(|c| c.is_control() || c.is_whitespace())
-                {
+                if !is_valid_transport_host(host) {
                     return Err(TransportError::InvalidEndpoint);
                 }
                 let port: u16 = port_str.parse().map_err(|_| TransportError::InvalidPort)?;
@@ -236,7 +260,24 @@ impl TransportProfile {
     }
 }
 
-/// Full client proxy and censorship-bypass configuration (D-0008, PLAN.md §14).
+/// Formats a canonical direct static-IPv4 server endpoint (`aegis://<a>.<b>.<c>.<d>:<port>`) that works without Tor (D-0019).
+///
+/// # Errors
+/// Rejects port `0` or non-routable IPv4 addresses (`0.0.0.0`, `127.x.x.x`, `255.255.255.255`).
+pub fn format_static_ipv4_endpoint(ipv4: [u8; 4], port: u16) -> Result<String, TransportError> {
+    if port == 0 {
+        return Err(TransportError::InvalidPort);
+    }
+    if ipv4 == [0, 0, 0, 0] || ipv4[0] == 0 || ipv4[0] == 127 || ipv4 == [255, 255, 255, 255] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    Ok(format!(
+        "aegis://{}.{}.{}.{}:{port}",
+        ipv4[0], ipv4[1], ipv4[2], ipv4[3]
+    ))
+}
+
+/// Full client proxy and censorship-bypass configuration (D-0008, D-0019, PLAN.md §14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyConfig {
     /// Selected transport routing profile.
@@ -248,6 +289,21 @@ pub struct ProxyConfig {
 }
 
 impl ProxyConfig {
+    /// Creates a direct TLS/QUIC starter configuration (`kill_switch_enabled: false`) so any user
+    /// can connect out-of-the-box to a static-IP starter server without requiring Tor or VPN (D-0019).
+    ///
+    /// # Errors
+    /// Rejects an all-zero `pinned_server_key`.
+    pub fn direct_starter(pinned_server_key: [u8; 32]) -> Result<Self, TransportError> {
+        let cfg = Self {
+            profile: TransportProfile::DirectTls,
+            kill_switch_enabled: false,
+            pinned_server_key,
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
     /// Validates the proxy configuration before establishing a connection.
     ///
     /// # Errors
@@ -394,7 +450,8 @@ impl CoverTrafficScheduler {
             .config
             .idle_grace_ms
             .max(self.next_delay_ms(jitter_seed));
-        if now_ms < self.last_activity_ms.saturating_add(required_wait) {
+        let next_ready_ms = self.last_activity_ms.checked_add(required_wait)?;
+        if now_ms < next_ready_ms {
             return None;
         }
 
@@ -488,6 +545,20 @@ impl ServerMigrationNotice {
             || ep.len() > 256
             || ep.chars().any(|c| c.is_control() || c.is_whitespace())
         {
+            return Err(TransportError::InvalidMigrationNotice);
+        }
+        let rest = &ep["aegis://".len()..];
+        let host_port = rest.strip_prefix("server/").unwrap_or(rest);
+        let Some((host, port_str)) = host_port.rsplit_once(':') else {
+            return Err(TransportError::InvalidMigrationNotice);
+        };
+        if !is_valid_transport_host(host) {
+            return Err(TransportError::InvalidMigrationNotice);
+        }
+        let Ok(port) = port_str.parse::<u16>() else {
+            return Err(TransportError::InvalidMigrationNotice);
+        };
+        if port == 0 {
             return Err(TransportError::InvalidMigrationNotice);
         }
         Ok(())

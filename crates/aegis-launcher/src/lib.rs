@@ -115,16 +115,41 @@ fn hex_encode_32(bytes: &[u8; 32]) -> String {
 
 fn is_safe_host(host: &str) -> bool {
     let trimmed = host.trim();
-    !trimmed.is_empty()
-        && trimmed.len() <= 253
-        && !trimmed.starts_with('.')
-        && !trimmed.ends_with('.')
-        && !trimmed.starts_with('-')
-        && !trimmed.ends_with('-')
-        && !trimmed.contains("..")
-        && trimmed
+    if trimmed.is_empty()
+        || trimmed.len() > 253
+        || trimmed.starts_with('.')
+        || trimmed.ends_with('.')
+        || trimmed.starts_with('-')
+        || trimmed.ends_with('-')
+        || trimmed.contains("..")
+        || trimmed == "0.0.0.0"
+        || trimmed == "255.255.255.255"
+        || !trimmed
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return false;
+    }
+    let labels: Vec<&str> = trimmed.split('.').collect();
+    for label in &labels {
+        if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+    }
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()))
+        && (labels.len() != 4 || labels.iter().any(|l| l.parse::<u8>().is_err()))
+    {
+        return false;
+    }
+    true
+}
+
+fn validate_ttl_secs(ttl_secs: u64) -> Result<(), LauncherError> {
+    if ttl_secs < 86_400 || ttl_secs > u64::from(MAX_QUEUE_TTL_DAYS) * 86_400 {
+        let days = u16::try_from(ttl_secs / 86_400).unwrap_or(u16::MAX);
+        return Err(LauncherError::InsecureQueueTtl { days });
+    }
+    Ok(())
 }
 
 /// Formats a canonical `aegis://server/<host>:<port>?fp=<hex_key>` invite URI with pinned server key (PLAN.md §6.2).
@@ -156,18 +181,14 @@ pub fn generate_docker_compose(
     public_host: &str,
     server_public_key: &[u8; 32],
 ) -> Result<String, LauncherError> {
-    if plan.queue_ttl_secs == 0 || plan.queue_ttl_secs > u64::from(MAX_QUEUE_TTL_DAYS) * 86_400 {
-        return Err(LauncherError::InsecureQueueTtl {
-            days: (plan.queue_ttl_secs / 86_400) as u16,
-        });
-    }
+    validate_ttl_secs(plan.queue_ttl_secs)?;
     let invite_uri = format_server_invite_uri(public_host, plan.bind_port, server_public_key)?;
     let fp = hex_encode_32(server_public_key);
     let port = plan.bind_port;
     let ttl = plan.queue_ttl_secs;
 
     Ok(format!(
-        r#"# Aegis 1-Click Self-Hosted Zero-Knowledge Server
+        r#"# Aegis 1-Click Self-Hosted Zero-Knowledge Server (Static IP / Direct & Optional Tor)
 # Server Key Fingerprint (Ed25519): {fp}
 # Client Invite URI: {invite_uri}
 services:
@@ -181,9 +202,10 @@ services:
     cap_drop:
       - ALL
     ports:
-      - "{port}:{port}/tcp"
-      - "{port}:{port}/udp"
+      - "0.0.0.0:{port}:{port}/tcp"
+      - "0.0.0.0:{port}:{port}/udp"
     environment:
+      AEGIS_BIND_HOST: "0.0.0.0"
       AEGIS_BIND_PORT: "{port}"
       AEGIS_QUEUE_TTL_SECS: "{ttl}"
       AEGIS_SERVER_PUBKEY_HEX: "{fp}"
@@ -254,11 +276,7 @@ pub fn generate_torrc_hidden_service(
     if plan.bind_port == 0 {
         return Err(LauncherError::InvalidBindPort);
     }
-    if plan.queue_ttl_secs == 0 || plan.queue_ttl_secs > u64::from(MAX_QUEUE_TTL_DAYS) * 86_400 {
-        return Err(LauncherError::InsecureQueueTtl {
-            days: (plan.queue_ttl_secs / 86_400) as u16,
-        });
-    }
+    validate_ttl_secs(plan.queue_ttl_secs)?;
     if *server_public_key == [0u8; 32] {
         return Err(LauncherError::InvalidServerIdentity);
     }
@@ -273,6 +291,55 @@ HiddenServiceDir /var/lib/tor/aegis_hidden_service/
 HiddenServiceVersion 3
 HiddenServicePort {port} 127.0.0.1:{port}
 SafeLogging 1
+"#
+    ))
+}
+
+/// Generates a 1-click shell script to deploy an anonymous Aegis starter node on any VPS with a static IPv4 address (D-0019).
+/// Clients can connect directly via `aegis://<STATIC_IP>:<port>` without needing Tor installed.
+///
+/// # Errors
+/// Rejects invalid plans, non-routable IPv4 addresses (`0.0.0.0`, `127.x.x.x`, `255.255.255.255`), or all-zero server keys.
+pub fn generate_static_ip_vps_script(
+    plan: &LaunchPlan,
+    static_ipv4: [u8; 4],
+    server_public_key: &[u8; 32],
+) -> Result<String, LauncherError> {
+    if static_ipv4 == [0, 0, 0, 0]
+        || static_ipv4[0] == 0
+        || static_ipv4[0] == 127
+        || static_ipv4 == [255, 255, 255, 255]
+    {
+        return Err(LauncherError::InvalidServerIdentity);
+    }
+    let ip_str = format!(
+        "{}.{}.{}.{}",
+        static_ipv4[0], static_ipv4[1], static_ipv4[2], static_ipv4[3]
+    );
+    let compose = generate_docker_compose(plan, &ip_str, server_public_key)?;
+    let invite_uri = format_server_invite_uri(&ip_str, plan.bind_port, server_public_key)?;
+    let port = plan.bind_port;
+    Ok(format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+# Aegis 1-Click Anonymous Static-IP Starter Server Installer (No Tor Required for Clients)
+# Static IPv4: {ip_str}:{port}
+# Direct Invite URI: {invite_uri}
+
+mkdir -p /opt/aegis
+cat <<'EOF' > /opt/aegis/docker-compose.yml
+{compose}EOF
+
+chmod 600 /opt/aegis/docker-compose.yml
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow {port}/tcp
+  ufw allow {port}/udp
+fi
+docker compose -f /opt/aegis/docker-compose.yml up -d
+echo "=========================================================="
+echo "Aegis Static-IP Node is LIVE on {ip_str}:{port} (Zero IP Logs)"
+echo "Client Connection URI: {invite_uri}"
+echo "=========================================================="
 "#
     ))
 }
@@ -348,6 +415,24 @@ mod tests {
         assert_eq!(
             generate_docker_compose(&zero_ttl_plan, "node1.aegis.example", &pubkey),
             Err(LauncherError::InsecureQueueTtl { days: 0 })
+        );
+
+        // B-0063: Static-IP VPS script generator & large u64 TTL overflow protection
+        let static_script =
+            generate_static_ip_vps_script(&plan, [185, 220, 101, 42], &pubkey).unwrap();
+        assert!(static_script.contains("185.220.101.42:8443"));
+        assert!(static_script.contains("AEGIS_BIND_HOST: \"0.0.0.0\""));
+        assert_eq!(
+            generate_static_ip_vps_script(&plan, [127, 0, 0, 1], &pubkey),
+            Err(LauncherError::InvalidServerIdentity)
+        );
+        let huge_ttl_plan = LaunchPlan {
+            queue_ttl_secs: 65_566 * 86_400,
+            ..plan
+        };
+        assert_eq!(
+            generate_docker_compose(&huge_ttl_plan, "node1.aegis.example", &pubkey),
+            Err(LauncherError::InsecureQueueTtl { days: u16::MAX })
         );
     }
 }

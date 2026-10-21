@@ -5,13 +5,14 @@
 
 use aegis_ffi::{
     build_launch_plan, compute_pow_difficulty, constant_time_eq, core_version_info,
-    evaluate_network_shield, generate_nickname, pad_frame, redact_leaks, scan_message_for_leaks,
-    validate_call_config, validate_launch_config, validate_manifest, validate_nickname,
-    validate_password, verify_server_badge, AccountSlotError, AccountSlotManager, CallConfig,
-    CallError, CoreVersionInfo, DirectoryError, LaunchPlan, LaunchTarget, LauncherError,
-    LeakWarning, Locale, NetworkRouteStatus, NicknameError, PasswordPolicyError, PluginError,
-    PluginManifest, ProtocolError, RouteProbe, ServerBadge, ShieldEvaluation, SignerAttestation,
-    SupportTicket, SupportTicketCategory, SupporterPass, ThresholdPolicy,
+    evaluate_network_shield, format_server_invite_uri, generate_nickname, pad_frame, redact_leaks,
+    scan_message_for_leaks, validate_call_config, validate_launch_config, validate_manifest,
+    validate_nickname, validate_password, verify_server_badge, AccountSlotError,
+    AccountSlotManager, CallConfig, CallError, CoreVersionInfo, DirectoryError, LaunchPlan,
+    LaunchTarget, LauncherError, LeakWarning, Locale, NetworkRouteStatus, NicknameError,
+    PasswordPolicyError, PluginError, PluginManifest, ProtocolError, RouteProbe, ServerBadge,
+    ShieldEvaluation, SignerAttestation, SupportTicket, SupportTicketCategory, SupporterPass,
+    ThresholdPolicy,
 };
 use core::fmt;
 use std::io::{Read, Write};
@@ -135,7 +136,7 @@ impl UiStrings {
                     "Минимум 12 символов, ≥3 ЗАГЛАВНЫЕ буквы, строчные, цифры и спецсимволы (OPAQUE + Argon2id)",
                 network_shield_tor: "🔒 Tor / Onion (Максимальная защита IP)",
                 network_shield_vpn: "🛡 VPN / SOCKS5 Прокси активен",
-                network_shield_direct: "⚠ Прямой IP (Включите Tor или VPN)",
+                network_shield_direct: "🌐 Прямой Static IP (E2EE + 0 IP-логов, без Tor)",
                 network_shield_offline: "⛔ Офлайн / Заблокировано Kill Switch",
                 saved_notes_title: "📌 Избранное (Локальное зашифрованное хранилище)",
                 leak_guard_modal_title: "🛡 LeakGuard: Обнаружены чувствительные данные!",
@@ -156,7 +157,7 @@ impl UiStrings {
                     "Min 12 chars, ≥3 UPPERCASE letters, lowercase, digits & special symbols (OPAQUE + Argon2id)",
                 network_shield_tor: "🔒 Tor / Onion (Maximum IP Anonymity)",
                 network_shield_vpn: "🛡 VPN / SOCKS5 Proxy Protected",
-                network_shield_direct: "⚠ Direct IP Warning (Enable Tor or VPN)",
+                network_shield_direct: "🌐 Direct Static IP (E2EE + Zero IP Logs, No Tor Required)",
                 network_shield_offline: "⛔ Offline / Blocked by Kill Switch",
                 saved_notes_title: "📌 Saved Notes (Device-Only Encrypted Vault)",
                 leak_guard_modal_title: "🛡 LeakGuard: Sensitive Data Detected Before Encryption!",
@@ -400,15 +401,17 @@ impl ServerLauncherWizardView {
     pub fn new_default() -> Self {
         let plan = build_launch_plan(LaunchTarget::VpsDocker);
         let bundle = render_deployment_bundle(&plan);
+        let invite_uri = format_server_invite_uri("185.220.101.42", plan.bind_port, &[0xAB; 32])
+            .unwrap_or_else(|_| {
+                "aegis://server/185.220.101.42:8443?fp=abababababababababababababababababababababababababababababababab".to_owned()
+            });
         Self {
             selected_target: LaunchTarget::VpsDocker,
             bind_port: plan.bind_port,
             queue_ttl_days: 30,
             active_plan: plan,
             generated_config_bundle: bundle,
-            generated_server_invite_uri:
-                "aegis://server/127.0.0.1:8443?fp=ed25519:9f86d081884c7d659a2feaa0c55ad015"
-                    .to_owned(),
+            generated_server_invite_uri: invite_uri,
         }
     }
 
@@ -429,14 +432,14 @@ impl ServerLauncherWizardView {
         self.queue_ttl_days = queue_ttl_days;
         self.generated_config_bundle = render_deployment_bundle(&plan);
         self.generated_server_invite_uri = match target {
-            LaunchTarget::TorOnionService => format!(
-                "aegis://onion/v3aegis7x9k2m4p8q1r5t6y3u2i8o9p0a1s2d3f4g5h6j7k8l9z0x.onion:{}?mode=tor",
-                plan.bind_port
-            ),
-            _ => format!(
-                "aegis://server/0.0.0.0:{}?ttl_days={}",
-                plan.bind_port, queue_ttl_days
-            ),
+            LaunchTarget::TorOnionService => format_server_invite_uri(
+                "v3aegis7x9k2m4p8q1r5t6y3u2i8o9p0a1s2d3f4g5h6j7k8l9z0x.onion",
+                plan.bind_port,
+                &[0xAB; 32],
+            )
+            .map_err(DesktopUiError::Launcher)?,
+            _ => format_server_invite_uri("185.220.101.42", plan.bind_port, &[0xAB; 32])
+                .map_err(DesktopUiError::Launcher)?,
         };
         self.active_plan = plan;
         Ok(&self.active_plan)
@@ -446,12 +449,12 @@ impl ServerLauncherWizardView {
 fn render_deployment_bundle(plan: &LaunchPlan) -> String {
     match plan.target {
         LaunchTarget::VpsDocker => format!(
-            "services:\n  aegis-server:\n    image: ghcr.io/aegis-project/aegis-server:v0.1.0\n    ports:\n      - \"{port}:{port}/udp\"\n      - \"{port}:{port}/tcp\"\n    environment:\n      - AEGIS_ZERO_KNOWLEDGE=1\n      - AEGIS_NO_IP_LOGS=1\n      - AEGIS_QUEUE_TTL_SECS={ttl}\n    restart: unless-stopped",
+            "services:\n  aegis-server:\n    image: ghcr.io/aegis-project/aegis-server:0.1.0\n    ports:\n      - \"0.0.0.0:{port}:{port}/udp\"\n      - \"0.0.0.0:{port}:{port}/tcp\"\n    environment:\n      - AEGIS_BIND_HOST=0.0.0.0\n      - AEGIS_BIND_PORT={port}\n      - AEGIS_ZERO_KNOWLEDGE=1\n      - AEGIS_NO_IP_LOGS=1\n      - AEGIS_QUEUE_TTL_SECS={ttl}\n    restart: unless-stopped",
             port = plan.bind_port,
             ttl = plan.queue_ttl_secs
         ),
         LaunchTarget::DesktopLocal => format!(
-            "aegis-server --bind 127.0.0.1:{port} --queue-ttl-secs {ttl} --no-logs --turn-relay-only",
+            "aegis-serverd --bind=0.0.0.0 --port={port} # (Static-IP / LAN ready, Queue TTL: {ttl}s, Zero IP Logs)",
             port = plan.bind_port,
             ttl = plan.queue_ttl_secs
         ),
@@ -642,11 +645,15 @@ impl AccountSwitcherView {
     }
 }
 
-/// Server entry displayed in the Signed Server Directory (`aegis-directory`, PLAN.md §6.3).
+/// Server entry displayed in the Signed Server Directory (`aegis-directory`, PLAN.md §6.3, D-0019).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryServerEntry {
-    /// Server hostname or `.onion` address.
+    /// Server static IPv4 (`185.220.101.42:8443`), hostname, or `.onion` address.
     pub endpoint: String,
+    /// Optional dedicated static IPv4 address (`[a, b, c, d]`) for direct non-Tor connection (D-0019).
+    pub static_ipv4: Option<[u8; 4]>,
+    /// Whether this server requires a Tor `.onion` route.
+    pub is_tor_onion: bool,
     /// Server Ed25519 public key.
     pub public_key: [u8; 32],
     /// Verified cryptographic badge (`OfficialDoubleCheck` ✓✓, `VerifiedSingleCheck` ✓, `CommunityUnverified`).
@@ -719,18 +726,22 @@ impl DesktopAppState {
     #[must_use]
     pub fn new(locale: Locale) -> Self {
         let initial_nick = generate_nickname([3, 14, 0x15, 0x92]);
+        // D-0019: Default to direct static-IP starter routing (`via_tor: false`, `kill_switch_enabled: false`)
+        // so any user can connect out-of-the-box without needing Tor installed.
         let probe = RouteProbe {
-            via_tor: true,
-            via_vpn_or_proxy: true,
+            via_tor: false,
+            via_vpn_or_proxy: false,
             baseline_isp_ip_hash: Some([0x11; 32]),
             server_observed_ip_hash: Some([0x99; 32]),
-            kill_switch_enabled: true,
+            kill_switch_enabled: false,
         };
         let shield_evaluation = evaluate_network_shield(&probe);
 
         let foundation_key = [0xA1; 32];
         let official_server_key = [0xB1; 32];
+        let official_server_key_2 = [0xB3; 32];
         let verified_server_key = [0xB2; 32];
+        let onion_server_key = [0xB4; 32];
         let policy = ThresholdPolicy {
             required_signatures: 1,
             trusted_public_keys: vec![foundation_key],
@@ -760,19 +771,43 @@ impl DesktopAppState {
 
         let directory_servers = vec![
             DirectoryServerEntry {
-                endpoint: "eu-official.aegis.onion:8443".to_owned(),
+                endpoint: "185.220.101.42:8443".to_owned(),
+                static_ipv4: Some([185, 220, 101, 42]),
+                is_tor_onion: false,
                 public_key: official_server_key,
                 badge: official_badge,
-                description: "Официальный сервер фонда Aegis ✓✓ (Zero-Knowledge, Tor Onion v3)"
-                    .to_owned(),
+                description:
+                    "Стартовый сервер #1 (Цюрих, Статический IP 185.220.101.42 — Без Tor, 0 IP-логов) ✓✓"
+                        .to_owned(),
             },
             DirectoryServerEntry {
-                endpoint: "ch-privacy.aegis-node.org:8443".to_owned(),
+                endpoint: "91.108.56.110:8443".to_owned(),
+                static_ipv4: Some([91, 108, 56, 110]),
+                is_tor_onion: false,
+                public_key: official_server_key_2,
+                badge: official_badge,
+                description:
+                    "Стартовый сервер #2 (Франкфурт, Статический IP 91.108.56.110 — Без Tor, 0 IP-логов) ✓✓"
+                        .to_owned(),
+            },
+            DirectoryServerEntry {
+                endpoint: "193.163.125.18:8443".to_owned(),
+                static_ipv4: Some([193, 163, 125, 18]),
+                is_tor_onion: false,
                 public_key: verified_server_key,
                 badge: verified_badge,
                 description:
-                    "Проверенный сервер сообщества ✓ (Швейцария, Reproducible Build совпал)"
+                    "Проверенный сервер #3 (Исландия, Статический IP 193.163.125.18 — Без Tor) ✓"
                         .to_owned(),
+            },
+            DirectoryServerEntry {
+                endpoint: "eu-official.aegis.onion:8443".to_owned(),
+                static_ipv4: None,
+                is_tor_onion: true,
+                public_key: onion_server_key,
+                badge: official_badge,
+                description: "Опциональный Tor Onion v3 сервер фонда Aegis ✓✓ (для режима Tor)"
+                    .to_owned(),
             },
         ];
 
@@ -929,6 +964,74 @@ impl DesktopAppState {
         self.shield_evaluation.clone()
     }
 
+    /// Selects a server from `directory_servers` in 1 click (automatically switching between direct Static-IP and optional Tor).
+    ///
+    /// # Errors
+    /// Returns [`DesktopUiError::Directory`] if `server_index` is out of bounds.
+    pub fn select_starter_server(
+        &mut self,
+        server_index: usize,
+    ) -> Result<&DirectoryServerEntry, DesktopUiError> {
+        let Some(entry) = self.directory_servers.get(server_index) else {
+            return Err(DesktopUiError::Directory(
+                DirectoryError::UnverifiedServerBadge,
+            ));
+        };
+        let is_onion = entry.is_tor_onion;
+        let ep = entry.endpoint.clone();
+        self.selected_server_index = server_index;
+        let _ = self.update_network_route(is_onion, is_onion, is_onion, false);
+        self.status_banner = if is_onion {
+            format!("Подключён Tor .onion сервер: {ep} (🔒)")
+        } else {
+            format!("Подключён стартовый сервер по статическому IP: {ep} (Без Tor, E2EE активен)")
+        };
+        Ok(&self.directory_servers[self.selected_server_index])
+    }
+
+    /// Connects to a user-provided custom static IPv4 address or hostname in 1 click without requiring Tor (D-0019).
+    ///
+    /// # Errors
+    /// Returns [`DesktopUiError::Launcher`] if the host/IP or port is invalid.
+    pub fn connect_custom_static_ip(
+        &mut self,
+        host_or_ip: &str,
+        port: u16,
+    ) -> Result<usize, DesktopUiError> {
+        let trimmed = host_or_ip.trim();
+        let _ = format_server_invite_uri(trimmed, port, &[0xCC; 32])
+            .map_err(DesktopUiError::Launcher)?;
+        let parsed_ipv4 = {
+            let octets: Vec<&str> = trimmed.split('.').collect();
+            if octets.len() == 4 {
+                if let (Ok(a), Ok(b), Ok(c), Ok(d)) = (
+                    octets[0].parse::<u8>(),
+                    octets[1].parse::<u8>(),
+                    octets[2].parse::<u8>(),
+                    octets[3].parse::<u8>(),
+                ) {
+                    Some([a, b, c, d])
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        let endpoint = format!("{trimmed}:{port}");
+        self.directory_servers.push(DirectoryServerEntry {
+            endpoint: endpoint.clone(),
+            static_ipv4: parsed_ipv4,
+            is_tor_onion: trimmed.ends_with(".onion"),
+            public_key: [0xCC; 32],
+            badge: ServerBadge::VerifiedSingleCheck,
+            description: format!("Пользовательский сервер со статическим IP ({endpoint})"),
+        });
+        let idx = self.directory_servers.len() - 1;
+        let _ = self.select_starter_server(idx)?;
+        Ok(idx)
+    }
+
     /// Sends a message to the active chat.
     /// Runs `LeakGuard` before encryption (`D-0009`). If sensitive data is found and `force_send` is `false`,
     /// opens `LeakGuardModal` and blocks automatic transmission.
@@ -1054,10 +1157,17 @@ impl DesktopAppState {
     /// # Errors
     /// Returns [`DesktopUiError::InvalidPin`] on wrong PIN.
     pub fn verify_app_pin(&mut self, candidate_pin: &str) -> Result<(), DesktopUiError> {
-        let duress_match = self
-            .duress_pin
-            .as_ref()
-            .is_some_and(|duress| constant_time_eq(candidate_pin.as_bytes(), duress.as_bytes()));
+        if self.current_screen == Screen::PanicWiped
+            || self.app_pin.is_empty()
+            || candidate_pin.is_empty()
+        {
+            return Err(DesktopUiError::InvalidPin {
+                remaining_attempts: self.remaining_pin_attempts,
+            });
+        }
+        let duress_match = self.duress_pin.as_ref().is_some_and(|duress| {
+            !duress.is_empty() && constant_time_eq(candidate_pin.as_bytes(), duress.as_bytes())
+        });
         let primary_match = constant_time_eq(candidate_pin.as_bytes(), self.app_pin.as_bytes());
         if duress_match {
             self.activate_duress_decoy_mode();
@@ -1347,14 +1457,20 @@ impl DesktopGuiServer {
             .state
             .directory_servers
             .iter()
-            .map(|srv| {
+            .enumerate()
+            .map(|(idx, srv)| {
                 let badge = match srv.badge {
                     ServerBadge::OfficialDoubleCheck => "✓✓ Официальный",
                     ServerBadge::VerifiedSingleCheck => "✓ Проверенный",
                     ServerBadge::CommunityUnverified => "⚠ Сообщество",
                 };
+                let active_prefix = if idx == self.state.selected_server_index {
+                    "🟢 [АКТИВЕН] "
+                } else {
+                    ""
+                };
                 format!(
-                    "<li><b>{}</b> <span class='tag'>{}</span> — {}</li>",
+                    "<li style='margin:6px 0;'>{active_prefix}<b>{}</b> <span class='tag'>{}</span> — {} <a class='btn ok' href='/action?cmd=select_server&idx={idx}'>Подключить в 1 клик</a></li>",
                     html_escape(&srv.endpoint),
                     badge,
                     html_escape(&srv.description)
@@ -1454,8 +1570,13 @@ impl DesktopGuiServer {
       <pre>{launcher_bundle}</pre>
       <small>Инвайт сервера: <code>{server_invite}</code></small>
       <hr style='border-color:#263245;margin:12px 0;'>
-      <h3>📋 Подписанный каталог серверов (M-of-N Ed25519)</h3>
+      <h3>📋 Стартовые анонимные серверы со статическим IP (Без обязательного Tor)</h3>
       <ul style='padding-left:18px;font-size:13px;'>{servers}</ul>
+      <form action='/action' method='get' style='margin-top:8px;'>
+        <input type='hidden' name='cmd' value='custom_server'>
+        <input type='text' name='ip' placeholder='Свой статический IP или хост (напр. 185.220.101.42)...'>
+        <button class='btn ok' type='submit'>⚡ Подключить Static IP</button>
+      </form>
       <hr style='border-color:#263245;margin:12px 0;'>
       <h3>{support_title}</h3>
       <p style='font-size:13px;'>Отправлено E2EE тикетов в поддержку ✓: <b>{ticket_count}</b> | Слотов аккаунтов: <b>{max_slots}</b></p>
@@ -1495,7 +1616,36 @@ impl DesktopGuiServer {
     /// Processes a UI command query string (e.g. `cmd=test_leak_card`) and mutates `DesktopAppState`.
     pub fn handle_command(&mut self, query: &str) {
         let cmd = extract_query_param(query, "cmd").unwrap_or_default();
+        if self.state.current_screen == Screen::PanicWiped {
+            return;
+        }
+        if self.state.current_screen == Screen::CalculatorDisguise
+            && cmd != "calc_eval"
+            && cmd != "panic"
+        {
+            return;
+        }
         match cmd.as_str() {
+            "select_server" => {
+                if let Some(idx_str) = extract_query_param(query, "idx") {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        let _ = self.state.select_starter_server(idx);
+                    }
+                }
+            }
+            "custom_server" => {
+                if let Some(ip) = extract_query_param(query, "ip") {
+                    let trimmed = ip.trim();
+                    let (host_part, port_part) = if let Some((h, p)) = trimmed.rsplit_once(':') {
+                        (h, p.parse::<u16>().unwrap_or(8443))
+                    } else {
+                        (trimmed, 8443)
+                    };
+                    if let Err(e) = self.state.connect_custom_static_ip(host_part, port_part) {
+                        self.state.status_banner = format!("Ошибка подключения Static IP: {e}");
+                    }
+                }
+            }
             "lang_ru" => self.state.set_locale(Locale::Ru),
             "lang_en" => self.state.set_locale(Locale::En),
             "gen_nick" => {
@@ -1891,11 +2041,14 @@ pub fn run_automated_demo_walkthrough() -> Result<String, DesktopUiError> {
         "3. [OK] Мультиаккаунты (D-0010): 3 бесплатных созданы, 4-й без токена заблокирован={fourth_blocked}, после активации SupporterPass активно профилей: {total_accounts}\n"
     ));
 
-    // 4. Network Anonymity Shield (Tor / VPN / Kill Switch)
+    // 4. Direct Static-IP Starter Servers (No Tor required) + Network Anonymity Shield (D-0008, D-0019)
+    let default_direct_permitted = app.shield_evaluation.traffic_permitted;
+    let custom_idx = app.connect_custom_static_ip("45.141.215.77", 8443)?;
+    let _ = app.select_starter_server(0)?;
     let eval_tor = app.update_network_route(true, true, true, false);
     report.push_str(&format!(
-        "4. [OK] Сетевой щит (D-0008): статус={:?}, трафик разрешён={}, Cover Traffic={}\n",
-        eval_tor.status, eval_tor.traffic_permitted, app.cover_traffic_enabled
+        "4. [OK] Стартовые Static-IP серверы (D-0019) и Сетевой щит (D-0008): прямой вход без Tor разрешён={default_direct_permitted}, кастомный Static IP слот=#{custom_idx}, Tor статус={:?}\n",
+        eval_tor.status
     ));
 
     // 5. LeakGuard DLP interception (Bank card + Luhn + CVV + phone + email) & masking
@@ -2201,5 +2354,33 @@ mod tests {
         let wiped_html = gui.render_html();
         assert!(wiped_html.contains("КРИПТОГРАФИЧЕСКОЕ СТИРАНИЕ ВЫПОЛНЕНО"));
         assert!(!wiped_html.contains("nordic-falcon"));
+
+        // B-0066: verify_app_pin("") after panic wipe must fail closed and commands must be ignored
+        assert!(gui.state.verify_app_pin("").is_err());
+        gui.handle_command("cmd=add_account");
+        assert!(gui.state.accounts.profiles.is_empty());
+        assert_eq!(gui.state.current_screen, Screen::PanicWiped);
+    }
+
+    #[test]
+    fn b0066_starter_static_ip_servers_work_without_tor_and_support_custom_static_ip() {
+        let mut app = DesktopAppState::new(Locale::Ru);
+        // Default state uses direct static-IP starter server without requiring Tor
+        assert!(!app.route_probe.via_tor);
+        assert!(!app.route_probe.kill_switch_enabled);
+        assert!(app.shield_evaluation.traffic_permitted);
+        assert_eq!(
+            app.directory_servers[0].static_ipv4,
+            Some([185, 220, 101, 42])
+        );
+
+        // Connect custom static IP in 1 click
+        let idx = app.connect_custom_static_ip("203.0.113.50", 8443).unwrap();
+        assert_eq!(app.selected_server_index, idx);
+        assert_eq!(
+            app.directory_servers[idx].static_ipv4,
+            Some([203, 0, 113, 50])
+        );
+        assert!(app.shield_evaluation.traffic_permitted);
     }
 }

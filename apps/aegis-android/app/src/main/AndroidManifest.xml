@@ -1,15 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="org.aegis.messenger">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- Network & QUIC/WebSocket transport permissions (No GPS / Location / Contacts permissions!) -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -22,10 +18,12 @@
     -->
     <application
         android:allowBackup="false"
-        android:fullBackupContent="false"
         android:dataExtractionRules="@xml/no_backup_rules"
         android:hasFragileUserData="false"
-        android:label="Aegis"
+        android:icon="@drawable/ic_launcher_aegis"
+        android:roundIcon="@drawable/ic_launcher_aegis"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.Aegis"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false">
 
@@ -44,14 +42,16 @@
         <!--
             Stealth App Disguise Alias (PLAN.md §14):
             When Calculator Disguise is toggled in Settings, MainActivity disables its default launcher
-            component and enables CalculatorDisguiseAlias so the app appears as "Инженерный калькулятор"
+            component and enables CalculatorDisguiseAlias so the app appears as "Калькулятор"
             on the Android home screen.
         -->
         <activity-alias
             android:name="org.aegis.messenger.CalculatorDisguiseAlias"
             android:enabled="false"
             android:exported="true"
-            android:label="Калькулятор"
+            android:icon="@drawable/ic_launcher_calculator"
+            android:roundIcon="@drawable/ic_launcher_calculator"
+            android:label="@string/calculator_alias_name"
             android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -67,10 +67,10 @@
             android:name=".service.AegisBackgroundService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="specialUse|microphone|camera|mediaProjection">
+            android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Zero-knowledge E2EE persistent QUIC/Tor message and voice call transport without Google Play Services" />
+                android:value="Zero-knowledge E2EE persistent QUIC/TLS static-IP and optional Tor message/call transport without Google Play Services" />
         </service>
 
     </application>

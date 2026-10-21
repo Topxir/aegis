@@ -16,9 +16,9 @@ SECRET_PATTERNS=(
 FAILED=0
 
 for pattern in "${SECRET_PATTERNS[@]}"; do
-  if git grep -I -E -e "$pattern" -- ':!scripts/check-secrets.sh' ':!scripts/check-secrets.ps1' >/dev/null 2>&1; then
+  if git grep -I -E -e "$pattern" -- ':!scripts/check-secrets.sh' ':!scripts/check-secrets.ps1' ':!*.apk' ':!*.exe' ':!*.jar' >/dev/null 2>&1; then
     echo "[ERROR] Potential secret pattern matched: $pattern"
-    git grep -I -n -E -e "$pattern" -- ':!scripts/check-secrets.sh' ':!scripts/check-secrets.ps1'
+    git grep -I -n -E -e "$pattern" -- ':!scripts/check-secrets.sh' ':!scripts/check-secrets.ps1' ':!*.apk' ':!*.exe' ':!*.jar'
     FAILED=1
   fi
 done

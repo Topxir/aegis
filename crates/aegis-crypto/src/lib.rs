@@ -378,8 +378,9 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut key_block = ZeroizingBuffer::zeroed(64);
     if key.len() > 64 {
-        let hashed = sha256(key);
+        let mut hashed = sha256(key);
         key_block.as_mut_slice()[..32].copy_from_slice(&hashed);
+        zeroize_slice(&mut hashed);
     } else {
         key_block.as_mut_slice()[..key.len()].copy_from_slice(key);
     }
@@ -391,9 +392,13 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
         opad_msg.push(b ^ 0x5c);
     }
     ipad_msg.extend_from_slice(data);
-    let inner_hash = sha256(&ipad_msg);
+    let mut inner_hash = sha256(&ipad_msg);
+    zeroize_slice(&mut ipad_msg);
     opad_msg.extend_from_slice(&inner_hash);
-    sha256(&opad_msg)
+    zeroize_slice(&mut inner_hash);
+    let mac = sha256(&opad_msg);
+    zeroize_slice(&mut opad_msg);
+    mac
 }
 
 /// Derives cryptographic key material using standard RFC 5869 HKDF-SHA256 (D-0012).
@@ -414,7 +419,9 @@ pub fn hkdf_sha256(
     } else {
         salt
     };
-    let prk = ZeroizingBuffer::new(hmac_sha256(effective_salt, ikm).to_vec());
+    let mut raw_prk = hmac_sha256(effective_salt, ikm);
+    let prk = ZeroizingBuffer::new(raw_prk.to_vec());
+    zeroize_slice(&mut raw_prk);
 
     let mut prev = [0u8; 32];
     let mut prev_len = 0usize;
@@ -428,6 +435,7 @@ pub fn hkdf_sha256(
         msg.push(counter);
 
         prev = hmac_sha256(prk.as_slice(), &msg);
+        zeroize_slice(&mut msg);
         prev_len = 32;
 
         let to_copy = (out.len() - written).min(32);
@@ -436,9 +444,7 @@ pub fn hkdf_sha256(
         counter = counter.wrapping_add(1);
     }
 
-    for b in &mut prev {
-        *b = black_box(0u8);
-    }
+    zeroize_slice(&mut prev);
     Ok(())
 }
 
@@ -829,7 +835,9 @@ pub fn combine_pqxdh_secrets(
 
     let mut out = [0u8; 32];
     hkdf_sha256(b"Aegis-PQXDH-Root-v1", ikm.as_slice(), context, &mut out)?;
-    Ok(ZeroizingBuffer::new(out.to_vec()))
+    let combined = ZeroizingBuffer::new(out.to_vec());
+    zeroize_slice(&mut out);
+    Ok(combined)
 }
 
 /// Wire header attached to each Double Ratchet encrypted message.
@@ -865,6 +873,7 @@ pub struct RatchetSession {
     recv_chain_key: ZeroizingBuffer,
     our_dh_public: [u8; 32],
     peer_dh_public: [u8; 32],
+    is_initiator: bool,
     send_msg_num: u32,
     recv_msg_num: u32,
     prev_send_chain_len: u32,
@@ -906,15 +915,14 @@ impl RatchetSession {
         } else {
             (derived[64..96].to_vec(), derived[32..64].to_vec())
         };
-        for b in &mut derived {
-            *b = black_box(0u8);
-        }
+        zeroize_slice(&mut derived);
         Ok(Self {
             root_key: ZeroizingBuffer::new(root),
             send_chain_key: ZeroizingBuffer::new(send_ck),
             recv_chain_key: ZeroizingBuffer::new(recv_ck),
             our_dh_public,
             peer_dh_public,
+            is_initiator,
             send_msg_num: 0,
             recv_msg_num: 0,
             prev_send_chain_len: 0,
@@ -949,11 +957,14 @@ impl RatchetSession {
             &mut out,
         )?;
         self.root_key = ZeroizingBuffer::new(out[0..32].to_vec());
-        self.send_chain_key = ZeroizingBuffer::new(out[32..64].to_vec());
-        self.recv_chain_key = ZeroizingBuffer::new(out[64..96].to_vec());
-        for b in &mut out {
-            *b = black_box(0u8);
+        if self.is_initiator {
+            self.send_chain_key = ZeroizingBuffer::new(out[32..64].to_vec());
+            self.recv_chain_key = ZeroizingBuffer::new(out[64..96].to_vec());
+        } else {
+            self.send_chain_key = ZeroizingBuffer::new(out[64..96].to_vec());
+            self.recv_chain_key = ZeroizingBuffer::new(out[32..64].to_vec());
         }
+        zeroize_slice(&mut out);
         self.prev_send_chain_len = self.send_msg_num;
         self.send_msg_num = 0;
         self.recv_msg_num = 0;
@@ -1397,5 +1408,17 @@ mod tests {
         let p0 = bob.recv_ratchet_step(&h0, &c0, b"aad").unwrap();
         assert_eq!(p0.as_slice(), b"secret-msg-0");
         assert_eq!(bob.skipped_key_count(), 0);
+
+        // B-0056: Symmetric dh_ratchet_step preserves initiator/responder send/recv chain direction
+        let alice_dh2 = [0xA3; 32];
+        let bob_dh2 = [0xB4; 32];
+        let dh_shared = [0x77; 32];
+        alice
+            .dh_ratchet_step(alice_dh2, bob_dh2, &dh_shared)
+            .unwrap();
+        bob.dh_ratchet_step(bob_dh2, alice_dh2, &dh_shared).unwrap();
+        let (h_after, c_after) = alice.send_ratchet_step(b"post-dh-step", b"aad").unwrap();
+        let p_after = bob.recv_ratchet_step(&h_after, &c_after, b"aad").unwrap();
+        assert_eq!(p_after.as_slice(), b"post-dh-step");
     }
 }

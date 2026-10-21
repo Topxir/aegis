@@ -38,3 +38,10 @@ Thumbs.db
 *.db
 *.sqlite
 *.log
+
+# Релизные сборки в папке builds/ (APK для Android, ПК-клиент и сервер со статическим IP)
+!builds/
+!builds/**
+!builds/android-apk/*.apk
+!builds/desktop/*.exe
+!builds/server/*.exe

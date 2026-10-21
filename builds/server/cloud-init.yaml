@@ -1,0 +1,42 @@
+#cloud-config
+# Aegis Zero-Knowledge Static-IP VPS Auto-Provisioning (cloud-init)
+# Clients connect directly via Static IP without needing Tor installed (D-0019)
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - ufw
+write_files:
+  - path: /opt/aegis/docker-compose.yml
+    permissions: "0600"
+    content: |
+      services:
+        aegis-server:
+          image: ghcr.io/aegis-project/aegis-server:0.1.0
+          container_name: aegis-server
+          restart: unless-stopped
+          read_only: true
+          security_opt:
+            - no-new-privileges:true
+          cap_drop:
+            - ALL
+          ports:
+            - "0.0.0.0:8443:8443/tcp"
+            - "0.0.0.0:8443:8443/udp"
+          environment:
+            AEGIS_BIND_HOST: "0.0.0.0"
+            AEGIS_BIND_PORT: "8443"
+            AEGIS_QUEUE_TTL_SECS: "2592000"
+            AEGIS_IP_LOGGING: "false"
+            AEGIS_TURN_RELAY_ONLY: "true"
+          volumes:
+            - aegis_data:/var/lib/aegis
+      volumes:
+        aegis_data:
+runcmd:
+  - ufw default deny incoming
+  - ufw allow 8443/tcp
+  - ufw allow 8443/udp
+  - ufw --force enable
+  - systemctl enable --now docker
+  - docker compose -f /opt/aegis/docker-compose.yml up -d

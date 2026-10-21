@@ -15,6 +15,7 @@ $failed = $false
 $files = git ls-files | Where-Object {
     $_ -ne "scripts/check-secrets.ps1" -and
     $_ -ne "scripts/check-secrets.sh" -and
+    $_ -notmatch '\.(apk|aab|exe|dll|so|dylib|jar|zip|png|jpg|jpeg|gif|ico|webp)$' -and
     (Test-Path $_)
 }
 

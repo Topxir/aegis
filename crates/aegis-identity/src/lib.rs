@@ -609,6 +609,23 @@ impl fmt::Debug for AccountVault {
     }
 }
 
+impl Drop for AccountVault {
+    fn drop(&mut self) {
+        for b in &mut self.master_identity_secret {
+            *b = black_box(0u8);
+        }
+        let _ = black_box(self.master_identity_secret.as_mut_slice());
+        for q in &mut self.active_queue_ids {
+            for b in q.iter_mut() {
+                *b = black_box(0u8);
+            }
+            let _ = black_box(q.as_mut_slice());
+        }
+        self.active_queue_ids.clear();
+        compiler_fence(Ordering::SeqCst);
+    }
+}
+
 impl AccountVault {
     fn to_bytes(&self) -> Vec<u8> {
         let count = u16::try_from(self.active_queue_ids.len()).unwrap_or(u16::MAX);
@@ -629,11 +646,17 @@ impl AccountVault {
         let mut master_identity_secret = [0u8; 32];
         master_identity_secret.copy_from_slice(&bytes[0..32]);
         if master_identity_secret == [0u8; 32] || bytes[32] > 1 {
+            for b in &mut master_identity_secret {
+                *b = black_box(0u8);
+            }
             return Err(CryptoError::AuthenticationFailed);
         }
         let recovery_phrase_enabled = bytes[32] == 1;
         let count = usize::from(u16::from_be_bytes([bytes[33], bytes[34]]));
         if bytes.len() != 35 + count * 32 {
+            for b in &mut master_identity_secret {
+                *b = black_box(0u8);
+            }
             return Err(CryptoError::AuthenticationFailed);
         }
         let mut active_queue_ids = Vec::with_capacity(count);
@@ -642,6 +665,9 @@ impl AccountVault {
             let mut q = [0u8; 32];
             q.copy_from_slice(&bytes[start..start + 32]);
             if q == [0u8; 32] || active_queue_ids.contains(&q) {
+                for b in &mut master_identity_secret {
+                    *b = black_box(0u8);
+                }
                 return Err(CryptoError::AuthenticationFailed);
             }
             active_queue_ids.push(q);
@@ -704,7 +730,10 @@ impl OpaqueAccountEnvelope {
         nonce: [u8; 12],
         vault: &AccountVault,
     ) -> Result<Self, CryptoError> {
-        if kdf_salt == [0u8; 32] || nonce == [0u8; 12] || vault.master_identity_secret == [0u8; 32]
+        if kdf_salt == [0u8; 32]
+            || nonce == [0u8; 12]
+            || vault.master_identity_secret == [0u8; 32]
+            || vault.active_queue_ids.len() > usize::from(u16::MAX)
         {
             return Err(CryptoError::KeyDerivationFailed);
         }
@@ -1069,15 +1098,23 @@ impl RecoveryPhrase {
         }
         let mut words = Vec::with_capacity(24);
         let mut indices = [0u8; 23];
+        let mut distinct_mask = 0u64;
         for i in 0..23 {
             let idx = entropy[i] & 0x3F;
             indices[i] = idx;
+            distinct_mask |= 1u64 << idx;
             words.push(RECOVERY_WORDLIST[usize::from(idx)].to_owned());
         }
-        if indices.iter().all(|&idx| idx == indices[0]) {
+        if distinct_mask.count_ones() < 8 {
+            for b in &mut indices {
+                *b = black_box(0u8);
+            }
             return Err(PasswordPolicyError::WeakPatternDetected);
         }
         let checksum = sha256(&indices)[0] & 0x3F;
+        for b in &mut indices {
+            *b = black_box(0u8);
+        }
         words.push(RECOVERY_WORDLIST[usize::from(checksum)].to_owned());
         Ok(Self { words })
     }
@@ -1086,27 +1123,42 @@ impl RecoveryPhrase {
     ///
     /// # Errors
     /// Returns [`PasswordPolicyError::WeakPatternDetected`] if the word count is not 24,
-    /// any word is unknown, all 23 data words are identical, or the SHA-256 checksum word fails verification.
+    /// any word is unknown, fewer than 8 distinct data words are present, or the SHA-256 checksum word fails verification.
     pub fn parse_and_verify(phrase: &str) -> Result<Self, PasswordPolicyError> {
         let tokens: Vec<&str> = phrase.split_whitespace().collect();
         if tokens.len() != 24 {
             return Err(PasswordPolicyError::WeakPatternDetected);
         }
         let mut indices = [0u8; 24];
+        let mut distinct_mask = 0u64;
         let mut words = Vec::with_capacity(24);
         for (i, &tok) in tokens.iter().enumerate() {
             let lower = tok.to_ascii_lowercase();
             let Some(pos) = RECOVERY_WORDLIST.iter().position(|&w| w == lower) else {
+                for b in &mut indices {
+                    *b = black_box(0u8);
+                }
                 return Err(PasswordPolicyError::WeakPatternDetected);
             };
-            indices[i] = pos as u8;
+            let idx = pos as u8;
+            indices[i] = idx;
+            if i < 23 {
+                distinct_mask |= 1u64 << idx;
+            }
             words.push(lower);
         }
-        if indices[0..23].iter().all(|&idx| idx == indices[0]) {
+        if distinct_mask.count_ones() < 8 {
+            for b in &mut indices {
+                *b = black_box(0u8);
+            }
             return Err(PasswordPolicyError::WeakPatternDetected);
         }
         let expected_checksum = sha256(&indices[0..23])[0] & 0x3F;
-        if indices[23] != expected_checksum {
+        let valid_checksum = indices[23] == expected_checksum;
+        for b in &mut indices {
+            *b = black_box(0u8);
+        }
+        if !valid_checksum {
             return Err(PasswordPolicyError::WeakPatternDetected);
         }
         Ok(Self { words })
@@ -1125,13 +1177,20 @@ impl RecoveryPhrase {
     pub fn derive_recovery_seed(&self) -> Result<ZeroizingBuffer, CryptoError> {
         let joined = ZeroizingBuffer::new(self.words.join(" ").into_bytes());
         let mut out = [0u8; 32];
-        hkdf_sha256(
+        let res = hkdf_sha256(
             b"Aegis-RecoverySeed-v1",
             joined.as_slice(),
             b"master-recovery",
             &mut out,
-        )?;
-        Ok(ZeroizingBuffer::new(out.to_vec()))
+        );
+        let seed = ZeroizingBuffer::new(out.to_vec());
+        for b in &mut out {
+            *b = black_box(0u8);
+        }
+        let _ = black_box(out.as_mut_slice());
+        compiler_fence(Ordering::SeqCst);
+        res?;
+        Ok(seed)
     }
 }
 

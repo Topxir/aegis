@@ -155,17 +155,39 @@ fn is_valid_hex_color(token: &str) -> bool {
 }
 
 fn is_valid_bridge_host(host: &str) -> bool {
-    let trimmed = host.trim();
-    !trimmed.is_empty()
-        && trimmed.len() <= 253
-        && !trimmed.starts_with('.')
-        && !trimmed.ends_with('.')
-        && !trimmed.starts_with('-')
-        && !trimmed.ends_with('-')
-        && !trimmed.contains("..")
-        && trimmed
+    if host != host.trim()
+        || host.is_empty()
+        || host.len() > 253
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.starts_with('-')
+        || host.ends_with('-')
+        || host.contains("..")
+        || host.eq_ignore_ascii_case("localhost")
+        || host == "0.0.0.0"
+        || host == "255.255.255.255"
+        || host.starts_with("127.")
+        || !host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return false;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    for label in &labels {
+        if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+    }
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()))
+        && (labels.len() != 4 || labels.iter().any(|l| l.parse::<u8>().is_err()))
+    {
+        return false;
+    }
+    true
 }
 
 impl ThemePack {
@@ -241,7 +263,7 @@ impl ThemePack {
         let name = self.display_name.trim();
         if name.is_empty()
             || name.len() > 64
-            || name.chars().any(char::is_control)
+            || self.display_name.chars().any(char::is_control)
             || !is_valid_hex_color(&self.bg_primary_hex)
             || !is_valid_hex_color(&self.bg_surface_hex)
             || !is_valid_hex_color(&self.accent_hex)

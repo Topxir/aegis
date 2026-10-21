@@ -298,12 +298,16 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
                 let mut in_parens = false;
                 let mut digits_in_parens = 0usize;
                 let mut best_end: Option<usize> = None;
+                let mut contiguous_overflow_before_space = false;
 
                 while cur < bytes.len() {
                     let b = bytes[cur];
                     if b.is_ascii_digit() {
                         digit_count += 1;
                         if digit_count > 15 {
+                            if best_end.is_none() {
+                                contiguous_overflow_before_space = true;
+                            }
                             break;
                         }
                         if in_parens {
@@ -311,15 +315,18 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
                         }
                         cur += 1;
                         if !in_parens && (10..=15).contains(&digit_count) {
-                            let next_is_alnum_or_decimal = cur < message.len()
+                            let next_continues_token = cur < message.len()
                                 && (message[cur..]
                                     .chars()
                                     .next()
                                     .is_some_and(char::is_alphanumeric)
+                                    || (bytes[cur] == b'-'
+                                        && cur + 1 < bytes.len()
+                                        && bytes[cur + 1].is_ascii_digit())
                                     || (bytes[cur] == b'.'
                                         && cur + 1 < bytes.len()
                                         && bytes[cur + 1].is_ascii_digit()));
-                            if !next_is_alnum_or_decimal {
+                            if !next_continues_token {
                                 best_end = Some(cur);
                             }
                         }
@@ -354,9 +361,8 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
                     }
                 }
 
-                // Only accept if we didn't overflow 15 contiguous digits in the same number
-                let overflowed_digits = digit_count > 15;
-                if !overflowed_digits {
+                // Only accept if we didn't overflow 15 contiguous digits before finding a valid boundary
+                if !contiguous_overflow_before_space {
                     if let Some(phone_end) = best_end {
                         if is_international_phone(&message[p..phone_end]) {
                             warnings.push(LeakWarning {
@@ -374,9 +380,18 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
         p += 1;
     }
 
-    // 3. Scan whitespace-delimited tokens for email addresses
+    // 3. Scan delimiter-separated tokens for email addresses (including comma/semicolon lists & mailto:)
     let mut byte_cursor = 0usize;
-    for raw_token in message.split_whitespace() {
+    for raw_token in message.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | ';' | '(' | ')' | '[' | ']' | '<' | '>' | '"' | '\''
+            )
+    }) {
+        if raw_token.is_empty() {
+            continue;
+        }
         let Some(rel_pos) = message[byte_cursor..].find(raw_token) else {
             break;
         };
@@ -384,20 +399,18 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
         let token_end = token_start + raw_token.len();
         byte_cursor = token_end;
 
-        let left_trimmed = raw_token.trim_start_matches(|c: char| {
-            matches!(
-                c,
-                ',' | ';' | ':' | '!' | '?' | '(' | '[' | '<' | '"' | '\''
-            )
-        });
-        let right_trimmed = left_trimmed.trim_end_matches(|c: char| {
-            matches!(
-                c,
-                ',' | ';' | ':' | '!' | '?' | ')' | ']' | '>' | '"' | '\''
-            )
-        });
+        let without_mailto =
+            if raw_token.len() > 7 && raw_token.as_bytes()[..7].eq_ignore_ascii_case(b"mailto:") {
+                &raw_token[7..]
+            } else {
+                raw_token
+            };
+        let left_trimmed = without_mailto.trim_start_matches([':', '!', '?']);
+        let right_punct_trimmed = left_trimmed.trim_end_matches([':', '!', '?']);
         // Strip at most a single sentence-ending period so `..` remains invalid
-        let trimmed = right_trimmed.strip_suffix('.').unwrap_or(right_trimmed);
+        let trimmed = right_punct_trimmed
+            .strip_suffix('.')
+            .unwrap_or(right_punct_trimmed);
         let trim_offset = raw_token.len() - left_trimmed.len();
         let clean_start = token_start + trim_offset;
         let clean_end = clean_start + trimmed.len();
@@ -414,7 +427,7 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
     // 4. Scan for accidental inclusion of user's own secret login nickname (case-insensitive, word-bounded)
     if let Some(nick) = own_login_nickname {
         let trimmed_nick = nick.trim().to_ascii_lowercase();
-        if trimmed_nick.len() >= 4 && trimmed_nick.is_ascii() {
+        if trimmed_nick.len() >= 3 && trimmed_nick.is_ascii() {
             let msg_bytes = message.as_bytes();
             let nick_bytes = trimmed_nick.as_bytes();
             let mut idx = 0usize;
@@ -1037,7 +1050,7 @@ fn hex_decode_32(hex_str: &str) -> Result<[u8; 32], ProtocolError> {
 }
 
 fn is_valid_invite_endpoint(endpoint: &str) -> bool {
-    if endpoint.is_empty() || endpoint.len() > 253 {
+    if endpoint.is_empty() || endpoint.len() > 253 || endpoint != endpoint.trim() {
         return false;
     }
     let Some((host, port_str)) = endpoint.rsplit_once(':') else {
@@ -1047,9 +1060,22 @@ fn is_valid_invite_endpoint(endpoint: &str) -> bool {
         || host.starts_with('.')
         || host.ends_with('.')
         || host.contains("..")
+        || host == "0.0.0.0"
+        || host == "255.255.255.255"
         || !host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return false;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    for label in &labels {
+        if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+    }
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()))
+        && (labels.len() != 4 || labels.iter().any(|l| l.parse::<u8>().is_err()))
     {
         return false;
     }
@@ -1065,7 +1091,7 @@ impl ContactInvite {
     /// # Errors
     /// Returns [`ProtocolError`] if any key/queue is all-zero, `max_activations == 0`, or the server endpoint is empty/invalid.
     pub fn to_uri(&self) -> Result<String, ProtocolError> {
-        let endpoint = self.server_endpoint.trim();
+        let endpoint = &self.server_endpoint;
         if !is_valid_invite_endpoint(endpoint)
             || self.recipient_queue_id == [0u8; 32]
             || self.x25519_public == [0u8; 32]
@@ -1242,7 +1268,10 @@ impl GroupChatSession {
         if update_entropy == &[0u8; 32] {
             return Err(ProtocolError::InvalidReplyQueueId);
         }
-        let next_epoch = self.epoch.saturating_add(1);
+        let next_epoch = self
+            .epoch
+            .checked_add(1)
+            .ok_or(ProtocolError::MalformedPaddedFrame)?;
         let mut next_secret = [0u8; 32];
         hkdf_sha256(
             self.epoch_secret.as_slice(),
@@ -1307,14 +1336,18 @@ impl GroupChatSession {
         nonce: &[u8; 12],
         plaintext: &[u8],
     ) -> Result<Vec<u8>, ProtocolError> {
+        if nonce == &[0u8; 12] {
+            return Err(ProtocolError::MalformedPaddedFrame);
+        }
         let mut key = [0u8; 32];
         key.copy_from_slice(self.epoch_secret.as_slice());
         let mut aad = [0u8; 40];
         aad[0..32].copy_from_slice(&self.group_id);
         aad[32..40].copy_from_slice(&self.epoch.to_be_bytes());
-        let ct = aead_seal(&key, nonce, &aad, plaintext)
-            .map_err(|_| ProtocolError::MalformedPaddedFrame)?;
+        let res = aead_seal(&key, nonce, &aad, plaintext)
+            .map_err(|_| ProtocolError::MalformedPaddedFrame);
         key.fill(0);
+        let ct = res?;
         pad_frame(&ct)
     }
 
@@ -1327,6 +1360,9 @@ impl GroupChatSession {
         nonce: &[u8; 12],
         padded_frame: &[u8],
     ) -> Result<ZeroizingBuffer, ProtocolError> {
+        if nonce == &[0u8; 12] {
+            return Err(ProtocolError::MalformedPaddedFrame);
+        }
         let ct = unpad_frame(padded_frame)?;
         let mut key = [0u8; 32];
         key.copy_from_slice(self.epoch_secret.as_slice());
@@ -1794,5 +1830,29 @@ mod tests {
         );
         assert_eq!(group.members(), &[alice, bob]);
         assert_eq!(group.epoch(), 2);
+    }
+
+    #[test]
+    fn b0059_phone_scanner_with_trailing_digits_mailto_comma_emails_3char_nick_and_group_zero_nonce(
+    ) {
+        // 1. Phone followed by space-separated digits (e.g. amount) must still be detected
+        let leaks = scan_message_for_leaks("Перевод +7 (999) 123-45-67 10000", Some("neo"));
+        assert!(leaks.iter().any(|w| w.kind == LeakKind::PhoneNumber));
+
+        // 2. Comma-joined emails, mailto:, and sentence-ending `(email).` must be detected, plus 3-char nickname
+        let leaks2 = scan_message_for_leaks(
+            "Contact mailto:alice@proton.me,bob@tuta.io or (carol@aegis.org). Login: neo",
+            Some("neo"),
+        );
+        let email_count = leaks2
+            .iter()
+            .filter(|w| w.kind == LeakKind::EmailAddress)
+            .count();
+        assert_eq!(email_count, 3);
+        assert!(leaks2.iter().any(|w| w.kind == LeakKind::OwnLoginNickname));
+
+        // 3. GroupChatSession rejects all-zero nonce
+        let group = GroupChatSession::new([0x99; 32], [0xAA; 32], [0x77; 32]).unwrap();
+        assert!(group.seal_group_message(&[0u8; 12], b"msg").is_err());
     }
 }

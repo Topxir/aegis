@@ -171,7 +171,7 @@ pub fn verify_support_certificate(
     let label = cert.role_label.trim();
     if label.is_empty()
         || label.len() > 128
-        || label.chars().any(char::is_control)
+        || cert.role_label.chars().any(char::is_control)
         || current_unix_secs > cert.expires_at_unix_secs
     {
         return Err(DirectoryError::InvalidPublicKey);
@@ -184,18 +184,20 @@ pub fn verify_support_certificate(
     )
 }
 
-/// Signed catalog entry for a server in the built-in directory (PLAN.md §6.3, §14).
+/// Signed catalog entry for a server in the built-in directory (PLAN.md §6.3, §14, D-0019).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryServerEntry {
     /// Human-readable server alias.
     pub name: String,
-    /// Connection URI (`aegis://...` or `.onion` endpoint).
+    /// Connection URI (`aegis://<static_ip>:8443`, `aegis://<host>:8443`, or `.onion` endpoint).
     pub endpoint_uri: String,
+    /// Optional dedicated static IPv4 address (`[a, b, c, d]`) for instant direct connection without Tor (D-0019).
+    pub static_ipv4: Option<[u8; 4]>,
     /// Server Ed25519 public key.
     pub server_public_key: [u8; 32],
     /// Assigned verification badge (`OfficialDoubleCheck` `✓✓`, `VerifiedSingleCheck` `✓`, or `CommunityUnverified`).
     pub badge: ServerBadge,
-    /// Whether this server is a Tor `.onion` hidden service.
+    /// Whether this server is an optional Tor `.onion` hidden service.
     pub is_tor_onion: bool,
     /// Public zero-personal-data 30-day uptime percentage in basis points (`0..=10_000`, e.g. `9995` = `99.95%`).
     pub uptime_bps: u16,
@@ -203,7 +205,39 @@ pub struct DirectoryServerEntry {
     pub attestations: Vec<SignerAttestation>,
 }
 
-/// Built-in signed catalog of Official (`✓✓`), Verified (`✓`), and Tor `.onion` servers (PLAN.md §6.3, §14).
+fn is_valid_public_static_ipv4(ip: [u8; 4]) -> bool {
+    ip != [0, 0, 0, 0] && ip[0] != 0 && ip[0] != 127 && ip != [255, 255, 255, 255]
+}
+
+fn is_valid_directory_endpoint(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("aegis://") else {
+        return false;
+    };
+    let host_port = rest.strip_prefix("server/").unwrap_or(rest);
+    let host_port = host_port.split('?').next().unwrap_or(host_port);
+    let Some((host, port_str)) = host_port.rsplit_once(':') else {
+        return false;
+    };
+    if host.is_empty()
+        || host.len() > 253
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.starts_with('-')
+        || host.ends_with('-')
+        || host.contains("..")
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return false;
+    }
+    let Ok(port) = port_str.parse::<u16>() else {
+        return false;
+    };
+    port > 0
+}
+
+/// Built-in signed catalog of Official (`✓✓`), Verified (`✓`), Static-IP, and Tor `.onion` servers (PLAN.md §6.3, D-0019).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltInDirectory {
     /// Default M-of-N foundation threshold policy.
@@ -223,7 +257,8 @@ impl Default for BuiltInDirectory {
 }
 
 impl BuiltInDirectory {
-    /// Returns the embedded foundation-signed server directory and support certificate.
+    /// Returns the embedded foundation-signed server directory and support certificate,
+    /// including ready-to-use static-IP starter servers that work directly without requiring Tor (D-0019).
     #[must_use]
     pub fn embedded_catalog() -> Self {
         let foundation_key_1 = [0xF1; 32];
@@ -248,8 +283,9 @@ impl BuiltInDirectory {
 
         let entries = vec![
             DirectoryServerEntry {
-                name: "Aegis Official Core #1 (Zurich) ✓✓".to_owned(),
-                endpoint_uri: "aegis://core-ch1.aegis.net:8443".to_owned(),
+                name: "Aegis Official Starter #1 (Zurich Static IP, Без Tor) ✓✓".to_owned(),
+                endpoint_uri: "aegis://185.220.101.42:8443".to_owned(),
+                static_ipv4: Some([185, 220, 101, 42]),
                 server_public_key: [0xA1; 32],
                 badge: ServerBadge::OfficialDoubleCheck,
                 is_tor_onion: false,
@@ -257,23 +293,35 @@ impl BuiltInDirectory {
                 attestations: foundation_attestations.clone(),
             },
             DirectoryServerEntry {
-                name: "Aegis Official Onion Relay ✓✓".to_owned(),
+                name: "Aegis Official Starter #2 (Frankfurt Static IP, Без Tor) ✓✓".to_owned(),
+                endpoint_uri: "aegis://91.108.56.110:8443".to_owned(),
+                static_ipv4: Some([91, 108, 56, 110]),
+                server_public_key: [0xA3; 32],
+                badge: ServerBadge::OfficialDoubleCheck,
+                is_tor_onion: false,
+                uptime_bps: 9_996,
+                attestations: foundation_attestations.clone(),
+            },
+            DirectoryServerEntry {
+                name: "Nordic Privacy Collective (Iceland Static IP, Без Tor) ✓".to_owned(),
+                endpoint_uri: "aegis://193.163.125.18:8443".to_owned(),
+                static_ipv4: Some([193, 163, 125, 18]),
+                server_public_key: [0xB1; 32],
+                badge: ServerBadge::VerifiedSingleCheck,
+                is_tor_onion: false,
+                uptime_bps: 9_985,
+                attestations: foundation_attestations.clone(),
+            },
+            DirectoryServerEntry {
+                name: "Aegis Official Onion Relay (Опциональный Tor .onion) ✓✓".to_owned(),
                 endpoint_uri:
                     "aegis://aegis7x9q2v4k8m3n5p7r9t2w4y6z8a1b3c5d7e9f1g3h5j7k9l2m4n.onion:8443"
                         .to_owned(),
+                static_ipv4: None,
                 server_public_key: [0xA2; 32],
                 badge: ServerBadge::OfficialDoubleCheck,
                 is_tor_onion: true,
                 uptime_bps: 9_995,
-                attestations: foundation_attestations.clone(),
-            },
-            DirectoryServerEntry {
-                name: "Nordic Privacy Collective (Iceland) ✓".to_owned(),
-                endpoint_uri: "aegis://relay-is.nordicprivacy.org:8443".to_owned(),
-                server_public_key: [0xB1; 32],
-                badge: ServerBadge::VerifiedSingleCheck,
-                is_tor_onion: false,
-                uptime_bps: 9_980,
                 attestations: foundation_attestations.clone(),
             },
         ];
@@ -297,27 +345,49 @@ impl BuiltInDirectory {
     /// have valid non-empty names/endpoints and `uptime_bps <= 10_000`, and are not in `revoked_keys`.
     #[must_use]
     pub fn verified_entries(&self) -> Vec<&DirectoryServerEntry> {
-        self.entries
-            .iter()
-            .filter(|entry| {
-                !entry.name.trim().is_empty()
-                    && !entry.name.chars().any(char::is_control)
-                    && entry.endpoint_uri.starts_with("aegis://")
-                    && !entry
-                        .endpoint_uri
-                        .chars()
-                        .any(|c| c.is_control() || c.is_whitespace())
-                    && entry.uptime_bps <= 10_000
-                    && (!entry.is_tor_onion || entry.endpoint_uri.contains(".onion:"))
-                    && verify_server_badge(
-                        entry.badge,
-                        &entry.server_public_key,
-                        &self.revoked_keys,
-                        &self.policy,
-                        &entry.attestations,
-                    )
-                    .is_ok()
-            })
+        let mut seen_keys: Vec<[u8; 32]> = Vec::new();
+        let mut out = Vec::new();
+        for entry in &self.entries {
+            let valid_static_ip = match (entry.is_tor_onion, entry.static_ipv4) {
+                (true, Some(_)) => false,
+                (true, None) => true,
+                (false, Some(ip)) => is_valid_public_static_ipv4(ip),
+                (false, None) => true,
+            };
+            let is_valid = !entry.name.trim().is_empty()
+                && !entry.name.chars().any(char::is_control)
+                && entry.endpoint_uri == entry.endpoint_uri.trim()
+                && !entry
+                    .endpoint_uri
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace())
+                && is_valid_directory_endpoint(&entry.endpoint_uri)
+                && entry.uptime_bps <= 10_000
+                && entry.is_tor_onion == entry.endpoint_uri.contains(".onion:")
+                && valid_static_ip
+                && !seen_keys.contains(&entry.server_public_key)
+                && verify_server_badge(
+                    entry.badge,
+                    &entry.server_public_key,
+                    &self.revoked_keys,
+                    &self.policy,
+                    &entry.attestations,
+                )
+                .is_ok();
+            if is_valid {
+                seen_keys.push(entry.server_public_key);
+                out.push(entry);
+            }
+        }
+        out
+    }
+
+    /// Returns verified starter servers with direct static IPv4 addresses that do NOT require Tor (D-0019).
+    #[must_use]
+    pub fn direct_static_ip_entries(&self) -> Vec<&DirectoryServerEntry> {
+        self.verified_entries()
+            .into_iter()
+            .filter(|e| !e.is_tor_onion && e.static_ipv4.is_some())
             .collect()
     }
 }
@@ -445,8 +515,13 @@ mod tests {
     #[test]
     fn builtin_directory_and_support_certificate_verify_and_respect_revocation() {
         let mut dir = BuiltInDirectory::embedded_catalog();
-        assert_eq!(dir.verified_entries().len(), 3);
+        assert_eq!(dir.verified_entries().len(), 4);
+        assert_eq!(dir.direct_static_ip_entries().len(), 3);
         assert!(dir.verified_entries().iter().any(|e| e.is_tor_onion));
+        assert_eq!(
+            dir.direct_static_ip_entries()[0].static_ipv4,
+            Some([185, 220, 101, 42])
+        );
 
         assert!(verify_support_certificate(
             &dir.official_support_certificate,
@@ -468,11 +543,11 @@ mod tests {
         // Revoking a server key removes it from verified_entries()
         let revoked_server = dir.entries[0].server_public_key;
         dir.revoked_keys.push(revoked_server);
-        assert_eq!(dir.verified_entries().len(), 2);
+        assert_eq!(dir.verified_entries().len(), 3);
 
         // B-0026: Entry with uptime_bps > 10_000 or control chars in role_label is rejected
         dir.entries[1].uptime_bps = 15_000;
-        assert_eq!(dir.verified_entries().len(), 1);
+        assert_eq!(dir.verified_entries().len(), 2);
         dir.official_support_certificate.role_label = "Bad\0Role".to_owned();
         assert!(verify_support_certificate(
             &dir.official_support_certificate,
