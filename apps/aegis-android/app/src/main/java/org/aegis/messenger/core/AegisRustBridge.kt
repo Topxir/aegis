@@ -434,6 +434,40 @@ class AegisRustBridge(private val context: Context) {
     }
 
     /**
+     * Creates a new cross-border E2EE chat channel with a shared channel code so two users in any countries can message each other.
+     */
+    fun createCustomChannelChat(contactTitle: String, channelCode: String): Result<Int> {
+        val cleanTitle = contactTitle.trim()
+        val cleanCode = channelCode.trim()
+        if (cleanTitle.isEmpty() || cleanCode.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Укажите имя собеседника и код канала"))
+        }
+        if (chats.size >= 64) {
+            return Result.failure(IllegalStateException("Достигнут лимит открытых чатов"))
+        }
+        val tag = if (cleanCode.startsWith("queue://")) cleanCode else "queue://$cleanCode"
+        val newChat = ChatItemUi(
+            chatIdHex = "ch-${chats.size + 10}",
+            title = "🔐 $cleanTitle",
+            queueTag = tag,
+            isSavedNotes = false,
+            verifiedSupportBadge = false,
+            perChatPin = null,
+            isLocked = false,
+            messages = mutableListOf(
+                ChatMessageUi(
+                    outgoing = false,
+                    text = "Международный канал «$cleanCode» открыт. Сообщения шифруются ChaCha20-Poly1305 (256B).",
+                    paddedBucketBytes = 256,
+                    ttlSeconds = 3600
+                )
+            )
+        )
+        chats.add(newChat)
+        return Result.success(chats.lastIndex)
+    }
+
+    /**
      * Activates a blind-signed `SupporterPass` token (`aegis_ffi::SupporterPass`) to unlock 5 account slots.
      */
     fun activateSupporterPass(blindTokenHex: String): Boolean {

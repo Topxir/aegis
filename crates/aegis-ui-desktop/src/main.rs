@@ -1,18 +1,20 @@
 //! `aegis-desktop` — Runnable Desktop Client binary for Aegis.
 //!
 //! Modes:
-//! - `aegis-desktop --self-test` or `aegis-desktop --demo` (or default when no flags given in non-GUI mode):
+//! - Default (double-click `aegis-desktop.exe` or `--gui [--port 7878]`):
+//!   starts the local interactive Aurora Glassmorphism Desktop GUI on `http://127.0.0.1:7878`
+//!   (starting with Step 1: Account Login -> Step 2: Server Selection -> Step 3: Messenger Chats)
+//!   and automatically opens the interface in the system browser.
+//! - `aegis-desktop --self-test` or `aegis-desktop --demo`:
 //!   runs a complete end-to-end verification of all 10 desktop subsystems and prints a detailed Russian report.
-//! - `aegis-desktop --gui [--port 7878]`:
-//!   starts the local interactive Desktop GUI HTTP server on `http://127.0.0.1:7878` so the user can
-//!   test every feature interactively in their browser/WebView.
 
 use aegis_ffi::Locale;
 use aegis_ui_desktop::{
-    run_automated_demo_walkthrough, DesktopAppState, DesktopGuiServer, DesktopUiError,
+    run_automated_demo_walkthrough, DesktopAppState, DesktopGuiServer, DesktopUiError, Screen,
 };
 use std::env;
-use std::process::ExitCode;
+use std::net::TcpListener;
+use std::process::{Command, ExitCode};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -54,8 +56,9 @@ fn main() -> ExitCode {
         idx += 1;
     }
 
+    // Double-clicking aegis-desktop.exe with no flags launches the interactive GUI immediately!
     if !run_gui && !run_demo {
-        run_demo = true;
+        run_gui = true;
     }
 
     if run_demo {
@@ -63,9 +66,6 @@ fn main() -> ExitCode {
             Ok(report) => {
                 println!("{report}");
                 if !run_gui {
-                    println!(
-                        "💡 Для запуска интерактивного графического окна в браузере выполните:\n   cargo run -p aegis-ui-desktop --bin aegis-desktop -- --gui --port 7878"
-                    );
                     return ExitCode::SUCCESS;
                 }
             }
@@ -86,23 +86,59 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn launch_gui_server(port: u16, max_requests: Option<usize>) -> Result<(), DesktopUiError> {
-    let state = DesktopAppState::new(Locale::Ru);
+fn find_available_port(preferred: u16) -> u16 {
+    for candidate in preferred..=preferred.saturating_add(20) {
+        if TcpListener::bind(format!("127.0.0.1:{candidate}")).is_ok() {
+            return candidate;
+        }
+    }
+    preferred
+}
+
+fn launch_gui_server(
+    preferred_port: u16,
+    max_requests: Option<usize>,
+) -> Result<(), DesktopUiError> {
+    let port = if max_requests.is_none() {
+        find_available_port(preferred_port)
+    } else {
+        preferred_port
+    };
+    let mut state = DesktopAppState::new(Locale::Ru);
+    // Start on Step 1 (Account Login / Registration -> Step 2 Server Selection -> Step 3 Chats)
+    state.current_screen = Screen::Onboarding;
+    let url = format!("http://127.0.0.1:{port}");
+    println!("============================================================");
+    println!("🛡 AEGIS AURORA GLASS DESKTOP ЗАПУЩЕН: {url}");
+    println!("   Шаг 1: Вход в аккаунт -> Шаг 2: Выбор сервера -> Шаг 3: Чаты");
+    println!("   Окно открывается автоматически. Нажмите Ctrl+C для выхода.");
+    println!("============================================================");
+
+    if max_requests.is_none() {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = Command::new("cmd").args(["/C", "start", "", &url]).spawn();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = Command::new("xdg-open").arg(&url).spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = Command::new("open").arg(&url).spawn();
+        }
+    }
+
     let mut server = DesktopGuiServer::new(port, state);
-    println!("============================================================");
-    println!("🖥 AEGIS DESKTOP GUI ЗАПУЩЕН: http://127.0.0.1:{port}");
-    println!("   Откройте ссылку в браузере для интерактивного управления всеми функциями.");
-    println!("   Нажмите Ctrl+C для завершения работы.");
-    println!("============================================================");
     server.serve_blocking(max_requests)
 }
 
 fn print_help() {
-    println!("Aegis Desktop Client (E2EE / Zero-Knowledge)");
+    println!("Aegis Desktop Client (Aurora Glass / E2EE / Zero-Knowledge)");
     println!("Использование:");
     println!(
-        "  aegis-desktop --self-test        Полный автотест и демонстрация всех функций на ПК"
+        "  aegis-desktop                    Запуск интерактивного GUI (Вход -> Серверы -> Чаты)"
     );
-    println!("  aegis-desktop --demo             Аналогично --self-test");
-    println!("  aegis-desktop --gui [--port N]   Запуск интерактивного локального GUI на http://127.0.0.1:7878");
+    println!("  aegis-desktop --gui [--port N]   Запуск GUI на указанном локальном порту");
+    println!("  aegis-desktop --self-test        Полный автотест всех подсистем на ПК");
 }

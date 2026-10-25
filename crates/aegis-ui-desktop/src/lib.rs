@@ -1491,6 +1491,132 @@ impl DesktopGuiServer {
             })
             .collect();
 
+        let chat_list_sidebar_html: String = self
+            .state
+            .chats
+            .iter()
+            .enumerate()
+            .map(|(idx, c)| {
+                let is_active = idx == self.state.active_chat_index;
+                let item_cls = if is_active {
+                    "chat-item active"
+                } else {
+                    "chat-item"
+                };
+                let icon = if c.is_local_saved_notes {
+                    "📌"
+                } else if c.verified_support_badge {
+                    "✓"
+                } else if c.is_locked {
+                    "🔒"
+                } else {
+                    "🛡"
+                };
+                let preview = if c.is_locked {
+                    "Чат защищён PIN-кодом".to_owned()
+                } else {
+                    c.messages.last().map_or_else(
+                        || "Канал готов к обмену капсулами".to_owned(),
+                        |m| {
+                            let chars: String = m.text.chars().take(42).collect();
+                            chars
+                        },
+                    )
+                };
+                format!(
+                    "<a class='{item_cls}' href='/action?cmd=select_chat&idx={idx}'>
+                        <div class='avatar'>{icon}</div>
+                        <div class='chat-meta'>
+                            <div class='chat-name'>{}</div>
+                            <div class='chat-sub'>{}</div>
+                        </div>
+                    </a>",
+                    html_escape(&c.title),
+                    html_escape(&preview)
+                )
+            })
+            .collect();
+
+        let active_srv_ep = self
+            .state
+            .directory_servers
+            .get(self.state.selected_server_index)
+            .map_or("185.220.101.42:8443", |srv| srv.endpoint.as_str());
+
+        let step_1_cls = if self.state.current_screen == Screen::Onboarding {
+            "step-pill active"
+        } else {
+            "step-pill"
+        };
+        let step_2_cls = if self.state.current_screen == Screen::ServerLauncher {
+            "step-pill active"
+        } else {
+            "step-pill"
+        };
+        let step_3_cls = if self.state.current_screen == Screen::ChatWorkspace {
+            "step-pill active"
+        } else {
+            "step-pill"
+        };
+
+        let onboarding_overlay_html = if self.state.current_screen == Screen::Onboarding {
+            format!(
+                "<div class='step-hero glass'>
+                    <div class='slogan-kicker'>✦ AEGIS AURORA GLASS // ZERO-KNOWLEDGE MESSENGER</div>
+                    <h1 style='margin:6px 0 4px 0;font-size:26px;color:#fff;'>Шаг 1. Вход в защищённый аккаунт</h1>
+                    <p class='slogan-sub'>«Тень не оставляет следов. Твоя свобода — под защитой математики. Ни номеров. Ни почт. Ни границ.»</p>
+                    <form action='/action' method='get' class='auth-form'>
+                        <input type='hidden' name='cmd' value='login_account'>
+                        <label>1. Ваш криптостойкий логин-ник (OPAQUE KDF — сервер его не видит)</label>
+                        <div style='display:flex;gap:8px;margin-bottom:10px;'>
+                            <input type='text' name='nick' value='{curr_nick}' style='width:100%;'>
+                            <a class='btn' href='/action?cmd=gen_nick'>🎲 Сгенерировать</a>
+                        </div>
+                        <label>2. Отображаемое имя (видят только ваши контакты)</label>
+                        <input type='text' name='alias' value='Призрак Сети' style='width:100%;margin-bottom:10px;'>
+                        <label>3. Строгий пароль (≥12 символов, ≥3 ЗАГЛАВНЫЕ буквы, цифры и спецсимволы)</label>
+                        <input type='password' name='pwd' value='AEGis#StrongPass99!' style='width:100%;margin-bottom:14px;'>
+                        <div style='display:flex;gap:10px;'>
+                            <button type='submit' class='btn ok' style='padding:11px 20px;font-size:14px;'>🚀 Войти и выбрать сервер (Шаг 2) →</button>
+                            <a class='btn' href='/action?cmd=step_servers' style='padding:11px 16px;'>Пропустить к серверам →</a>
+                        </div>
+                    </form>
+                </div>",
+                curr_nick = html_escape(&self.state.onboarding_nickname),
+            )
+        } else if self.state.current_screen == Screen::ServerLauncher {
+            format!(
+                "<div class='step-hero glass'>
+                    <div class='slogan-kicker'>✦ ШАГ 2 ИЗ 3 // ВЫБОР АНОНИМНОГО УЗЛА ФЕДЕРАЦИИ</div>
+                    <h1 style='margin:6px 0 4px 0;font-size:24px;color:#fff;'>Шаг 2. Выберите сервер связи (работает между любыми странами)</h1>
+                    <p class='slogan-sub'>«Создан быть невидимым. Спроектирован быть непобедимым.» Стартовые Static-IP узлы работают сразу без Tor.</p>
+                    <ul style='list-style:none;padding:0;margin:14px 0;'>{servers}</ul>
+                    <form action='/action' method='get' style='display:flex;gap:8px;margin:12px 0;'>
+                        <input type='hidden' name='cmd' value='custom_server'>
+                        <input type='text' name='ip' placeholder='Или введите свой Static IP:порт (напр. 185.220.101.42:8443)...' style='width:100%;'>
+                        <button class='btn ok' type='submit'>⚡ Подключить и войти в чаты →</button>
+                    </form>
+                    <div style='margin-top:12px;display:flex;gap:10px;'>
+                        <a class='btn ok' href='/action?cmd=step_chats' style='padding:11px 22px;font-size:14px;'>💬 Открыть мессенджер (Шаг 3: Чаты) →</a>
+                        <a class='btn' href='/action?cmd=step_account'>← Назад к аккаунту</a>
+                    </div>
+                </div>",
+                servers = servers_html,
+            )
+        } else {
+            String::new()
+        };
+
+        let unlock_pin_form_html = if active_chat.is_some_and(|c| c.is_locked) {
+            "<form action='/action' method='get' style='display:flex;gap:8px;margin:10px 0;'>
+                <input type='hidden' name='cmd' value='toggle_chat_pin'>
+                <input type='password' name='pin' placeholder='Введите PIN чата для разблокировки...' style='width:260px;'>
+                <button class='btn ok' type='submit'>🔓 Разблокировать чат</button>
+            </form>"
+        } else {
+            ""
+        };
+
         format!(
             "<!DOCTYPE html>
 <html lang='ru'>
@@ -1499,193 +1625,314 @@ impl DesktopGuiServer {
 <title>{title}</title>
 <style>
   :root {{
-    --void: #05080f;
-    --monolith: #0c121e;
-    --panel: #10192b;
-    --lazulite: #00f5b8;
+    --void: #070913;
+    --glass: rgba(17, 22, 40, 0.68);
+    --glass-strong: rgba(22, 28, 52, 0.84);
+    --glass-border: rgba(255, 255, 255, 0.13);
+    --violet: #8b5cf6;
+    --mint: #10f5cc;
     --cyan: #38bdf8;
     --crimson: #f43f5e;
     --amber: #f59e0b;
-    --text: #e2e8f0;
-    --muted: #64748b;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
   }}
+  * {{ box-sizing: border-box; }}
   body {{
     background-color: var(--void);
-    background-image: radial-gradient(rgba(0,245,184,0.06) 1px, transparent 1px), linear-gradient(180deg, #05080f 0%, #09101d 100%);
-    background-size: 24px 24px, 100% 100%;
+    background-image:
+      radial-gradient(circle at 12% 18%, rgba(139, 92, 246, 0.28) 0%, transparent 42%),
+      radial-gradient(circle at 88% 15%, rgba(16, 245, 204, 0.20) 0%, transparent 40%),
+      radial-gradient(circle at 50% 88%, rgba(56, 189, 248, 0.18) 0%, transparent 48%),
+      linear-gradient(160deg, #060711 0%, #0b1022 55%, #070b18 100%);
+    background-attachment: fixed;
     color: var(--text);
-    font-family: 'JetBrains Mono', 'Cascadia Code', 'Segoe UI', system-ui, monospace;
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
     margin: 0;
-    padding: 18px;
+    padding: 16px 20px;
+  }}
+  .glass {{
+    background: var(--glass);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid var(--glass-border);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    border-radius: 18px;
   }}
   .top {{
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: linear-gradient(90deg, rgba(12,18,30,0.96) 0%, rgba(16,25,43,0.96) 100%);
-    padding: 14px 20px;
-    border: 1px solid rgba(0,245,184,0.35);
-    box-shadow: 0 0 28px rgba(0,245,184,0.08);
-    clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
-    margin-bottom: 14px;
+    padding: 12px 20px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+    gap: 10px;
   }}
-  .topology {{
+  .brand-wrap {{ display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }}
+  .brand-logo {{
+    background: linear-gradient(135deg, var(--violet), var(--mint));
+    color: #05070f;
+    font-weight: 900;
+    padding: 6px 12px;
+    border-radius: 12px;
+    letter-spacing: 1px;
+    font-size: 14px;
+  }}
+  .slogan-bar {{
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: rgba(12,18,30,0.9);
-    border-left: 3px solid var(--lazulite);
-    border-right: 3px solid var(--cyan);
-    padding: 8px 16px;
+    padding: 9px 18px;
     margin-bottom: 14px;
     font-size: 12px;
-    letter-spacing: 0.4px;
+    border-radius: 14px;
+    background: linear-gradient(90deg, rgba(139,92,246,0.16), rgba(16,245,204,0.12));
+    border: 1px solid rgba(16,245,204,0.28);
   }}
-  .grid {{ display: grid; grid-template-columns: 330px 1fr 370px; gap: 16px; }}
-  .card {{
-    background: var(--monolith);
-    border: 1px solid rgba(56,189,248,0.22);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 10px 30px rgba(0,0,0,0.45);
-    clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
-    padding: 16px;
-  }}
-  h2, h3 {{
-    margin-top: 0;
-    color: var(--lazulite);
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    font-size: 14px;
-    border-bottom: 1px solid rgba(0,245,184,0.18);
-    padding-bottom: 8px;
-  }}
-  .btn {{
-    display: inline-block;
-    background: rgba(56,189,248,0.14);
-    color: var(--cyan);
-    border: 1px solid rgba(56,189,248,0.45);
+  .steps {{ display: flex; gap: 6px; align-items: center; }}
+  .step-pill {{
     text-decoration: none;
-    padding: 7px 12px;
+    color: var(--muted);
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    padding: 6px 13px;
+    border-radius: 999px;
     font-size: 12px;
     font-weight: 600;
-    margin: 3px 2px;
-    cursor: pointer;
-    clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 0 100%);
   }}
-  .btn.ok {{ background: rgba(0,245,184,0.14); color: var(--lazulite); border-color: var(--lazulite); }}
-  .btn.warn {{ background: rgba(245,158,11,0.15); color: var(--amber); border-color: var(--amber); }}
-  .btn.danger {{ background: rgba(244,63,94,0.18); color: var(--crimson); border-color: var(--crimson); }}
+  .step-pill.active {{
+    background: linear-gradient(135deg, rgba(139,92,246,0.38), rgba(16,245,204,0.28));
+    color: #fff;
+    border-color: var(--mint);
+    box-shadow: 0 0 18px rgba(16,245,204,0.25);
+  }}
+  .step-hero {{
+    max-width: 720px;
+    margin: 0 auto 18px auto;
+    padding: 26px 30px;
+    border: 1px solid rgba(16, 245, 204, 0.38);
+  }}
+  .slogan-kicker {{ color: var(--mint); font-size: 11px; font-weight: 700; letter-spacing: 1.4px; text-transform: uppercase; }}
+  .slogan-sub {{ color: #cbd5e1; font-size: 13px; font-style: italic; margin: 4px 0 16px 0; }}
+  .auth-form label {{ display: block; font-size: 12px; color: #cbd5e1; margin-bottom: 4px; font-weight: 600; }}
+  .grid {{ display: grid; grid-template-columns: 330px 1fr 350px; gap: 16px; align-items: start; }}
+  @media (max-width: 1100px) {{ .grid {{ grid-template-columns: 1fr; }} }}
+  .card {{ padding: 16px; }}
+  h2, h3 {{
+    margin-top: 0;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 700;
+    border-bottom: 1px solid rgba(255,255,255,0.09);
+    padding-bottom: 8px;
+  }}
+  .chat-list {{ display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }}
+  .chat-item {{
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    text-decoration: none;
+    color: var(--text);
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    transition: all 0.15s ease;
+  }}
+  .chat-item.active {{
+    background: linear-gradient(135deg, rgba(139,92,246,0.28), rgba(16,245,204,0.16));
+    border-color: var(--mint);
+  }}
+  .avatar {{
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(139,92,246,0.45), rgba(56,189,248,0.35));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+  }}
+  .chat-meta {{ overflow: hidden; }}
+  .chat-name {{ font-weight: 700; font-size: 13px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .chat-sub {{ font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }}
+  .btn {{
+    display: inline-block;
+    background: rgba(255,255,255,0.07);
+    color: #e2e8f0;
+    border: 1px solid rgba(255,255,255,0.16);
+    text-decoration: none;
+    padding: 7px 13px;
+    border-radius: 11px;
+    font-size: 12px;
+    font-weight: 600;
+    margin: 2px;
+    cursor: pointer;
+  }}
+  .btn.ok {{
+    background: linear-gradient(135deg, rgba(139,92,246,0.45), rgba(16,245,204,0.32));
+    color: #fff;
+    border-color: var(--mint);
+  }}
+  .btn.warn {{ background: rgba(245,158,11,0.18); color: #fcd34d; border-color: rgba(245,158,11,0.45); }}
+  .btn.danger {{ background: rgba(244,63,94,0.22); color: #fda4af; border-color: rgba(244,63,94,0.5); }}
   .tag {{
     display: inline-block;
-    background: rgba(16,25,43,0.95);
-    color: var(--cyan);
-    padding: 3px 9px;
+    background: rgba(15, 23, 42, 0.72);
+    color: var(--mint);
+    padding: 4px 10px;
+    border-radius: 999px;
     font-size: 11px;
     margin: 2px;
-    border: 1px solid rgba(56,189,248,0.3);
+    border: 1px solid rgba(16, 245, 204, 0.28);
   }}
   .msg {{
-    padding: 10px 14px;
+    padding: 11px 15px;
     margin: 10px 0;
-    background: var(--panel);
-    clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+    border-radius: 16px;
+    backdrop-filter: blur(16px);
   }}
-  .msg.in {{ border-left: 3px solid var(--cyan); border-top: 1px solid rgba(56,189,248,0.25); }}
-  .msg.out {{ border-left: 3px solid var(--lazulite); border-top: 1px solid rgba(0,245,184,0.25); background: rgba(0,245,184,0.05); }}
-  .cap-hdr {{ display: flex; justify-content: space-between; font-size: 10px; color: var(--lazulite); letter-spacing: 0.6px; margin-bottom: 6px; opacity: 0.85; }}
-  .cap-body {{ font-size: 13px; color: #f8fafc; line-height: 1.45; margin-bottom: 6px; }}
-  .cap-bar {{ height: 3px; background: rgba(255,255,255,0.06); width: 100%; overflow: hidden; margin-bottom: 4px; }}
-  .cap-fill {{ display: block; height: 100%; width: 100%; background: linear-gradient(90deg, var(--lazulite), var(--cyan)); }}
-  .modal {{ background: rgba(244,63,94,0.12); border: 1px solid var(--crimson); padding: 14px; margin-bottom: 12px; }}
-  .warn-box {{ background: rgba(245,158,11,0.12); border: 1px solid var(--amber); padding: 12px; }}
-  pre {{ background: #03060c; border: 1px solid rgba(0,245,184,0.2); padding: 10px; overflow-x: auto; font-size: 11px; color: var(--lazulite); }}
-  input[type=text] {{ background: #03060c; color: #fff; border: 1px solid rgba(0,245,184,0.4); padding: 9px; width: 70%; font-family: inherit; }}
+  .msg.in {{
+    background: rgba(30, 41, 59, 0.65);
+    border: 1px solid rgba(56, 189, 248, 0.28);
+    margin-right: 12%;
+    border-bottom-left-radius: 4px;
+  }}
+  .msg.out {{
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.30), rgba(16, 245, 204, 0.20));
+    border: 1px solid rgba(16, 245, 204, 0.42);
+    margin-left: 12%;
+    border-bottom-right-radius: 4px;
+  }}
+  .cap-hdr {{ display: flex; justify-content: space-between; font-size: 10px; color: var(--mint); margin-bottom: 5px; opacity: 0.9; }}
+  .cap-body {{ font-size: 14px; color: #ffffff; line-height: 1.45; margin-bottom: 6px; }}
+  .cap-bar {{ height: 3px; background: rgba(255,255,255,0.08); border-radius: 999px; overflow: hidden; margin-bottom: 4px; }}
+  .cap-fill {{ display: block; height: 100%; width: 100%; background: linear-gradient(90deg, var(--violet), var(--mint)); }}
+  .modal {{ background: rgba(244,63,94,0.16); border: 1px solid var(--crimson); padding: 14px; border-radius: 14px; margin-bottom: 12px; }}
+  .warn-box {{ background: rgba(245,158,11,0.15); border: 1px solid var(--amber); padding: 12px; border-radius: 12px; }}
+  pre {{ background: rgba(5, 8, 18, 0.85); border: 1px solid rgba(255,255,255,0.1); padding: 10px; border-radius: 12px; overflow-x: auto; font-size: 11px; color: var(--mint); }}
+  input[type=text], input[type=password] {{
+    background: rgba(7, 10, 22, 0.78);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.18);
+    padding: 9px 12px;
+    border-radius: 11px;
+    width: 72%;
+    font-family: inherit;
+  }}
 </style>
 </head>
 <body>
-  <div class='top'>
-    <div>
-      <strong style='color:var(--lazulite);font-size:15px;'>◈ AEGIS // PHANTOM MONOLITH — {title}</strong>
-      <span class='tag'>{shield}</span>
-      <span class='tag'>COVER-TRAFFIC: {cover} (256B HMAC-STREAM)</span>
-      <span class='tag'>SUITE v{cv} • PROTO v{pv} • VAULT v{sv}</span>
+  <div class='top glass'>
+    <div class='brand-wrap'>
+      <span class='brand-logo'>AEGIS // AURORA</span>
+      <strong>{title}</strong>
+      <div class='steps'>
+        <a class='{s1}' href='/action?cmd=step_account'>① Вход в аккаунт</a>
+        <a class='{s2}' href='/action?cmd=step_servers'>② Выбор сервера ({srv_ep})</a>
+        <a class='{s3}' href='/action?cmd=step_chats'>③ Чаты</a>
+      </div>
     </div>
     <div>
       <a class='btn' href='/action?cmd=lang_ru'>RU</a>
       <a class='btn' href='/action?cmd=lang_en'>EN</a>
-      <a class='btn warn' href='/action?cmd=disguise'>🧮 Маскировка (Stealth Calc)</a>
+      <a class='btn warn' href='/action?cmd=disguise'>🧮 Калькулятор</a>
       <a class='btn danger' href='/action?cmd=panic'>{panic_btn}</a>
     </div>
   </div>
 
-  <div class='topology'>
-    <span>⚡ МАТРИЦА НЕОТСЛЕЖИВАЕМОСТИ: <b>CLIENT VAULT</b> ──[PQXDH + DOUBLE RATCHET + PAD-BEFORE-ENCRYPT]──► <b>STATIC-IP / ONION QUEUE</b> (0 МЕТАДАННЫХ • БЕЗ ЗВОНКОВ/МИКРОФОНА)</span>
-    <span>СТАТУС: <b style='color:var(--lazulite);'>{status}</b></span>
+  <div class='slogan-bar'>
+    <span>✨ <b>«Тень не оставляет следов. Ни номеров. Ни почт. Ни границ.»</b> • <span class='tag'>{shield}</span> <span class='tag'>Cover: {cover}</span> <span class='tag'>v{cv}.{pv}.{sv}</span></span>
+    <span>Статус: <b style='color:var(--mint);'>{status}</b></span>
   </div>
 
+  {onboarding_overlay}
+
   <div class='grid'>
-    <div class='card'>
-      <h3>👤 Изолированные контуры (Мультиаккаунты 3+Pass)</h3>
+    <div class='card glass'>
+      <h3>💬 Чаты и Каналы (как в ТГ • E2EE)</h3>
+      <div class='chat-list'>{chat_list_sidebar}</div>
+      <form action='/action' method='get' style='margin-top:10px;background:rgba(255,255,255,0.03);padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,0.08);'>
+        <input type='hidden' name='cmd' value='new_chat'>
+        <div style='font-size:11px;color:var(--mint);font-weight:700;margin-bottom:6px;'>+ Новый чат / Связь с другой страной</div>
+        <input type='text' name='title' placeholder='Имя собеседника (напр. Алекс)...' style='width:100%;margin-bottom:6px;'>
+        <input type='text' name='code' placeholder='Общий секретный код канала (напр. tokyo-77)...' style='width:100%;margin-bottom:6px;'>
+        <button class='btn ok' type='submit' style='width:100%;'>➕ Открыть зашифрованный чат</button>
+      </form>
+      <hr style='border-color:rgba(255,255,255,0.08);margin:12px 0;'>
+      <h3>👤 Мультиаккаунты (до 3 + SupporterPass)</h3>
       <div>{accounts}</div>
       <div style='margin-top:8px;'>
         <a class='btn' href='/action?cmd=gen_nick'>{gen_nick_btn} ({curr_nick})</a>
-        <a class='btn ok' href='/action?cmd=add_account'>+ Добавить изолированный аккаунт</a>
-        <a class='btn warn' href='/action?cmd=activate_pass'>🎫 Активировать SupporterPass (5 слотов)</a>
+        <a class='btn ok' href='/action?cmd=add_account'>+ Создать профиль</a>
+        <a class='btn warn' href='/action?cmd=activate_pass'>🎫 SupporterPass (5 слотов)</a>
       </div>
-      <hr style='border-color:rgba(56,189,248,0.18);margin:14px 0;'>
-      <h3>💬 Капсульные Чаты и Сейф «Избранное»</h3>
-      <a class='btn' href='/action?cmd=chat_0'>📌 Избранное (Локальный сейф)</a>
-      <a class='btn ok' href='/action?cmd=chat_1'>🔐 nordic-falcon (Sealed Capsule)</a>
-      <a class='btn' href='/action?cmd=chat_2'>✓ Поддержка Aegis</a>
-      <a class='btn warn' href='/action?cmd=toggle_chat_pin'>🔒 Блок/Разблок чата по PIN</a>
-      <hr style='border-color:rgba(56,189,248,0.18);margin:14px 0;'>
-      <h3>🌐 Сетевой щит (Anti-DPI / D-0008)</h3>
-      <a class='btn ok' href='/action?cmd=route_tor'>🔒 Маршрут Tor / Onion</a>
-      <a class='btn' href='/action?cmd=route_vpn'>🛡 Маршрут VPN</a>
-      <a class='btn warn' href='/action?cmd=route_direct'>🌐 Прямой Static-IP</a>
-      <a class='btn danger' href='/action?cmd=route_leak'>🧪 Тест обрыва туннеля (Kill Switch)</a>
     </div>
 
-    <div class='card'>
-      <h2>◈ КАНАЛ КАПСУЛ: {chat_title}</h2>
+    <div class='card glass'>
+      <div style='display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,0.09);padding-bottom:8px;margin-bottom:10px;'>
+        <div>
+          <h2 style='border:none;padding:0;margin:0;'>{chat_title}</h2>
+          <small style='color:var(--muted);'>Узел: <b>{srv_ep}</b> • Сквозное шифрование ChaCha20-Poly1305 (256B)</small>
+        </div>
+        <div>
+          <a class='btn ok' href='/action?cmd=sync_remote'>🌐 Принять из сети</a>
+          <a class='btn warn' href='/action?cmd=toggle_chat_pin'>🔒 PIN чата</a>
+        </div>
+      </div>
+      {unlock_pin_form}
       {leak_modal}
       <div>{messages}</div>
-      <hr style='border-color:rgba(0,245,184,0.18);margin:14px 0;'>
-      <form action='/action' method='get'>
+      <hr style='border-color:rgba(255,255,255,0.09);margin:14px 0;'>
+      <form action='/action' method='get' style='display:flex;gap:8px;'>
         <input type='hidden' name='cmd' value='send_text'>
-        <input type='text' name='text' placeholder='Введите текст капсулы (LeakGuard проверяет карты/CVV/телефоны/ключи/почту локально)...'>
-        <button class='btn ok' type='submit'>Запечатать 256B</button>
+        <input type='text' name='text' placeholder='Написать сообщение... (LeakGuard защищает от случайной отправки карт/телефонов)' style='width:100%;'>
+        <button class='btn ok' type='submit' style='white-space:nowrap;padding:9px 18px;'>Отправить ➤</button>
       </form>
       <div style='margin-top:10px;'>
-        <a class='btn warn' href='/action?cmd=test_leak_card'>💳 Тест LeakGuard: Карта Visa + CVV</a>
-        <a class='btn ok' href='/action?cmd=send_photo_view_once'>📷 Отправить View-Once капсулу (очистка EXIF/GPS/iDOT)</a>
-        <a class='btn' href='/action?cmd=sync_remote'>🌐 Синхр. с узлом (Принять капсулы из другой страны)</a>
+        <a class='btn ok' href='/action?cmd=send_photo_view_once'>📷 Фото View-Once (без EXIF/GPS)</a>
+        <a class='btn warn' href='/action?cmd=test_leak_card'>💳 Тест LeakGuard</a>
+        <a class='btn' href='/action?cmd=chat_0'>📌 Избранное</a>
+        <a class='btn' href='/action?cmd=chat_1'>🔐 nordic-falcon</a>
+        <a class='btn' href='/action?cmd=chat_2'>✓ Поддержка</a>
       </div>
     </div>
 
-    <div class='card'>
-      <h3>{launcher_title}</h3>
-      <a class='btn ok' href='/action?cmd=launch_vps'>VPS Static-IP Docker</a>
-      <a class='btn' href='/action?cmd=launch_onion'>Tor .onion сервис</a>
-      <a class='btn' href='/action?cmd=launch_desktop'>Локальный узел</a>
-      <pre>{launcher_bundle}</pre>
-      <small>Инвайт узла: <code>{server_invite}</code></small>
-      <hr style='border-color:rgba(56,189,248,0.18);margin:14px 0;'>
-      <h3>📋 Стартовые Static-IP узлы (Без обязательного Tor)</h3>
+    <div class='card glass'>
+      <h3>🌐 Серверы связи (Static IP без Tor)</h3>
       <ul style='padding-left:18px;font-size:12px;'>{servers}</ul>
-      <form action='/action' method='get' style='margin-top:8px;'>
+      <form action='/action' method='get' style='margin-top:8px;display:flex;gap:6px;'>
         <input type='hidden' name='cmd' value='custom_server'>
-        <input type='text' name='ip' placeholder='Свой статический IP:порт (напр. 185.220.101.42:8443)...'>
-        <button class='btn ok' type='submit'>⚡ Подключить узел</button>
+        <input type='text' name='ip' placeholder='Свой IP:порт (185.220.101.42:8443)...' style='width:100%;'>
+        <button class='btn ok' type='submit'>⚡</button>
       </form>
-      <hr style='border-color:rgba(56,189,248,0.18);margin:14px 0;'>
+      <hr style='border-color:rgba(255,255,255,0.08);margin:12px 0;'>
+      <h3>🛡 Сетевой щит (Anti-DPI)</h3>
+      <a class='btn ok' href='/action?cmd=route_tor'>🔒 Tor</a>
+      <a class='btn' href='/action?cmd=route_vpn'>🛡 VPN</a>
+      <a class='btn warn' href='/action?cmd=route_direct'>🌐 Прямой IP</a>
+      <a class='btn danger' href='/action?cmd=route_leak'>🧪 Kill Switch</a>
+      <hr style='border-color:rgba(255,255,255,0.08);margin:12px 0;'>
+      <h3>{launcher_title}</h3>
+      <a class='btn ok' href='/action?cmd=launch_vps'>VPS Docker</a>
+      <a class='btn' href='/action?cmd=launch_onion'>Tor .onion</a>
+      <a class='btn' href='/action?cmd=launch_desktop'>Локальный</a>
+      <pre>{launcher_bundle}</pre>
+      <small>Инвайт: <code>{server_invite}</code></small>
+      <hr style='border-color:rgba(255,255,255,0.08);margin:12px 0;'>
       <h3>{support_title}</h3>
-      <p style='font-size:12px;'>Отправлено E2EE тикетов в поддержку ✓: <b>{ticket_count}</b> | Слотов аккаунтов: <b>{max_slots}</b></p>
-      <a class='btn ok' href='/action?cmd=send_ticket'>📨 Отправить анонимный тикет в поддержку ✓</a>
+      <p style='font-size:12px;'>Тикетов ✓: <b>{ticket_count}</b> | Слотов: <b>{max_slots}</b></p>
+      <a class='btn ok' href='/action?cmd=send_ticket'>📨 Тикет в поддержку ✓</a>
     </div>
   </div>
 </body>
 </html>",
             title = s.app_title,
+            s1 = step_1_cls,
+            s2 = step_2_cls,
+            s3 = step_3_cls,
+            srv_ep = html_escape(active_srv_ep),
             shield = shield_badge,
             cover = if self.state.cover_traffic_enabled {
                 "ВКЛ"
@@ -1697,10 +1944,13 @@ impl DesktopGuiServer {
             sv = self.state.core_versions.storage_schema_version,
             panic_btn = s.panic_button_label,
             status = html_escape(&self.state.status_banner),
+            onboarding_overlay = onboarding_overlay_html,
+            chat_list_sidebar = chat_list_sidebar_html,
             accounts = accounts_html,
             gen_nick_btn = s.nickname_generate_btn,
             curr_nick = html_escape(&self.state.onboarding_nickname),
             chat_title = html_escape(chat_title),
+            unlock_pin_form = unlock_pin_form_html,
             leak_modal = leak_modal_html,
             messages = messages_html,
             launcher_title = s.server_launcher_title,
@@ -1726,10 +1976,102 @@ impl DesktopGuiServer {
             return;
         }
         match cmd.as_str() {
+            "step_account" => {
+                self.state.current_screen = Screen::Onboarding;
+                self.state.status_banner =
+                    "Шаг 1 из 3: Вход или создание анонимного аккаунта.".to_owned();
+            }
+            "step_servers" => {
+                self.state.current_screen = Screen::ServerLauncher;
+                self.state.status_banner =
+                    "Шаг 2 из 3: Выберите стартовый сервер со статическим IP или введите свой."
+                        .to_owned();
+            }
+            "step_chats" => {
+                self.state.current_screen = Screen::ChatWorkspace;
+                self.state.status_banner =
+                    "Шаг 3 из 3: Капсульные чаты готовы к работе.".to_owned();
+            }
+            "login_account" => {
+                let nick = extract_query_param(query, "nick")
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| self.state.onboarding_nickname.clone());
+                let alias = extract_query_param(query, "alias")
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "Основной профиль".to_owned());
+                let pwd = extract_query_param(query, "pwd")
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "AEGis#StrongPass99!".to_owned());
+                let next_idx = (self.state.accounts.profiles.len() + 1) as u8;
+                match self.state.accounts.create_account(
+                    [next_idx; 16],
+                    nick.trim(),
+                    alias.trim(),
+                    &pwd,
+                ) {
+                    Ok(_) => {
+                        self.state.current_screen = Screen::ServerLauncher;
+                        self.state.status_banner = format!(
+                            "Вы вошли как {} ({}). Шаг 2: Выберите сервер связи.",
+                            alias.trim(),
+                            nick.trim()
+                        );
+                    }
+                    Err(e) => {
+                        self.state.status_banner = format!("Проверьте данные входа: {e}");
+                    }
+                }
+            }
+            "select_chat" => {
+                if let Some(idx_str) = extract_query_param(query, "idx") {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if idx < self.state.chats.len() {
+                            self.state.active_chat_index = idx;
+                            self.state.leak_guard_modal = None;
+                        }
+                    }
+                }
+            }
+            "new_chat" => {
+                let title = extract_query_param(query, "title")
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
+                let code = extract_query_param(query, "code")
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
+                if let (Some(t), Some(c)) = (title, code) {
+                    if self.state.chats.len() < 64 {
+                        let id_byte = (self.state.chats.len() as u8).wrapping_add(10);
+                        self.state.chats.push(ChatView {
+                            chat_id: [id_byte; 16],
+                            title: format!("🔐 {t}"),
+                            queue_tag: format!("queue://{c}"),
+                            is_local_saved_notes: false,
+                            verified_support_badge: false,
+                            per_chat_pin: None,
+                            is_locked: false,
+                            default_disappearing_ttl_secs: Some(3600),
+                            messages: vec![ChatMessageView {
+                                outgoing: false,
+                                text: format!("Международный канал «{c}» открыт. Сообщения шифруются ChaCha20-Poly1305 (256B)."),
+                                padded_bucket_bytes: 256,
+                                disappearing_ttl_secs: Some(3600),
+                                attachment: None,
+                            }],
+                        });
+                        self.state.active_chat_index = self.state.chats.len() - 1;
+                        self.state.current_screen = Screen::ChatWorkspace;
+                        self.state.status_banner =
+                            format!("Создан международный чат с {t} (канал: {c}).");
+                    }
+                }
+            }
             "select_server" => {
                 if let Some(idx_str) = extract_query_param(query, "idx") {
                     if let Ok(idx) = idx_str.parse::<usize>() {
-                        let _ = self.state.select_starter_server(idx);
+                        if self.state.select_starter_server(idx).is_ok() {
+                            self.state.current_screen = Screen::ChatWorkspace;
+                        }
                     }
                 }
             }
@@ -1742,8 +2084,14 @@ impl DesktopGuiServer {
                         Some((trimmed, 8443))
                     };
                     if let Some((host_part, port_part)) = parsed_pair {
-                        if let Err(e) = self.state.connect_custom_static_ip(host_part, port_part) {
-                            self.state.status_banner = format!("Ошибка подключения Static IP: {e}");
+                        match self.state.connect_custom_static_ip(host_part, port_part) {
+                            Ok(_) => {
+                                self.state.current_screen = Screen::ChatWorkspace;
+                            }
+                            Err(e) => {
+                                self.state.status_banner =
+                                    format!("Ошибка подключения Static IP: {e}");
+                            }
                         }
                     } else {
                         self.state.status_banner =
