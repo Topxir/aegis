@@ -378,20 +378,47 @@ fun AegisComposeApp(
                                     if (leak != null) {
                                         pendingLeakWarning = leak
                                     } else if (draftText.isNotBlank()) {
+                                        val msgToSend = draftText
                                         currentChat.messages.add(
                                             AegisRustBridge.ChatMessageUi(
                                                 outgoing = true,
-                                                text = draftText,
+                                                text = msgToSend,
                                                 paddedBucketBytes = 256,
                                                 ttlSeconds = 3600
                                             )
                                         )
                                         draftText = ""
                                         uiTick++
+                                        if (!currentChat.isSavedNotes) {
+                                            bridge.sendCapsuleOverNetworkAsync(
+                                                currentChat.queueTag,
+                                                msgToSend
+                                            ) { _, msgStatus ->
+                                                statusBanner = msgStatus
+                                                uiTick++
+                                            }
+                                        }
                                     }
                                 }
                             }) {
-                                Text("Отправить E2EE")
+                                Text("Запечатать 256B")
+                            }
+                            Button(onClick = {
+                                if (!currentChat.isSavedNotes &&
+                                    bridge.shieldState == AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED
+                                ) {
+                                    statusBanner = "⛔ Синхронизация заблокирована Kill Switch."
+                                } else {
+                                    bridge.pollCapsulesOverNetworkAsync(
+                                        safeIndex,
+                                        currentChat.queueTag
+                                    ) { _, syncStatus ->
+                                        statusBanner = syncStatus
+                                        uiTick++
+                                    }
+                                }
+                            }) {
+                                Text("🌐 Синхр. с узлом")
                             }
                             Button(onClick = {
                                 if (!currentChat.isSavedNotes &&

@@ -3,7 +3,10 @@
 //! and built-in Support & Donation Web Portal (D-0006, D-0010, PLAN.md §4.4, §6).
 
 use aegis_crypto::{hkdf_sha256, hmac_sha256};
-use aegis_protocol::{pad_frame, SupportTicket, SupportTicketCategory, PADDING_BUCKETS};
+use aegis_protocol::{
+    hex_decode_bytes, hex_encode_bytes, pad_frame, SupportTicket, SupportTicketCategory,
+    PADDING_BUCKETS,
+};
 use core::fmt;
 use std::collections::BTreeMap;
 
@@ -539,6 +542,29 @@ footer {{ margin-top: 2rem; font-size: 0.8rem; color: var(--muted); text-align: 
     )
 }
 
+fn parse_queue_id_from_query(query: Option<&str>) -> Option<[u8; 32]> {
+    let Some(q) = query else {
+        return Some([0x22; 32]);
+    };
+    for pair in q.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k.trim() == "queue" {
+                let decoded = hex_decode_bytes(v.trim()).ok()?;
+                if decoded.len() != 32 {
+                    return None;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&decoded);
+                if arr == [0u8; 32] {
+                    return None;
+                }
+                return Some(arr);
+            }
+        }
+    }
+    Some([0x22; 32])
+}
+
 /// Processes raw HTTP requests for both the Support/Donation Web Portal and the JSON federation API.
 /// Returns `(status_code, content_type, response_body)`.
 pub fn handle_http_request(
@@ -550,7 +576,9 @@ pub fn handle_http_request(
 ) -> (u16, &'static str, String) {
     let norm_method = method.trim().to_ascii_uppercase();
     let trimmed_path = path.trim();
-    let clean_path = trimmed_path.split('?').next().unwrap_or(trimmed_path);
+    let (clean_path, query_opt) = trimmed_path
+        .split_once('?')
+        .map_or((trimmed_path, None), |(p, q)| (p, Some(q)));
     match (norm_method.as_str(), clean_path) {
         ("GET", "/") | ("GET", "/support") => (
             200,
@@ -579,19 +607,43 @@ pub fn handle_http_request(
             )
         }
         ("POST", "/api/v1/queue/send") => {
-            let payload_bytes = if body.trim().is_empty() {
-                b"aegis-e2ee-frame" as &[u8]
-            } else {
-                body.as_bytes()
-            };
-            let Ok(padded) = pad_frame(payload_bytes) else {
+            let Some(queue_id) = parse_queue_id_from_query(query_opt) else {
                 return (
                     400,
                     "application/json",
-                    r#"{"error":"payload_too_large"}"#.to_owned(),
+                    r#"{"error":"invalid_queue_id"}"#.to_owned(),
                 );
             };
-            match server.enqueue_frame([0x22; 32], padded) {
+            let trimmed_body = body.trim();
+            let frame_to_enqueue = if let Ok(raw_frame) = hex_decode_bytes(trimmed_body) {
+                if PADDING_BUCKETS.contains(&raw_frame.len()) {
+                    raw_frame
+                } else {
+                    let Ok(padded) = pad_frame(trimmed_body.as_bytes()) else {
+                        return (
+                            400,
+                            "application/json",
+                            r#"{"error":"payload_too_large"}"#.to_owned(),
+                        );
+                    };
+                    padded
+                }
+            } else {
+                let payload_bytes = if trimmed_body.is_empty() {
+                    b"aegis-e2ee-frame" as &[u8]
+                } else {
+                    trimmed_body.as_bytes()
+                };
+                let Ok(padded) = pad_frame(payload_bytes) else {
+                    return (
+                        400,
+                        "application/json",
+                        r#"{"error":"payload_too_large"}"#.to_owned(),
+                    );
+                };
+                padded
+            };
+            match server.enqueue_frame(queue_id, frame_to_enqueue) {
                 Ok(_) => (200, "application/json", r#"{"status":"queued"}"#.to_owned()),
                 Err(_) => (
                     429,
@@ -600,21 +652,37 @@ pub fn handle_http_request(
                 ),
             }
         }
-        ("POST", "/api/v1/queue/poll") => match server.drain_queue(&[0x22; 32]) {
-            Ok(frames) => (
-                200,
-                "application/json",
-                format!(
-                    r#"{{"status":"drained","frames_delivered":{}}}"#,
-                    frames.len()
+        ("POST", "/api/v1/queue/poll") => {
+            let Some(queue_id) = parse_queue_id_from_query(query_opt) else {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"invalid_queue_id"}"#.to_owned(),
+                );
+            };
+            match server.drain_queue(&queue_id) {
+                Ok(frames) => {
+                    let count = frames.len();
+                    let hex_list: Vec<String> = frames
+                        .iter()
+                        .map(|f| format!("\"{}\"", hex_encode_bytes(f)))
+                        .collect();
+                    (
+                        200,
+                        "application/json",
+                        format!(
+                            r#"{{"status":"drained","frames_delivered":{count},"frames_hex":[{}]}}"#,
+                            hex_list.join(",")
+                        ),
+                    )
+                }
+                Err(_) => (
+                    400,
+                    "application/json",
+                    r#"{"error":"invalid_queue"}"#.to_owned(),
                 ),
-            ),
-            Err(_) => (
-                400,
-                "application/json",
-                r#"{"error":"invalid_queue"}"#.to_owned(),
-            ),
-        },
+            }
+        }
         ("POST", "/api/v1/support/ticket") => {
             let payload = if body.trim().is_empty() {
                 b"encrypted-support-ticket" as &[u8]

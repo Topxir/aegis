@@ -28,12 +28,14 @@ pub use aegis_plugins::{
     PluginManifest, ThemePack,
 };
 pub use aegis_protocol::{
-    compute_safety_number, detect_identity_key_change, open_view_once_payload, pad_frame,
-    passes_luhn, redact_leaks, scan_message_for_leaks, strip_media_metadata, unpad_frame,
-    ChatMessageEnvelope, CleanedMedia, ContactInvite, GroupChatSession, KeyChangeWarning, LeakKind,
-    LeakWarning, MessageContent, MessageExpirationPolicy, ProtocolError, SealedSenderEnvelope,
-    SupportTicket, SupportTicketCategory, UnsealedSenderMessage, ViewOncePayload, PADDING_BUCKETS,
-    PROTOCOL_VERSION,
+    compute_safety_number, derive_channel_key_and_queue, detect_identity_key_change,
+    hex_decode_bytes, hex_encode_bytes, open_cross_border_capsule, open_view_once_payload,
+    pad_frame, passes_luhn, redact_leaks, scan_message_for_leaks, seal_cross_border_capsule,
+    strip_media_metadata, unpad_frame, ChatMessageEnvelope, CleanedMedia, ContactInvite,
+    GroupChatSession, KeyChangeWarning, LeakKind, LeakWarning, MessageContent,
+    MessageExpirationPolicy, ProtocolError, SealedSenderEnvelope, SupportTicket,
+    SupportTicketCategory, UnsealedSenderMessage, ViewOncePayload, CROSS_BORDER_CAPSULE_MAGIC,
+    PADDING_BUCKETS, PROTOCOL_VERSION,
 };
 pub use aegis_server::{
     compute_pow_difficulty, handle_http_request, render_support_portal_html,
@@ -44,9 +46,10 @@ pub use aegis_storage::{
     StoredMessage, BACKUP_MAGIC, DB_KEY_LEN, SCHEMA_VERSION,
 };
 pub use aegis_transport::{
-    derive_circuit_isolation_token, evaluate_network_shield, format_static_ipv4_endpoint,
-    CoverTrafficConfig, CoverTrafficScheduler, IsolatedCircuitTag, NetworkRouteStatus, ProxyConfig,
-    RouteProbe, ServerMigrationNotice, ShieldEvaluation, TransportError, TransportProfile,
+    connect_via_socks5h, derive_circuit_isolation_token, evaluate_network_shield,
+    format_static_ipv4_endpoint, poll_capsules_over_tcp, send_capsule_over_tcp, CoverTrafficConfig,
+    CoverTrafficScheduler, IsolatedCircuitTag, NetworkRouteStatus, ProxyConfig, RouteProbe,
+    ServerMigrationNotice, ShieldEvaluation, TransportError, TransportProfile,
 };
 
 use core::fmt;

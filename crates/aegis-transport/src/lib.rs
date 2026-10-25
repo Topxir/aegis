@@ -3,8 +3,13 @@
 //! censorship-resistant proxy/bridge profiles, and live server migration (PLAN.md §14).
 
 use aegis_crypto::{hmac_sha256, sha256};
-use aegis_protocol::{pad_frame, ProtocolError, PADDING_BUCKETS};
+use aegis_protocol::{
+    hex_decode_bytes, hex_encode_bytes, pad_frame, ProtocolError, PADDING_BUCKETS,
+};
 use core::fmt;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 /// Size in bytes of indistinguishable dummy cover traffic frames (smallest bucket: `256` bytes).
 pub const COVER_TRAFFIC_FRAME_BYTES: usize = PADDING_BUCKETS[0];
@@ -670,6 +675,194 @@ impl ServerMigrationNotice {
         }
         Ok(())
     }
+}
+
+fn open_timed_tcp_stream(host_port: &str, timeout_ms: u64) -> Result<TcpStream, TransportError> {
+    let clean = host_port
+        .trim()
+        .strip_prefix("aegis://")
+        .unwrap_or(host_port.trim());
+    let clean = clean.strip_prefix("server/").unwrap_or(clean);
+    let dur = Duration::from_millis(timeout_ms.clamp(100, 30_000));
+    let addr: SocketAddr = clean
+        .to_socket_addrs()
+        .map_err(|_| TransportError::InvalidEndpoint)?
+        .next()
+        .ok_or(TransportError::InvalidEndpoint)?;
+    let stream =
+        TcpStream::connect_timeout(&addr, dur).map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.set_read_timeout(Some(dur));
+    let _ = stream.set_write_timeout(Some(dur));
+    Ok(stream)
+}
+
+/// Establishes a TCP tunnel through an RFC 1928 SOCKS5h proxy (e.g., local Tor daemon `127.0.0.1:9050`
+/// or Orbot `127.0.0.1:9150`) using remote hostname resolution (`ATYP = 0x03`) so `.onion` addresses
+/// and cross-country endpoints resolve on the remote exit without local DNS leaks.
+///
+/// # Errors
+/// Returns [`TransportError`] if the proxy connection or SOCKS5 handshake fails.
+pub fn connect_via_socks5h(
+    proxy_host_port: &str,
+    target_host: &str,
+    target_port: u16,
+    timeout_ms: u64,
+) -> Result<TcpStream, TransportError> {
+    if target_port == 0 {
+        return Err(TransportError::InvalidPort);
+    }
+    let host_bytes = target_host.trim().as_bytes();
+    if host_bytes.is_empty() || host_bytes.len() > 253 {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let mut stream = open_timed_tcp_stream(proxy_host_port, timeout_ms)?;
+    // 1. Greeting: SOCKS v5, 1 auth method (0x00 = No Authentication)
+    stream
+        .write_all(&[0x05, 0x01, 0x00])
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let mut greeting_resp = [0u8; 2];
+    stream
+        .read_exact(&mut greeting_resp)
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    if greeting_resp != [0x05, 0x00] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+
+    // 2. CONNECT request with ATYP = 0x03 (Domain name resolved remotely by SOCKS5h/Tor)
+    let mut req = Vec::with_capacity(7 + host_bytes.len());
+    req.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host_bytes.len() as u8]);
+    req.extend_from_slice(host_bytes);
+    req.extend_from_slice(&target_port.to_be_bytes());
+    stream
+        .write_all(&req)
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+
+    let mut hdr = [0u8; 4];
+    stream
+        .read_exact(&mut hdr)
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    if hdr[0] != 0x05 || hdr[1] != 0x00 {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let skip_len = match hdr[3] {
+        0x01 => 4 + 2,
+        0x04 => 16 + 2,
+        0x03 => {
+            let mut l = [0u8; 1];
+            stream
+                .read_exact(&mut l)
+                .map_err(|_| TransportError::InvalidEndpoint)?;
+            usize::from(l[0]) + 2
+        }
+        _ => return Err(TransportError::InvalidEndpoint),
+    };
+    let mut drain = vec![0u8; skip_len];
+    stream
+        .read_exact(&mut drain)
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    Ok(stream)
+}
+
+/// Sends a fixed-size (`256`..`16384` B) encrypted capsule over TCP/HTTP to a remote `aegis-serverd` node
+/// anywhere in the world (`POST /api/v1/queue/send?queue=<hex>`).
+///
+/// # Errors
+/// Returns [`TransportError`] if `queue_id` is all-zero, `padded_frame` is not a valid bucket size,
+/// or the remote server rejects the request.
+pub fn send_capsule_over_tcp(
+    server_host_port: &str,
+    queue_id: &[u8; 32],
+    padded_frame: &[u8],
+    timeout_ms: u64,
+) -> Result<(), TransportError> {
+    if *queue_id == [0u8; 32] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    if !PADDING_BUCKETS.contains(&padded_frame.len()) {
+        return Err(TransportError::Protocol(
+            ProtocolError::MalformedPaddedFrame,
+        ));
+    }
+    let mut stream = open_timed_tcp_stream(server_host_port, timeout_ms)?;
+    let queue_hex = hex_encode_bytes(queue_id);
+    let body_hex = hex_encode_bytes(padded_frame);
+    let req = format!(
+        "POST /api/v1/queue/send?queue={queue_hex} HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
+        body_hex.len()
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.flush();
+
+    let mut resp = Vec::with_capacity(512);
+    let _ = stream.read_to_end(&mut resp);
+    let text = core::str::from_utf8(&resp).map_err(|_| TransportError::InvalidEndpoint)?;
+    if text.starts_with("HTTP/1.1 200") && text.contains("\"queued\"") {
+        Ok(())
+    } else {
+        Err(TransportError::InvalidEndpoint)
+    }
+}
+
+/// Polls and drains all pending encrypted capsules for `queue_id` over TCP/HTTP from a remote `aegis-serverd` node
+/// (`POST /api/v1/queue/poll?queue=<hex>`).
+///
+/// # Errors
+/// Returns [`TransportError`] if `queue_id` is all-zero, the connection fails, or any frame violates bucket padding.
+pub fn poll_capsules_over_tcp(
+    server_host_port: &str,
+    queue_id: &[u8; 32],
+    timeout_ms: u64,
+) -> Result<Vec<Vec<u8>>, TransportError> {
+    if *queue_id == [0u8; 32] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let mut stream = open_timed_tcp_stream(server_host_port, timeout_ms)?;
+    let queue_hex = hex_encode_bytes(queue_id);
+    let req = format!(
+        "POST /api/v1/queue/poll?queue={queue_hex} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.flush();
+
+    let mut resp = Vec::with_capacity(4096);
+    let _ = stream.read_to_end(&mut resp);
+    let text = core::str::from_utf8(&resp).map_err(|_| TransportError::InvalidEndpoint)?;
+    if !text.starts_with("HTTP/1.1 200") {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let Some((_, body)) = text.split_once("\r\n\r\n") else {
+        return Err(TransportError::InvalidEndpoint);
+    };
+    let Some(arr_start) = body.find("\"frames_hex\":[") else {
+        return Ok(Vec::new());
+    };
+    let after = &body[arr_start + "\"frames_hex\":[".len()..];
+    let Some(arr_end) = after.find(']') else {
+        return Err(TransportError::InvalidEndpoint);
+    };
+    let inner_list = after[..arr_end].trim();
+    if inner_list.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut frames = Vec::new();
+    for item in inner_list.split(',') {
+        let hex_str = item.trim().trim_matches('"');
+        if hex_str.is_empty() {
+            continue;
+        }
+        let raw = hex_decode_bytes(hex_str).map_err(TransportError::Protocol)?;
+        if !PADDING_BUCKETS.contains(&raw.len()) {
+            return Err(TransportError::Protocol(
+                ProtocolError::MalformedPaddedFrame,
+            ));
+        }
+        frames.push(raw);
+    }
+    Ok(frames)
 }
 
 #[cfg(test)]

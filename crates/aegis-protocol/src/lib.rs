@@ -1168,6 +1168,120 @@ impl Drop for UnsealedSenderMessage {
     }
 }
 
+/// Magic prefix inside padded cross-border E2EE capsules (`AEGCAP1`).
+pub const CROSS_BORDER_CAPSULE_MAGIC: &[u8; 7] = b"AEGCAP1";
+
+/// Encodes arbitrary bytes as lowercase hexadecimal.
+#[must_use]
+pub fn hex_encode_bytes(bytes: &[u8]) -> String {
+    hex_encode(bytes)
+}
+
+/// Decodes an even-length hexadecimal string into bytes.
+///
+/// # Errors
+/// Returns [`ProtocolError::MalformedPaddedFrame`] if `hex_str` has odd length or non-hex characters.
+pub fn hex_decode_bytes(hex_str: &str) -> Result<Vec<u8>, ProtocolError> {
+    let trimmed = hex_str.trim();
+    if trimmed.is_empty() || !trimmed.len().is_multiple_of(2) {
+        return Err(ProtocolError::MalformedPaddedFrame);
+    }
+    let raw = trimmed.as_bytes();
+    let mut out = Vec::with_capacity(raw.len() / 2);
+    let (pairs, _) = raw.as_chunks::<2>();
+    for pair in pairs {
+        let hi = (pair[0] as char)
+            .to_digit(16)
+            .ok_or(ProtocolError::MalformedPaddedFrame)?;
+        let lo = (pair[1] as char)
+            .to_digit(16)
+            .ok_or(ProtocolError::MalformedPaddedFrame)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Ok(out)
+}
+
+/// Derives a deterministic 32-byte anonymous `queue_id`, 32-byte `channel_key`, and 64-char hex queue tag
+/// from a shared channel code or invite passphrase so two peers in any countries can communicate E2EE.
+#[must_use]
+pub fn derive_channel_key_and_queue(shared_channel_code: &str) -> ([u8; 32], [u8; 32], String) {
+    let clean = shared_channel_code.trim();
+    let mut q_preimage = Vec::with_capacity(22 + clean.len());
+    q_preimage.extend_from_slice(b"Aegis-ChannelQueue-v1:");
+    q_preimage.extend_from_slice(clean.as_bytes());
+    let mut queue_id = sha256(&q_preimage);
+    if queue_id == [0u8; 32] {
+        queue_id[0] = 1;
+    }
+
+    let mut k_preimage = Vec::with_capacity(24 + clean.len());
+    k_preimage.extend_from_slice(b"Aegis-ChannelAEADKey-v1:");
+    k_preimage.extend_from_slice(clean.as_bytes());
+    let mut channel_key = sha256(&k_preimage);
+    if channel_key == [0u8; 32] {
+        channel_key[0] = 1;
+    }
+    let queue_hex = hex_encode(&queue_id);
+    (queue_id, channel_key, queue_hex)
+}
+
+/// Seals a UTF-8 message into a fixed-bucket (`256`..`16384` B) RFC 8439 ChaCha20-Poly1305 encrypted capsule
+/// (`[u16 BE len]["AEGCAP1" || nonce (12B) || ciphertext_and_tag][0x00...]`), interoperable between Desktop and Android.
+///
+/// # Errors
+/// Fail-closed: rejects empty channel codes, empty messages, all-zero nonces, or oversized payloads.
+pub fn seal_cross_border_capsule(
+    shared_channel_code: &str,
+    nonce: &[u8; 12],
+    plaintext_utf8: &str,
+) -> Result<Vec<u8>, ProtocolError> {
+    if shared_channel_code.trim().is_empty() || plaintext_utf8.is_empty() || *nonce == [0u8; 12] {
+        return Err(ProtocolError::InvalidReplyQueueId);
+    }
+    let (queue_id, mut channel_key, _) = derive_channel_key_and_queue(shared_channel_code);
+    let ct_res = aead_seal(&channel_key, nonce, &queue_id, plaintext_utf8.as_bytes());
+    zeroize_bytes(&mut channel_key);
+    let ct = ct_res.map_err(|_| ProtocolError::MalformedPaddedFrame)?;
+
+    let mut inner = Vec::with_capacity(7 + 12 + ct.len());
+    inner.extend_from_slice(CROSS_BORDER_CAPSULE_MAGIC);
+    inner.extend_from_slice(nonce);
+    inner.extend_from_slice(&ct);
+    let res = pad_frame(&inner);
+    zeroize_bytes(&mut inner);
+    res
+}
+
+/// Unpads, verifies, and decrypts a cross-border RFC 8439 ChaCha20-Poly1305 capsule using `shared_channel_code`.
+///
+/// # Errors
+/// Fail-closed: rejects tampered tags, wrong channel keys, all-zero nonces, or invalid UTF-8.
+pub fn open_cross_border_capsule(
+    shared_channel_code: &str,
+    padded_frame: &[u8],
+) -> Result<String, ProtocolError> {
+    if shared_channel_code.trim().is_empty() {
+        return Err(ProtocolError::InvalidReplyQueueId);
+    }
+    let inner = unpad_frame(padded_frame)?;
+    if inner.len() < 7 + 12 + AEAD_TAG_LEN || &inner[0..7] != CROSS_BORDER_CAPSULE_MAGIC {
+        return Err(ProtocolError::MalformedPaddedFrame);
+    }
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&inner[7..19]);
+    if nonce == [0u8; 12] {
+        return Err(ProtocolError::MalformedPaddedFrame);
+    }
+    let ct = &inner[19..];
+    let (queue_id, mut channel_key, _) = derive_channel_key_and_queue(shared_channel_code);
+    let pt_res = aead_open(&channel_key, &nonce, &queue_id, ct);
+    zeroize_bytes(&mut channel_key);
+    let pt = pt_res.map_err(|_| ProtocolError::MalformedPaddedFrame)?;
+    core::str::from_utf8(pt.as_slice())
+        .map(str::to_owned)
+        .map_err(|_| ProtocolError::MalformedPaddedFrame)
+}
+
 /// Sealed Sender 1:1 E2EE wire envelope with Pad-Before-Encrypt (D-0002, PLAN.md §5).
 /// Conceals the sender's identity key, Double Ratchet header, and message length inside
 /// a uniform ChaCha20-Poly1305 ciphertext of exact [`PADDING_BUCKETS`] size (`256`..`16384` B).

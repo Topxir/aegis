@@ -1,12 +1,20 @@
 package org.aegis.messenger.core
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.security.KeyStore
+import java.security.MessageDigest
 import java.security.SecureRandom
+import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Unified JNI / UniFFI Bridge to `aegis-ffi` (`AGENTS.md §2.6, §4`, `D-0018`, `D-0019`).
@@ -609,6 +617,215 @@ class AegisRustBridge(private val context: Context) {
         }
     }
 
+    private fun sha256Bytes(input: ByteArray): ByteArray {
+        return MessageDigest.getInstance("SHA-256").digest(input)
+    }
+
+    private fun bytesToHex(bytes: ByteArray): String {
+        val sb = StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            val v = b.toInt() and 0xFF
+            sb.append("0123456789abcdef"[v ushr 4])
+            sb.append("0123456789abcdef"[v and 0x0F])
+        }
+        return sb.toString()
+    }
+
+    private fun hexToBytes(hex: String): ByteArray? {
+        val clean = hex.trim()
+        if (clean.isEmpty() || clean.length % 2 != 0) return null
+        val out = ByteArray(clean.length / 2)
+        for (i in out.indices) {
+            val hi = Character.digit(clean[i * 2], 16)
+            val lo = Character.digit(clean[i * 2 + 1], 16)
+            if (hi < 0 || lo < 0) return null
+            out[i] = ((hi shl 4) or lo).toByte()
+        }
+        return out
+    }
+
+    fun deriveChannelKeyAndQueue(channelCode: String): Triple<ByteArray, ByteArray, String> {
+        val clean = channelCode.trim()
+        val queueId = sha256Bytes("Aegis-ChannelQueue-v1:$clean".toByteArray(Charsets.UTF_8))
+        if (queueId.all { it == 0.toByte() }) queueId[0] = 1
+        val channelKey = sha256Bytes("Aegis-ChannelAEADKey-v1:$clean".toByteArray(Charsets.UTF_8))
+        if (channelKey.all { it == 0.toByte() }) channelKey[0] = 1
+        return Triple(queueId, channelKey, bytesToHex(queueId))
+    }
+
+    fun sealCrossBorderCapsule(channelCode: String, plaintext: String): ByteArray? {
+        if (channelCode.isBlank() || plaintext.isEmpty()) return null
+        return try {
+            val (queueId, channelKey, _) = deriveChannelKeyAndQueue(channelCode)
+            val nonce = ByteArray(12)
+            SecureRandom().nextBytes(nonce)
+            if (nonce.all { it == 0.toByte() }) nonce[0] = 1
+
+            val cipher = Cipher.getInstance("ChaCha20-Poly1305")
+            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(channelKey, "ChaCha20"), IvParameterSpec(nonce))
+            cipher.updateAAD(queueId)
+            val ctAndTag = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+
+            val magic = "AEGCAP1".toByteArray(Charsets.US_ASCII)
+            val innerLen = magic.size + nonce.size + ctAndTag.size
+            val buckets = intArrayOf(256, 1024, 4096, 16384)
+            val bucketSize = buckets.firstOrNull { it >= innerLen + 2 } ?: return null
+
+            val frame = ByteArray(bucketSize)
+            frame[0] = ((innerLen ushr 8) and 0xFF).toByte()
+            frame[1] = (innerLen and 0xFF).toByte()
+            System.arraycopy(magic, 0, frame, 2, magic.size)
+            System.arraycopy(nonce, 0, frame, 2 + magic.size, nonce.size)
+            System.arraycopy(ctAndTag, 0, frame, 2 + magic.size + nonce.size, ctAndTag.size)
+            frame
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun openCrossBorderCapsule(channelCode: String, paddedFrame: ByteArray): String? {
+        val buckets = intArrayOf(256, 1024, 4096, 16384)
+        if (paddedFrame.size !in buckets || paddedFrame.size < 2) return null
+        val payloadLen = ((paddedFrame[0].toInt() and 0xFF) shl 8) or (paddedFrame[1].toInt() and 0xFF)
+        if (payloadLen + 2 > paddedFrame.size || payloadLen < 7 + 12 + 16) return null
+        for (i in (2 + payloadLen) until paddedFrame.size) {
+            if (paddedFrame[i] != 0.toByte()) return null
+        }
+        val magic = String(paddedFrame, 2, 7, Charsets.US_ASCII)
+        if (magic != "AEGCAP1") return null
+        val nonce = paddedFrame.copyOfRange(9, 21)
+        if (nonce.all { it == 0.toByte() }) return null
+        val ctAndTag = paddedFrame.copyOfRange(21, 2 + payloadLen)
+
+        return try {
+            val (queueId, channelKey, _) = deriveChannelKeyAndQueue(channelCode)
+            val cipher = Cipher.getInstance("ChaCha20-Poly1305")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(channelKey, "ChaCha20"), IvParameterSpec(nonce))
+            cipher.updateAAD(queueId)
+            val pt = cipher.doFinal(ctAndTag)
+            String(pt, Charsets.UTF_8)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun sendCapsuleOverNetworkAsync(
+        channelCode: String,
+        plaintext: String,
+        onResult: (Boolean, String) -> Unit
+    ) {
+        val srv = activeServer
+        val frame = sealCrossBorderCapsule(channelCode, plaintext) ?: run {
+            onResult(false, "Ошибка запечатывания капсулы")
+            return
+        }
+        val (_, _, queueHex) = deriveChannelKeyAndQueue(channelCode)
+        val bodyHex = bytesToHex(frame)
+        val mainHandler = Handler(Looper.getMainLooper())
+
+        Thread {
+            try {
+                Socket().use { sock ->
+                    sock.connect(InetSocketAddress(srv.staticIpOrHost, srv.port), 2500)
+                    sock.soTimeout = 2500
+                    val req = "POST /api/v1/queue/send?queue=$queueHex HTTP/1.1\r\n" +
+                        "Host: localhost\r\n" +
+                        "Content-Type: text/plain\r\n" +
+                        "Content-Length: ${bodyHex.length}\r\n" +
+                        "Connection: close\r\n\r\n$bodyHex"
+                    sock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+                    sock.getOutputStream().flush()
+                    val resp = sock.getInputStream().readBytes().toString(Charsets.UTF_8)
+                    val ok = resp.startsWith("HTTP/1.1 200") && resp.contains("\"queued\"")
+                    mainHandler.post {
+                        if (ok) {
+                            onResult(true, "🌐 Капсула (${frame.size} B) доставлена на узел ${srv.staticIpOrHost}:${srv.port}")
+                        } else {
+                            onResult(false, "Капсула сохранена локально (узел вернул отказ)")
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                mainHandler.post {
+                    onResult(false, "Капсула запечатана локально (узел ${srv.staticIpOrHost}:${srv.port} офлайн)")
+                }
+            }
+        }.start()
+    }
+
+    fun pollCapsulesOverNetworkAsync(
+        chatIndex: Int,
+        channelCode: String,
+        onResult: (Int, String) -> Unit
+    ) {
+        val srv = activeServer
+        val (_, _, queueHex) = deriveChannelKeyAndQueue(channelCode)
+        val mainHandler = Handler(Looper.getMainLooper())
+
+        Thread {
+            try {
+                Socket().use { sock ->
+                    sock.connect(InetSocketAddress(srv.staticIpOrHost, srv.port), 2500)
+                    sock.soTimeout = 2500
+                    val req = "POST /api/v1/queue/poll?queue=$queueHex HTTP/1.1\r\n" +
+                        "Host: localhost\r\n" +
+                        "Content-Length: 0\r\n" +
+                        "Connection: close\r\n\r\n"
+                    sock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+                    sock.getOutputStream().flush()
+                    val resp = sock.getInputStream().readBytes().toString(Charsets.UTF_8)
+                    val decodedMessages = mutableListOf<Pair<String, Int>>()
+                    if (resp.startsWith("HTTP/1.1 200")) {
+                        val marker = "\"frames_hex\":["
+                        val idx = resp.indexOf(marker)
+                        if (idx >= 0) {
+                            val after = resp.substring(idx + marker.length)
+                            val endIdx = after.indexOf(']')
+                            if (endIdx >= 0) {
+                                val listStr = after.substring(0, endIdx).trim()
+                                if (listStr.isNotEmpty()) {
+                                    listStr.split(',').forEach { token ->
+                                        val hexItem = token.trim().trim('"')
+                                        val raw = hexToBytes(hexItem)
+                                        if (raw != null) {
+                                            val pt = openCrossBorderCapsule(channelCode, raw)
+                                            if (pt != null) {
+                                                decodedMessages.add(pt to raw.size)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    mainHandler.post {
+                        val chat = chats.getOrNull(chatIndex)
+                        if (chat != null) {
+                            decodedMessages.forEach { (pt, sz) ->
+                                chat.messages.add(
+                                    ChatMessageUi(
+                                        outgoing = false,
+                                        text = pt,
+                                        paddedBucketBytes = sz,
+                                        ttlSeconds = 3600
+                                    )
+                                )
+                            }
+                        }
+                        onResult(
+                            decodedMessages.size,
+                            "🌐 Синхронизация с ${srv.staticIpOrHost}:${srv.port}: принято капсул: ${decodedMessages.size}"
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+                mainHandler.post {
+                    onResult(0, "⛔ Не удалось связаться с узлом ${srv.staticIpOrHost}:${srv.port}")
+                }
+            }
+        }.start()
+    }
+
     private fun ensureHardwareKeystoreWrapperKey(): SecretKey? {
         return try {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -715,7 +932,7 @@ class AegisRustBridge(private val context: Context) {
             ChatItemUi(
                 chatIdHex = "02020202",
                 title = "nordic-falcon (PQXDH + Double Ratchet)",
-                queueTag = "queue://rx-99a1..tx-44b2",
+                queueTag = "queue://nordic-falcon-global-v1",
                 isSavedNotes = false,
                 verifiedSupportBadge = false,
                 perChatPin = "7788",

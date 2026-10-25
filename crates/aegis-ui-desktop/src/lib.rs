@@ -5,15 +5,16 @@
 
 use aegis_ffi::{
     build_launch_plan, combine_pqxdh_secrets, compute_pow_difficulty, constant_time_eq,
-    core_version_info, evaluate_network_shield, format_server_invite_uri, generate_docker_compose,
-    generate_nickname, generate_torrc_hidden_service, pad_frame, redact_leaks,
-    scan_message_for_leaks, strip_media_metadata, validate_launch_config, validate_manifest,
-    validate_nickname, validate_password, verify_server_badge, AccountSlotError,
-    AccountSlotManager, CoreVersionInfo, DirectoryError, LaunchPlan, LaunchTarget, LauncherError,
-    LeakWarning, Locale, NetworkRouteStatus, NicknameError, PasswordPolicyError, PluginError,
-    PluginManifest, ProtocolError, RatchetSession, RouteProbe, SealedSenderEnvelope, ServerBadge,
-    ShieldEvaluation, SignerAttestation, SupportTicket, SupportTicketCategory, SupporterPass,
-    ThresholdPolicy,
+    core_version_info, derive_channel_key_and_queue, evaluate_network_shield,
+    format_server_invite_uri, generate_docker_compose, generate_nickname,
+    generate_torrc_hidden_service, open_cross_border_capsule, pad_frame, poll_capsules_over_tcp,
+    redact_leaks, scan_message_for_leaks, seal_cross_border_capsule, send_capsule_over_tcp,
+    strip_media_metadata, validate_launch_config, validate_manifest, validate_nickname,
+    validate_password, verify_server_badge, AccountSlotError, AccountSlotManager, CoreVersionInfo,
+    DirectoryError, LaunchPlan, LaunchTarget, LauncherError, LeakWarning, Locale,
+    NetworkRouteStatus, NicknameError, PasswordPolicyError, PluginError, PluginManifest,
+    ProtocolError, RatchetSession, RouteProbe, SealedSenderEnvelope, ServerBadge, ShieldEvaluation,
+    SignerAttestation, SupportTicket, SupportTicketCategory, SupporterPass, ThresholdPolicy,
 };
 use core::fmt;
 use std::io::{Read, Write};
@@ -757,7 +758,7 @@ impl DesktopAppState {
         let peer_chat = ChatView {
             chat_id: [0x02; 16],
             title: "nordic-falcon (PQXDH + Double Ratchet)".to_owned(),
-            queue_tag: "queue://rx-88f1a0..tx-31c9e4".to_owned(),
+            queue_tag: "queue://nordic-falcon-global-v1".to_owned(),
             is_local_saved_notes: false,
             verified_support_badge: false,
             per_chat_pin: Some("7788".to_owned()),
@@ -1026,6 +1027,70 @@ impl DesktopAppState {
         }
         self.leak_guard_modal = None;
         Ok(bucket_len)
+    }
+
+    /// Encrypts a message into a 256..16384-byte RFC 8439 ChaCha20-Poly1305 capsule and transmits it
+    /// over TCP/HTTP to `server_host_port` (`POST /api/v1/queue/send?queue=<hex>`), enabling live cross-country messaging.
+    ///
+    /// # Errors
+    /// Returns [`DesktopUiError`] if `LeakGuard` blocks the message, Kill Switch is engaged, or network delivery fails.
+    pub fn transmit_cross_border_capsule(
+        &mut self,
+        server_host_port: &str,
+        channel_code: &str,
+        plaintext: &str,
+    ) -> Result<usize, DesktopUiError> {
+        let bucket = self.send_chat_message(plaintext, false, None)?;
+        let (queue_id, _, _) = derive_channel_key_and_queue(channel_code);
+        let msg_seq = self
+            .chats
+            .get(self.active_chat_index)
+            .map_or(1u64, |c| c.messages.len() as u64)
+            .max(1);
+        let mut nonce = [0u8; 12];
+        nonce[0..4].copy_from_slice(&queue_id[0..4]);
+        nonce[4..12].copy_from_slice(&msg_seq.to_be_bytes());
+        if nonce == [0u8; 12] {
+            nonce[0] = 1;
+        }
+        let capsule = seal_cross_border_capsule(channel_code, &nonce, plaintext)
+            .map_err(DesktopUiError::Protocol)?;
+        send_capsule_over_tcp(server_host_port, &queue_id, &capsule, 2_000)
+            .map_err(|e| DesktopUiError::IoError(e.to_string()))?;
+        Ok(bucket)
+    }
+
+    /// Polls pending encrypted capsules from `server_host_port` (`POST /api/v1/queue/poll?queue=<hex>`),
+    /// authenticates and decrypts each RFC 8439 ChaCha20-Poly1305 capsule using `channel_code`,
+    /// and appends them to the active chat.
+    ///
+    /// # Errors
+    /// Returns [`DesktopUiError`] if the connection fails or any capsule fails AEAD verification.
+    pub fn sync_remote_capsules(
+        &mut self,
+        server_host_port: &str,
+        channel_code: &str,
+    ) -> Result<usize, DesktopUiError> {
+        let (queue_id, _, _) = derive_channel_key_and_queue(channel_code);
+        let raw_frames = poll_capsules_over_tcp(server_host_port, &queue_id, 2_000)
+            .map_err(|e| DesktopUiError::IoError(e.to_string()))?;
+        let mut received_count = 0usize;
+        for frame in &raw_frames {
+            let plaintext =
+                open_cross_border_capsule(channel_code, frame).map_err(DesktopUiError::Protocol)?;
+            if let Some(chat) = self.chats.get_mut(self.active_chat_index) {
+                let ttl = chat.default_disappearing_ttl_secs;
+                chat.messages.push(ChatMessageView {
+                    outgoing: false,
+                    text: plaintext,
+                    padded_bucket_bytes: frame.len(),
+                    disappearing_ttl_secs: ttl,
+                    attachment: None,
+                });
+                received_count += 1;
+            }
+        }
+        Ok(received_count)
     }
 
     /// Masks all `LeakGuard` findings with `****` and sends the sanitized message.
@@ -1593,6 +1658,7 @@ impl DesktopGuiServer {
       <div style='margin-top:10px;'>
         <a class='btn warn' href='/action?cmd=test_leak_card'>💳 Тест LeakGuard: Карта Visa + CVV</a>
         <a class='btn ok' href='/action?cmd=send_photo_view_once'>📷 Отправить View-Once капсулу (очистка EXIF/GPS/iDOT)</a>
+        <a class='btn' href='/action?cmd=sync_remote'>🌐 Синхр. с узлом (Принять капсулы из другой страны)</a>
       </div>
     </div>
 
@@ -1910,15 +1976,65 @@ impl DesktopGuiServer {
             "send_text" => {
                 let text = extract_query_param(query, "text").unwrap_or_default();
                 if !text.is_empty() {
+                    let server_ep = self
+                        .state
+                        .directory_servers
+                        .get(self.state.selected_server_index)
+                        .map_or_else(|| "185.220.101.42:8443".to_owned(), |s| s.endpoint.clone());
+                    let channel_code = self
+                        .state
+                        .chats
+                        .get(self.state.active_chat_index)
+                        .map_or_else(|| "nordic-falcon".to_owned(), |c| c.queue_tag.clone());
                     match self.state.send_chat_message(&text, false, None) {
                         Ok(bucket) => {
-                            self.state.status_banner = format!(
-                                "Сообщение зашифровано и упаковано в фиксированный блок {bucket} B."
-                            );
+                            let (queue_id, _, _) = derive_channel_key_and_queue(&channel_code);
+                            let mut nonce = [0u8; 12];
+                            nonce[0..4].copy_from_slice(&queue_id[0..4]);
+                            nonce[4..12].copy_from_slice(&1u64.to_be_bytes());
+                            if let Ok(capsule) =
+                                seal_cross_border_capsule(&channel_code, &nonce, &text)
+                            {
+                                let net_ok =
+                                    send_capsule_over_tcp(&server_ep, &queue_id, &capsule, 400)
+                                        .is_ok();
+                                if net_ok {
+                                    self.state.status_banner = format!(
+                                        "Капсула {bucket} B зашифрована (ChaCha20-Poly1305) и доставлена на узел {server_ep}."
+                                    );
+                                } else {
+                                    self.state.status_banner = format!(
+                                        "Капсула зашифрована и упаковано в фиксированный блок {bucket} B."
+                                    );
+                                }
+                            }
                         }
                         Err(e) => {
                             self.state.status_banner = format!("Отправка приостановлена: {e}");
                         }
+                    }
+                }
+            }
+            "sync_remote" => {
+                let server_ep = self
+                    .state
+                    .directory_servers
+                    .get(self.state.selected_server_index)
+                    .map_or_else(|| "185.220.101.42:8443".to_owned(), |s| s.endpoint.clone());
+                let channel_code = self
+                    .state
+                    .chats
+                    .get(self.state.active_chat_index)
+                    .map_or_else(|| "nordic-falcon".to_owned(), |c| c.queue_tag.clone());
+                match self.state.sync_remote_capsules(&server_ep, &channel_code) {
+                    Ok(n) => {
+                        self.state.status_banner = format!(
+                            "Синхронизация с {server_ep} завершена: принято и расшифровано капсул: {n}."
+                        );
+                    }
+                    Err(e) => {
+                        self.state.status_banner =
+                            format!("Узел {server_ep} пока недоступен ({e}).");
                     }
                 }
             }
@@ -2538,5 +2654,70 @@ mod tests {
         }
         assert_eq!(gui2.state.current_screen, Screen::PanicWiped);
         assert!(gui2.state.chats.is_empty());
+    }
+
+    #[test]
+    fn t0014_cross_country_live_tcp_capsule_exchange_between_two_clients() {
+        use aegis_ffi::{handle_http_request, FederationServerState, SupportPortalState};
+        use std::thread;
+
+        // Bind a real TCP Federation Server listener on an ephemeral port (simulating an international Static-IP VPS)
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server_handle = thread::spawn(move || {
+            let mut srv = FederationServerState::new([0x55; 32]);
+            let mut portal = SupportPortalState::new();
+            // Handle 2 requests: 1st = Client A (Country A) sending capsule; 2nd = Client B (Country B) polling capsule
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 32_768];
+                let n = stream.read(&mut buf).unwrap();
+                let req_str = core::str::from_utf8(&buf[..n]).unwrap();
+                let (head, body) = req_str.split_once("\r\n\r\n").unwrap();
+                let mut parts = head.lines().next().unwrap().split_whitespace();
+                let method = parts.next().unwrap();
+                let path = parts.next().unwrap();
+                let (status, ctype, resp_body) =
+                    handle_http_request(&mut srv, &mut portal, method, path, body);
+                let resp = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp_body}",
+                    resp_body.len()
+                );
+                stream.write_all(resp.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let mut client_country_a = DesktopAppState::new(Locale::Ru);
+        let mut client_country_b = DesktopAppState::new(Locale::En);
+        let shared_channel = "cross-border-channel-zurich-tokyo-2026";
+
+        // Client A in Country 1 encrypts and transmits a 256-byte capsule over TCP to the server
+        let sent_bucket = client_country_a
+            .transmit_cross_border_capsule(
+                &addr,
+                shared_channel,
+                "Привет из другой страны! Капсула ChaCha20-Poly1305 доставлена по сети.",
+            )
+            .unwrap();
+        assert_eq!(sent_bucket, 256);
+
+        // Client B in Country 2 polls the server over TCP, verifies the Poly1305 tag, and decrypts the message
+        let received = client_country_b
+            .sync_remote_capsules(&addr, shared_channel)
+            .unwrap();
+        assert_eq!(received, 1);
+        let last_msg = client_country_b.chats[client_country_b.active_chat_index]
+            .messages
+            .last()
+            .unwrap();
+        assert!(!last_msg.outgoing);
+        assert_eq!(
+            last_msg.text,
+            "Привет из другой страны! Капсула ChaCha20-Poly1305 доставлена по сети."
+        );
+
+        server_handle.join().unwrap();
     }
 }
