@@ -2,6 +2,7 @@
 //! VPN/proxy/Tor route verification, kill-switch enforcement, cover traffic scheduler (PLAN.md §14),
 //! censorship-resistant proxy/bridge profiles, and live server migration (PLAN.md §14).
 
+use aegis_crypto::{hmac_sha256, sha256};
 use aegis_protocol::{pad_frame, ProtocolError, PADDING_BUCKETS};
 use core::fmt;
 
@@ -96,7 +97,7 @@ pub fn evaluate_network_shield(probe: &RouteProbe) -> ShieldEvaluation {
         return ShieldEvaluation {
             status: NetworkRouteStatus::DirectWarning,
             tunnel_leak_detected: true,
-            traffic_permitted: !probe.kill_switch_enabled,
+            traffic_permitted: false,
         };
     }
 
@@ -182,6 +183,20 @@ pub enum TransportProfile {
     },
 }
 
+fn is_public_routable_ipv4(octets: [u8; 4]) -> bool {
+    let [a, b, c, _] = octets;
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || a >= 224)
+}
+
 fn is_valid_transport_host(host: &str) -> bool {
     if host != host.trim()
         || host.is_empty()
@@ -201,16 +216,54 @@ fn is_valid_transport_host(host: &str) -> bool {
     }
     let labels: Vec<&str> = host.split('.').collect();
     for label in &labels {
-        if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || (label.len() >= 2 && label.as_bytes()[..2].eq_ignore_ascii_case(b"0x"))
+        {
             return false;
         }
     }
-    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()))
-        && (labels.len() != 4 || labels.iter().any(|l| l.parse::<u8>().is_err()))
-    {
-        return false;
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit())) {
+        if labels.len() != 4 {
+            return false;
+        }
+        for l in &labels {
+            if (l.len() > 1 && l.starts_with('0')) || l.parse::<u8>().is_err() {
+                return false;
+            }
+        }
     }
     true
+}
+
+fn is_valid_remote_public_host(host: &str) -> bool {
+    if !is_valid_transport_host(host) || host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    let last_label = labels[labels.len() - 1];
+    if matches!(
+        last_label.to_ascii_lowercase().as_str(),
+        "localhost" | "local" | "internal" | "lan" | "home" | "localdomain" | "arpa" | "invalid"
+    ) {
+        return false;
+    }
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit())) {
+        let mut octets = [0u8; 4];
+        for (idx, l) in labels.iter().enumerate() {
+            let Ok(v) = l.parse::<u8>() else {
+                return false;
+            };
+            octets[idx] = v;
+        }
+        return is_public_routable_ipv4(octets);
+    }
+    last_label.len() >= 2 && last_label.chars().all(|c| c.is_ascii_alphabetic())
 }
 
 impl TransportProfile {
@@ -247,7 +300,7 @@ impl TransportProfile {
                 let Some((host, port_str)) = bridge_endpoint.rsplit_once(':') else {
                     return Err(TransportError::InvalidEndpoint);
                 };
-                if !is_valid_transport_host(host) {
+                if !is_valid_remote_public_host(host) {
                     return Err(TransportError::InvalidEndpoint);
                 }
                 let port: u16 = port_str.parse().map_err(|_| TransportError::InvalidPort)?;
@@ -263,18 +316,54 @@ impl TransportProfile {
 /// Formats a canonical direct static-IPv4 server endpoint (`aegis://<a>.<b>.<c>.<d>:<port>`) that works without Tor (D-0019).
 ///
 /// # Errors
-/// Rejects port `0` or non-routable IPv4 addresses (`0.0.0.0`, `127.x.x.x`, `255.255.255.255`).
+/// Rejects port `0` or non-routable / private / loopback IPv4 addresses.
 pub fn format_static_ipv4_endpoint(ipv4: [u8; 4], port: u16) -> Result<String, TransportError> {
     if port == 0 {
         return Err(TransportError::InvalidPort);
     }
-    if ipv4 == [0, 0, 0, 0] || ipv4[0] == 0 || ipv4[0] == 127 || ipv4 == [255, 255, 255, 255] {
+    if !is_public_routable_ipv4(ipv4) {
         return Err(TransportError::InvalidEndpoint);
     }
     Ok(format!(
         "aegis://{}.{}.{}.{}:{port}",
         ipv4[0], ipv4[1], ipv4[2], ipv4[3]
     ))
+}
+
+/// Stream isolation circuit tag preventing server/Tor correlation between `OPAQUE AccountVault` sync
+/// and anonymous one-way message queues (`docs/contracts/aegis-transport.md` Guarantee #3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolatedCircuitTag {
+    /// Dedicated circuit for `OPAQUE AccountVault` authentication and sync.
+    VaultSyncCircuit,
+    /// Dedicated circuit for polling an anonymous incoming queue.
+    QueueReadCircuit([u8; 16]),
+    /// Dedicated circuit for posting a Sealed Sender packet to a contact's queue.
+    DirectWriteCircuit([u8; 16]),
+}
+
+/// Derives an unlinkable 32-byte SOCKS5/Tor stream isolation token for `circuit` so
+/// `AccountVault` operations and anonymous queue operations never share a network circuit.
+#[must_use]
+pub fn derive_circuit_isolation_token(
+    circuit: &IsolatedCircuitTag,
+    session_seed: &[u8; 32],
+) -> [u8; 32] {
+    let mut info = [0u8; 17];
+    match circuit {
+        IsolatedCircuitTag::VaultSyncCircuit => {
+            info[0] = 0x01;
+        }
+        IsolatedCircuitTag::QueueReadCircuit(id) => {
+            info[0] = 0x02;
+            info[1..17].copy_from_slice(id);
+        }
+        IsolatedCircuitTag::DirectWriteCircuit(id) => {
+            info[0] = 0x03;
+            info[1..17].copy_from_slice(id);
+        }
+    }
+    hmac_sha256(session_seed, &info)
 }
 
 /// Full client proxy and censorship-bypass configuration (D-0008, D-0019, PLAN.md §14).
@@ -359,7 +448,7 @@ impl Default for CoverTrafficConfig {
             enabled: true,
             min_interval_ms: 2_000,
             max_interval_ms: 10_000,
-            idle_grace_ms: 3_000,
+            idle_grace_ms: 2_000,
         }
     }
 }
@@ -389,6 +478,7 @@ pub struct CoverTrafficScheduler {
     config: CoverTrafficConfig,
     last_activity_ms: u64,
     emitted_count: u64,
+    schedule_step: u64,
 }
 
 impl CoverTrafficScheduler {
@@ -399,6 +489,7 @@ impl CoverTrafficScheduler {
             config: CoverTrafficConfig::default(),
             last_activity_ms: 0,
             emitted_count: 0,
+            schedule_step: 0,
         }
     }
 
@@ -412,17 +503,19 @@ impl CoverTrafficScheduler {
             config,
             last_activity_ms: 0,
             emitted_count: 0,
+            schedule_step: 0,
         })
     }
 
-    /// Records that a real user message was sent at `now_ms`, resetting the idle timer.
+    /// Records that a real user message was sent at `now_ms`, resetting the idle timer and advancing the schedule step.
     pub fn record_real_message(&mut self, now_ms: u64) {
         if now_ms > self.last_activity_ms {
             self.last_activity_ms = now_ms;
         }
+        self.schedule_step = self.schedule_step.saturating_add(1);
     }
 
-    /// Computes the next deterministic adaptive delay in milliseconds using `jitter_seed`.
+    /// Computes the next deterministic adaptive delay in milliseconds using a cryptographic SHA-256 PRF over `jitter_seed` and `schedule_step`.
     #[must_use]
     pub fn next_delay_ms(&self, jitter_seed: u64) -> u64 {
         let span = self
@@ -432,16 +525,22 @@ impl CoverTrafficScheduler {
         if span == 0 {
             return self.config.min_interval_ms;
         }
-        let mixed = jitter_seed
-            .wrapping_add(self.emitted_count.wrapping_mul(0x9E37_79B9_7F4A_7C15))
-            .rotate_left(17);
+        let mut preimage = [0u8; 32];
+        preimage[0..8].copy_from_slice(b"AegisCov");
+        preimage[8..16].copy_from_slice(&jitter_seed.to_le_bytes());
+        preimage[16..24].copy_from_slice(&self.emitted_count.to_be_bytes());
+        preimage[24..32].copy_from_slice(&self.schedule_step.to_be_bytes());
+        let digest = sha256(&preimage);
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&digest[0..8]);
+        let mixed = u64::from_le_bytes(word);
         self.config
             .min_interval_ms
             .saturating_add(mixed % (span.saturating_add(1)))
     }
 
     /// Checks whether a dummy cover frame should be emitted at `now_ms`, and if so returns
-    /// a `256`-byte padded dummy frame indistinguishable on the wire from a real padded frame.
+    /// a `256`-byte high-entropy dummy frame with zero trailing `0x00` bytes.
     pub fn poll_cover_frame(&mut self, now_ms: u64, jitter_seed: u64) -> Option<Vec<u8>> {
         if !self.config.enabled {
             return None;
@@ -457,16 +556,24 @@ impl CoverTrafficScheduler {
 
         self.last_activity_ms = now_ms;
         self.emitted_count = self.emitted_count.saturating_add(1);
+        self.schedule_step = self.schedule_step.saturating_add(1);
 
-        // Build a deterministic 32-byte chaff payload inside a valid 256-byte padded bucket frame.
-        let mut chaff = [0u8; 32];
-        let seq_bytes = self.emitted_count.to_be_bytes();
-        let seed_bytes = jitter_seed.to_le_bytes();
-        for (idx, slot) in chaff.iter_mut().enumerate() {
-            *slot = seq_bytes[idx % 8]
-                .wrapping_add(seed_bytes[idx % 8])
-                .wrapping_mul(0x6D)
-                .rotate_left((idx as u32 % 7) + 1);
+        // Fill all 254 payload bytes of the 256-byte bucket with cryptographic HMAC-SHA256 stream blocks
+        // so there are zero trailing 0x00 bytes and zero linear byte relationships on the wire.
+        let mut key = [0u8; 32];
+        key[0..8].copy_from_slice(&jitter_seed.to_le_bytes());
+        key[8..16].copy_from_slice(&self.emitted_count.to_be_bytes());
+        key[16..32].copy_from_slice(b"AegisCoverChaff1");
+
+        let mut chaff = [0u8; COVER_TRAFFIC_FRAME_BYTES - 2];
+        let mut offset = 0usize;
+        let mut block_idx = 0u8;
+        while offset < chaff.len() {
+            let block = hmac_sha256(&key, &[block_idx]);
+            let take = (chaff.len() - offset).min(32);
+            chaff[offset..offset + take].copy_from_slice(&block[..take]);
+            offset += take;
+            block_idx = block_idx.wrapping_add(1);
         }
         pad_frame(&chaff).ok()
     }
@@ -552,7 +659,7 @@ impl ServerMigrationNotice {
         let Some((host, port_str)) = host_port.rsplit_once(':') else {
             return Err(TransportError::InvalidMigrationNotice);
         };
-        if !is_valid_transport_host(host) {
+        if !is_valid_remote_public_host(host) {
             return Err(TransportError::InvalidMigrationNotice);
         }
         let Ok(port) = port_str.parse::<u16>() else {
@@ -775,6 +882,69 @@ mod tests {
         assert_eq!(
             bad_cover.validate(),
             Err(TransportError::InvalidCoverTrafficInterval)
+        );
+    }
+
+    #[test]
+    fn b0072_cover_traffic_high_entropy_circuit_stream_isolation_and_ssrf_rejection() {
+        // 1. Cover traffic fills all 254 payload bytes with HMAC-SHA256 stream (no trailing 0x00 run, no linear invariant)
+        let mut sched = CoverTrafficScheduler::default_scheduler();
+        let frame1 = sched.poll_cover_frame(20_000, 99).unwrap();
+        let frame2 = sched.poll_cover_frame(40_000, 99).unwrap();
+        assert_eq!(frame1.len(), 256);
+        assert_ne!(frame1, frame2);
+        assert!(frame1[34..256].iter().any(|&b| b != 0));
+        assert_ne!(frame1[2 + 8], frame1[2].rotate_left(1));
+
+        // 2. Stream isolation produces distinct unlinkable circuit tokens for VaultSync vs QueueRead vs DirectWrite
+        let seed = [0x42u8; 32];
+        let t_vault = derive_circuit_isolation_token(&IsolatedCircuitTag::VaultSyncCircuit, &seed);
+        let t_read = derive_circuit_isolation_token(
+            &IsolatedCircuitTag::QueueReadCircuit([0x11; 16]),
+            &seed,
+        );
+        let t_write = derive_circuit_isolation_token(
+            &IsolatedCircuitTag::DirectWriteCircuit([0x11; 16]),
+            &seed,
+        );
+        assert_ne!(t_vault, t_read);
+        assert_ne!(t_read, t_write);
+        assert_ne!(t_vault, t_write);
+
+        // 3. Confirmed tunnel leak ALWAYS blocks traffic even if kill_switch_enabled is false
+        let leak_no_ks = evaluate_network_shield(&RouteProbe {
+            via_tor: true,
+            via_vpn_or_proxy: false,
+            baseline_isp_ip_hash: Some([0x11; 32]),
+            server_observed_ip_hash: Some([0x11; 32]),
+            kill_switch_enabled: false,
+        });
+        assert!(leak_no_ks.tunnel_leak_detected);
+        assert!(!leak_no_ks.traffic_permitted);
+
+        // 4. SSRF private/loopback/metadata IPs rejected in format_static_ipv4_endpoint, ObfuscatedBridge, and ServerMigrationNotice
+        for bad_ip in [
+            [10, 0, 0, 1],
+            [172, 16, 0, 1],
+            [192, 168, 1, 1],
+            [169, 254, 169, 254],
+            [100, 64, 0, 1],
+            [224, 0, 0, 1],
+        ] {
+            assert_eq!(
+                format_static_ipv4_endpoint(bad_ip, 8443),
+                Err(TransportError::InvalidEndpoint)
+            );
+        }
+        assert_eq!(
+            ServerMigrationNotice::new_verified(
+                [0x11; 32],
+                [0x22; 32],
+                "aegis://169.254.169.254:8443".to_owned(),
+                [0x33; 32],
+                true,
+            ),
+            Err(TransportError::InvalidMigrationNotice)
         );
     }
 }

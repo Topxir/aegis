@@ -3,7 +3,7 @@ set -euo pipefail
 # ==============================================================================
 # Aegis 1-Click Anonymous Static-IP Starter Server Installer (No Tor Required!)
 # Works on any Ubuntu / Debian / Alpine VPS with a static IPv4 address.
-# Zero IP Logs · Constant-Shape OPAQUE · Unidirectional Padded Queues · TURN
+# Zero IP Logs · Constant-Shape OPAQUE · Unidirectional Padded Queues
 # ==============================================================================
 
 PORT="${AEGIS_BIND_PORT:-8443}"
@@ -26,6 +26,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    logging:
+      driver: "none"
     ports:
       - "0.0.0.0:${PORT}:${PORT}/tcp"
       - "0.0.0.0:${PORT}:${PORT}/udp"
@@ -35,7 +37,6 @@ services:
       AEGIS_QUEUE_TTL_SECS: "${TTL_SECS}"
       AEGIS_SERVER_PUBKEY_HEX: "${PUBKEY_FP}"
       AEGIS_IP_LOGGING: "false"
-      AEGIS_TURN_RELAY_ONLY: "true"
     volumes:
       - aegis_data:/var/lib/aegis
 volumes:

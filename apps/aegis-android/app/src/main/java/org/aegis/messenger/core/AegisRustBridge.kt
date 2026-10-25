@@ -88,9 +88,9 @@ class AegisRustBridge(private val context: Context) {
     var coverTrafficEnabled: Boolean = true
     var supporterPassActive: Boolean = false
     var maxAccountSlots: Int = 3
-    var activeThemeId: String = "obsidian-stealth-dark"
-    var voicePitchSemitones: Int = -4
-    var callActive: Boolean = false
+    var activeThemeId: String = "phantom-monolith"
+    var calculatorDisguiseActive: Boolean = false
+    var remainingPinAttempts: Int = 10
     var wipedByPanicOrDuress: Boolean = false
 
     val starterServers = mutableListOf<StarterServerUi>()
@@ -158,6 +158,9 @@ class AegisRustBridge(private val context: Context) {
         if (!isValidStaticIpOrHost(hostPart)) {
             return Result.failure(IllegalArgumentException("Некорректный статический IPv4 или домен"))
         }
+        if (starterServers.size >= 64) {
+            return Result.failure(IllegalStateException("Превышен лимит пользовательских серверов"))
+        }
         val isOnion = hostPart.endsWith(".onion", ignoreCase = true)
         val entry = StarterServerUi(
             id = "custom-${starterServers.size + 1}",
@@ -165,7 +168,7 @@ class AegisRustBridge(private val context: Context) {
             staticIpOrHost = hostPart,
             port = portPart,
             endpointUri = "aegis://$hostPart:$portPart",
-            badge = "✓ Pin-Verified",
+            badge = "⚠ Custom Static-IP",
             isTorOnion = isOnion,
             isCustom = true
         )
@@ -176,7 +179,7 @@ class AegisRustBridge(private val context: Context) {
     fun isValidStaticIpOrHost(host: String): Boolean {
         if (host.isEmpty() || host.length > 253 || host.startsWith('.') || host.endsWith('.') ||
             host.startsWith('-') || host.endsWith('-') || host.contains("..") ||
-            host == "0.0.0.0" || host == "255.255.255.255"
+            host.equals("localhost", ignoreCase = true)
         ) {
             return false
         }
@@ -184,17 +187,134 @@ class AegisRustBridge(private val context: Context) {
             return false
         }
         val labels = host.split('.')
-        if (labels.any { it.isEmpty() || it.length > 63 || it.startsWith('-') || it.endsWith('-') }) {
+        if (labels.size < 2 || labels.any { it.isEmpty() || it.length > 63 || it.startsWith('-') || it.endsWith('-') }) {
+            return false
+        }
+        val lastLabel = labels.last().lowercase()
+        if (lastLabel in setOf("localhost", "local", "internal", "lan", "home", "localdomain", "arpa", "invalid")) {
             return false
         }
         if (labels.all { label -> label.all { it.isDigit() } }) {
             if (labels.size != 4) return false
-            return labels.all { octet ->
-                val v = octet.toIntOrNull() ?: return false
-                v in 0..255
+            val octets = IntArray(4)
+            for (i in 0..3) {
+                val lbl = labels[i]
+                if (lbl.length > 1 && lbl.startsWith('0')) return false
+                val v = lbl.toIntOrNull() ?: return false
+                if (v !in 0..255) return false
+                octets[i] = v
+            }
+            val a = octets[0]
+            val b = octets[1]
+            if (a == 0 || a == 10 || a == 127 || (a == 100 && b in 64..127) ||
+                (a == 169 && b == 254) || (a == 172 && b in 16..31) ||
+                (a == 192 && b == 168) || a >= 224
+            ) {
+                return false
+            }
+            return true
+        }
+        return !lastLabel.all { it.isDigit() }
+    }
+
+    fun constantTimeEquals(lhs: String, rhs: String): Boolean {
+        val a = lhs.toByteArray(Charsets.UTF_8)
+        val b = rhs.toByteArray(Charsets.UTF_8)
+        if (a.size != b.size) return false
+        var diff = 0
+        for (i in a.indices) {
+            diff = diff or (a[i].toInt() xor b[i].toInt())
+        }
+        return diff == 0
+    }
+
+    fun unlockChatWithPin(chatIndex: Int, candidatePin: String): Boolean {
+        val chat = chats.getOrNull(chatIndex) ?: return false
+        val expected = chat.perChatPin ?: run {
+            chat.isLocked = false
+            return true
+        }
+        if (constantTimeEquals(expected, candidatePin.trim())) {
+            chat.isLocked = false
+            return true
+        }
+        remainingPinAttempts = (remainingPinAttempts - 1).coerceAtLeast(0)
+        if (remainingPinAttempts == 0) {
+            triggerEmergencyPanicWipe()
+        }
+        return false
+    }
+
+    fun evaluateCalculatorOrPin(rawInput: String): String {
+        val expr = rawInput.trim()
+        if (constantTimeEquals(expr, "2580")) {
+            remainingPinAttempts = 10
+            calculatorDisguiseActive = false
+            return "UNLOCKED"
+        }
+        if (constantTimeEquals(expr, "9999")) {
+            activateDuressDecoyMode()
+            return "DURESS"
+        }
+        if (expr.isNotEmpty() && expr.all { it.isDigit() }) {
+            remainingPinAttempts = (remainingPinAttempts - 1).coerceAtLeast(0)
+            if (remainingPinAttempts == 0) {
+                triggerEmergencyPanicWipe()
+                return "WIPED"
             }
         }
-        return true
+        if ('+' in expr) {
+            val parts = expr.split('+', limit = 2)
+            val x = parts[0].trim().toLongOrNull()
+            val y = parts[1].trim().toLongOrNull()
+            if (x != null && y != null) return (x + y).toString()
+        }
+        if ('*' in expr) {
+            val parts = expr.split('*', limit = 2)
+            val x = parts[0].trim().toLongOrNull()
+            val y = parts[1].trim().toLongOrNull()
+            if (x != null && y != null) return (x * y).toString()
+        }
+        if ('-' in expr && !expr.startsWith('-')) {
+            val parts = expr.split('-', limit = 2)
+            val x = parts[0].trim().toLongOrNull()
+            val y = parts[1].trim().toLongOrNull()
+            if (x != null && y != null) return (x - y).toString()
+        }
+        if ('/' in expr) {
+            val parts = expr.split('/', limit = 2)
+            val x = parts[0].trim().toLongOrNull()
+            val y = parts[1].trim().toLongOrNull()
+            if (x != null && y != null && y != 0L) return (x / y).toString()
+        }
+        return expr.toLongOrNull()?.toString() ?: "0"
+    }
+
+    fun activateDuressDecoyMode() {
+        accounts.clear()
+        starterServers.removeAll { it.isCustom }
+        activeServerIndex = 0
+        chats.clear()
+        chats.add(
+            ChatItemUi(
+                chatIdHex = "decoy001",
+                title = "Покупки и бытовые заметки",
+                queueTag = "local-decoy",
+                isSavedNotes = true,
+                verifiedSupportBadge = false,
+                perChatPin = null,
+                isLocked = false,
+                messages = mutableListOf(
+                    ChatMessageUi(
+                        outgoing = true,
+                        text = "Купить молоко, хлеб и батарейки АА.",
+                        paddedBucketBytes = 256,
+                        ttlSeconds = null
+                    )
+                )
+            )
+        )
+        calculatorDisguiseActive = false
     }
 
     /**
@@ -349,10 +469,11 @@ class AegisRustBridge(private val context: Context) {
     }
 
     fun scanMessageForLeaks(draft: String): LeakWarningUi? {
-        val cardRegex = Regex("\\b(?:\\d[ -]*?){13,19}\\b")
-        val cvvRegex = Regex("(?i)\\b(?:cvv|cvc|код)\\s*[:=]?\\s*\\d{3}\\b")
-        val phoneRegex = Regex("(?:\\+7|8|\\+\\d{1,3})[\\s\\-(]*\\d{3}[\\s\\-)]*\\d{3}[\\s\\-]*\\d{2}[\\s\\-]*\\d{2}")
+        val cardRegex = Regex("\\b(?:\\d[ -]*?){13,16}\\b")
+        val cvvRegex = Regex("(?i)\\b(?:cvv|cvc|свв|код)\\s*[:=]?\\s*\\d{3}\\b")
+        val phoneRegex = Regex("(?<![A-Za-z0-9+])\\+[1-9](?:[\\s\\-()]?\\d){9,14}(?![A-Za-z0-9])")
         val emailRegex = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+        val privKeyRegex = Regex("(?i)\\b0x[0-9a-f]{64}\\b|\\bxprv[1-9A-HJ-NP-Za-km-z]{100,114}\\b")
 
         val detectedKinds = mutableListOf<String>()
         var redacted = draft
@@ -376,11 +497,18 @@ class AegisRustBridge(private val context: Context) {
             detectedKinds.add("Email адрес")
             redacted = emailRegex.replace(redacted, "****@****.***")
         }
+        if (privKeyRegex.containsMatchIn(draft)) {
+            detectedKinds.add("Приватный крипто-ключ / Seed")
+            redacted = privKeyRegex.replace(redacted, "****")
+        }
         accounts.forEach { acc ->
             val ownNick = acc.loginNickname.trim()
-            if (ownNick.length >= 3 && draft.contains(ownNick, ignoreCase = true)) {
-                detectedKinds.add("Собственный логин-ник ($ownNick)")
-                redacted = redacted.replace(ownNick, "****", ignoreCase = true)
+            if (ownNick.length >= 3) {
+                val nickRegex = Regex("(?i)(?<![A-Za-z0-9])${Regex.escape(ownNick)}(?![A-Za-z0-9])")
+                if (nickRegex.containsMatchIn(draft)) {
+                    detectedKinds.add("Собственный логин-ник")
+                    redacted = nickRegex.replace(redacted, "****")
+                }
             }
         }
 
@@ -460,12 +588,14 @@ class AegisRustBridge(private val context: Context) {
         }
         accounts.clear()
         chats.clear()
+        starterServers.removeAll { it.isCustom }
+        activeServerIndex = 0
         redeemedSupporterTokens.clear()
         supporterPassActive = false
         maxAccountSlots = 3
-        activeThemeId = "obsidian-stealth-dark"
-        voicePitchSemitones = -4
-        callActive = false
+        activeThemeId = "phantom-monolith"
+        calculatorDisguiseActive = false
+        remainingPinAttempts = 0
         torEnabled = false
         shieldState = NetworkShieldState.DIRECT_STATIC_IP_TLS
         wipedByPanicOrDuress = true

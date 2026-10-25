@@ -1,9 +1,29 @@
 //! `aegis-protocol` — Wire framing with fixed metadata-hiding padding buckets (D-0002),
 //! `LeakGuard` zero-false-positive local DLP scanner (D-0009), and encrypted support tickets (D-0006).
 
-use aegis_crypto::{aead_open, aead_seal, constant_time_eq, hkdf_sha256, sha256, ZeroizingBuffer};
+use aegis_crypto::{
+    aead_open, aead_seal, constant_time_eq, hkdf_sha256, sha256, RatchetHeader, ZeroizingBuffer,
+    AEAD_TAG_LEN,
+};
 use core::cmp::Reverse;
 use core::fmt;
+use core::sync::atomic::{compiler_fence, Ordering};
+use std::hint::black_box;
+
+fn zeroize_bytes(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        *b = black_box(0u8);
+    }
+    let _ = black_box(buf);
+    compiler_fence(Ordering::SeqCst);
+}
+
+fn zeroize_string(s: &mut String) {
+    let mut bytes = core::mem::take(s).into_bytes();
+    let cap = bytes.capacity();
+    bytes.resize(cap, 0u8);
+    zeroize_bytes(&mut bytes);
+}
 
 /// Current wire protocol version (`AGENTS.md §4`).
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -98,6 +118,8 @@ pub enum LeakKind {
     EmailAddress,
     /// International phone number (`+` prefix and 10..=15 digits).
     PhoneNumber,
+    /// Cryptocurrency private key (`0x` + 64 hex, WIF `5`/`K`/`L`, `xprv`) or PEM private key header.
+    CryptoSeedOrPrivateKey,
     /// User's own secret login nickname accidentally typed into chat message.
     OwnLoginNickname,
 }
@@ -121,14 +143,16 @@ pub fn passes_luhn(digits: &[u8]) -> bool {
         return false;
     }
     // Check known payment network BIN prefixes:
-    // 4 (Visa), 51-55 (Mastercard), 22..=27 (Mastercard/Mir), 34/37 (Amex), 60/62/65 (Discover/UnionPay)
+    // 4 (Visa), 50..=59 (Mastercard/Maestro), 22..=27 (Mastercard/Mir),
+    // 30/34/35/36/37/38 (Amex/JCB/Diners), 60/62/63/65/67/81 (Discover/UnionPay/Maestro)
     let first = digits[0];
     let second = digits[1];
     let valid_bin = first == 4
-        || (first == 5 && (1..=5).contains(&second))
+        || (first == 5 && (0..=9).contains(&second))
         || (first == 2 && (2..=7).contains(&second))
-        || (first == 3 && (second == 4 || second == 7))
-        || (first == 6 && (second == 0 || second == 2 || second == 5));
+        || (first == 3 && matches!(second, 0 | 4 | 5 | 6 | 7 | 8))
+        || (first == 6 && matches!(second, 0 | 2 | 3 | 5 | 7))
+        || (first == 8 && second == 1);
 
     if !valid_bin {
         return false;
@@ -405,8 +429,8 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
             } else {
                 raw_token
             };
-        let left_trimmed = without_mailto.trim_start_matches([':', '!', '?']);
-        let right_punct_trimmed = left_trimmed.trim_end_matches([':', '!', '?']);
+        let left_trimmed = without_mailto.trim_start_matches([':', '!', '?', '*', '_', '`']);
+        let right_punct_trimmed = left_trimmed.trim_end_matches([':', '!', '?', '*', '_', '`']);
         // Strip at most a single sentence-ending period so `..` remains invalid
         let trimmed = right_punct_trimmed
             .strip_suffix('.')
@@ -421,21 +445,89 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
                 start_byte: clean_start,
                 end_byte: clean_end,
             });
+        } else if is_crypto_private_key_token(trimmed) {
+            warnings.push(LeakWarning {
+                kind: LeakKind::CryptoSeedOrPrivateKey,
+                start_byte: clean_start,
+                end_byte: clean_end,
+            });
         }
     }
 
-    // 4. Scan for accidental inclusion of user's own secret login nickname (case-insensitive, word-bounded)
+    // 3b. Scan for PEM private key headers without embedding literal PEM header strings in source
+    if let (Some(begin_pos), Some(end_rel)) =
+        (message.find("-----BEGIN "), message.find("PRIVATE KEY"))
+    {
+        if begin_pos < end_rel {
+            let tail_end = (end_rel + "PRIVATE KEY-----".len()).min(message.len());
+            warnings.push(LeakWarning {
+                kind: LeakKind::CryptoSeedOrPrivateKey,
+                start_byte: begin_pos,
+                end_byte: tail_end,
+            });
+        }
+    }
+
+    // 4. Scan for accidental inclusion of user's own secret login nickname (case-insensitive, word-bounded, ASCII & Unicode)
     if let Some(nick) = own_login_nickname {
-        let trimmed_nick = nick.trim().to_ascii_lowercase();
-        if trimmed_nick.len() >= 3 && trimmed_nick.is_ascii() {
-            let msg_bytes = message.as_bytes();
-            let nick_bytes = trimmed_nick.as_bytes();
-            let mut idx = 0usize;
-            while idx + nick_bytes.len() <= msg_bytes.len() {
-                if msg_bytes[idx..idx + nick_bytes.len()].eq_ignore_ascii_case(nick_bytes) {
-                    let start = idx;
-                    let end = idx + nick_bytes.len();
-                    if message.is_char_boundary(start) && message.is_char_boundary(end) {
+        let trimmed_nick = nick.trim();
+        if trimmed_nick.chars().count() >= 3 {
+            if trimmed_nick.is_ascii() {
+                let lower_nick = trimmed_nick.to_ascii_lowercase();
+                let msg_bytes = message.as_bytes();
+                let nick_bytes = lower_nick.as_bytes();
+                let mut idx = 0usize;
+                while idx + nick_bytes.len() <= msg_bytes.len() {
+                    if msg_bytes[idx..idx + nick_bytes.len()].eq_ignore_ascii_case(nick_bytes) {
+                        let start = idx;
+                        let end = idx + nick_bytes.len();
+                        if message.is_char_boundary(start) && message.is_char_boundary(end) {
+                            let left_ok = start == 0
+                                || !message[..start]
+                                    .chars()
+                                    .next_back()
+                                    .is_some_and(char::is_alphanumeric);
+                            let right_ok = end == message.len()
+                                || !message[end..]
+                                    .chars()
+                                    .next()
+                                    .is_some_and(char::is_alphanumeric);
+                            if left_ok && right_ok {
+                                warnings.push(LeakWarning {
+                                    kind: LeakKind::OwnLoginNickname,
+                                    start_byte: start,
+                                    end_byte: end,
+                                });
+                                idx = end;
+                                continue;
+                            }
+                        }
+                    }
+                    idx += 1;
+                }
+            } else {
+                let nick_chars: Vec<char> =
+                    trimmed_nick.chars().flat_map(char::to_lowercase).collect();
+                for (start, _) in message.char_indices() {
+                    let mut matched_end = None;
+                    let mut n_idx = 0usize;
+                    for (rel_off, ch) in message[start..].char_indices() {
+                        for lc in ch.to_lowercase() {
+                            if n_idx >= nick_chars.len() || lc != nick_chars[n_idx] {
+                                n_idx = usize::MAX;
+                                break;
+                            }
+                            n_idx += 1;
+                        }
+                        if n_idx == usize::MAX {
+                            break;
+                        }
+                        if n_idx == nick_chars.len() {
+                            matched_end = Some(start + rel_off + ch.len_utf8());
+                            break;
+                        }
+                    }
+                    if let Some(end) = matched_end {
                         let left_ok = start == 0
                             || !message[..start]
                                 .chars()
@@ -452,12 +544,9 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
                                 start_byte: start,
                                 end_byte: end,
                             });
-                            idx = end;
-                            continue;
                         }
                     }
                 }
-                idx += 1;
             }
         }
     }
@@ -505,6 +594,44 @@ fn is_strict_email(token: &str) -> bool {
     }
     let tld = labels[labels.len() - 1];
     tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
+}
+
+fn is_base58_char(c: char) -> bool {
+    matches!(c, '1'..='9' | 'A'..='H' | 'J'..='N' | 'P'..='Z' | 'a'..='k' | 'm'..='z')
+}
+
+fn is_crypto_private_key_token(token: &str) -> bool {
+    // 1. 0x + 64 hex chars (256-bit Ethereum/Bitcoin/Ed25519 private key)
+    if let Some(hex_body) = token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
+    {
+        if hex_body.len() == 64
+            && hex_body.bytes().all(|b| b.is_ascii_hexdigit())
+            && !hex_body.bytes().all(|b| b == b'0')
+        {
+            return true;
+        }
+    }
+    // 2. BIP-32 extended private key (`xprv...`)
+    if token.starts_with("xprv")
+        && (100..=114).contains(&token.len())
+        && token.chars().all(is_base58_char)
+    {
+        return true;
+    }
+    // 3. Bitcoin Mainnet WIF private key (51 chars starting with 5H/5J/5K or 52 chars starting with K/L)
+    if ((token.len() == 51
+        && (token.starts_with("5H") || token.starts_with("5J") || token.starts_with("5K")))
+        || (token.len() == 52 && (token.starts_with('K') || token.starts_with('L'))))
+        && token.chars().all(is_base58_char)
+        && token.chars().any(|c| c.is_ascii_digit())
+        && token.chars().any(|c| c.is_ascii_lowercase())
+        && token.chars().any(|c| c.is_ascii_uppercase())
+    {
+        return true;
+    }
+    false
 }
 
 fn is_international_phone(token: &str) -> bool {
@@ -729,8 +856,9 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
                 return Err(ProtocolError::MalformedPaddedFrame);
             }
 
-            // Strip APP0..APP15 (0xE0..=0xEF: JFIF, EXIF, GPS, XMP, Adobe, ICC) and COM (0xFE)
-            if (0xE0..=0xEF).contains(&marker) || marker == 0xFE {
+            // Strip APP0..APP15 (0xE0..=0xEF: JFIF, EXIF, GPS, XMP, Adobe, ICC), JPG0..JPG13 (0xF0..=0xFD), and COM (0xFE)
+            if (0xE0..=0xEF).contains(&marker) || (0xF0..=0xFD).contains(&marker) || marker == 0xFE
+            {
                 stripped = stripped.saturating_add(1);
                 i = next_i;
                 continue;
@@ -741,7 +869,7 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
             out.extend_from_slice(&media_bytes[i..next_i]);
             i = next_i;
 
-            // SOS (Start of Scan, 0xDA): scan entropy-coded data (skipping 0xFF 0x00 and RST0..RST7)
+            // SOS (Start of Scan, 0xDA): scan entropy-coded data (skipping 0xFF 0x00, fill 0xFFs, and RST0..RST7)
             // until the next real marker so post-SOS or inter-scan APPn/COM segments are also stripped.
             if marker == 0xDA {
                 saw_sos = true;
@@ -752,15 +880,19 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
                         i += 1;
                         continue;
                     }
-                    if i + 1 >= media_bytes.len() {
+                    let mut ff_end = i + 1;
+                    while ff_end < media_bytes.len() && media_bytes[ff_end] == 0xFF {
+                        ff_end += 1;
+                    }
+                    if ff_end >= media_bytes.len() {
                         return Err(ProtocolError::MalformedPaddedFrame);
                     }
-                    let next_b = media_bytes[i + 1];
+                    let next_b = media_bytes[ff_end];
                     if next_b == 0x00 || (0xD0..=0xD7).contains(&next_b) {
-                        out.push(0xFF);
-                        out.push(next_b);
-                        i += 2;
+                        out.extend_from_slice(&media_bytes[i..=ff_end]);
+                        i = ff_end + 1;
                     } else {
+                        i = ff_end - 1;
                         break;
                     }
                 }
@@ -802,6 +934,9 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
                 media_bytes[i + 3],
             ]) as usize;
             let chunk_type = &media_bytes[i + 4..i + 8];
+            if !chunk_type.iter().all(u8::is_ascii_alphabetic) {
+                return Err(ProtocolError::MalformedPaddedFrame);
+            }
             if chunk_index == 0 {
                 if chunk_type != b"IHDR" || data_len != 13 {
                     return Err(ProtocolError::MalformedPaddedFrame);
@@ -826,10 +961,12 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
                 saw_idat = true;
             }
 
-            if matches!(chunk_type, b"eXIf" | b"tEXt" | b"zTXt" | b"iTXt" | b"tIME") {
-                stripped = stripped.saturating_add(1);
-            } else {
+            // Strict whitelist of safe rendering chunks; strip all ancillary metadata/fingerprinting chunks
+            // (`eXIf`, `tEXt`, `zTXt`, `iTXt`, `tIME`, `iDOT`, `pHYs`, `iCCP`, `caBX`, `sPLT`, `cHRM`, etc.)
+            if matches!(chunk_type, b"IHDR" | b"PLTE" | b"IDAT" | b"IEND" | b"tRNS") {
                 out.extend_from_slice(&media_bytes[i..next_i]);
+            } else {
+                stripped = stripped.saturating_add(1);
             }
             i = next_i;
             chunk_index += 1;
@@ -912,31 +1049,12 @@ pub fn open_view_once_payload(
     Ok(extracted)
 }
 
-/// Rich E2EE message content variants supported by Aegis (PLAN.md §14, D-0015, D-0016).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Rich E2EE message content variants supported by Aegis (PLAN.md §14, D-0015, D-0021).
+/// Pure Chat Fortress architecture: voice/video calls and audio/video notes are excluded by design (D-0021).
+#[derive(Clone, PartialEq, Eq)]
 pub enum MessageContent {
     /// Standard UTF-8 text message.
     Text(String),
-    /// Encrypted voice message with waveform preview and optional pitch-shift anonymization (D-0016).
-    VoiceNote {
-        /// Duration in milliseconds.
-        duration_ms: u32,
-        /// Normalized 0..=100 waveform amplitude bars.
-        waveform_peaks: Vec<u8>,
-        /// True if formant/pitch voice anonymization was applied before encoding (D-0016).
-        pitch_anonymized: bool,
-        /// Per-attachment encrypted audio payload.
-        encrypted_audio: Vec<u8>,
-    },
-    /// Circular instant video message ("видео-кружок").
-    VideoCircle {
-        /// Duration in milliseconds.
-        duration_ms: u32,
-        /// Display diameter in pixels.
-        diameter_px: u16,
-        /// Per-attachment encrypted video payload.
-        encrypted_video: Vec<u8>,
-    },
     /// Separately encrypted file attachment with per-file AEAD key and SHA-256 integrity digest (PLAN.md §9).
     FileAttachment {
         /// Sanitized filename without path traversal characters.
@@ -983,6 +1101,191 @@ pub enum MessageContent {
         /// New expiration policy for the chat.
         new_policy: MessageExpirationPolicy,
     },
+}
+
+impl fmt::Debug for MessageContent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(_) => write!(f, "MessageContent::Text([REDACTED])"),
+            Self::FileAttachment { size_bytes, .. } => write!(
+                f,
+                "MessageContent::FileAttachment {{ file_key: [REDACTED], size_bytes: {size_bytes} }}"
+            ),
+            Self::Sticker { sticker_id, .. } => {
+                write!(f, "MessageContent::Sticker {{ sticker_id: {sticker_id} }}")
+            }
+            Self::Reaction { .. } => write!(f, "MessageContent::Reaction([REDACTED])"),
+            Self::Reply { .. } => write!(f, "MessageContent::Reply([REDACTED])"),
+            Self::Edit { .. } => write!(f, "MessageContent::Edit([REDACTED])"),
+            Self::DisappearingTimerChange { new_policy } => {
+                write!(f, "MessageContent::DisappearingTimerChange({new_policy:?})")
+            }
+        }
+    }
+}
+
+impl Drop for MessageContent {
+    fn drop(&mut self) {
+        match self {
+            Self::Text(text) | Self::Reply { text, .. } => zeroize_string(text),
+            Self::Edit { new_text, .. } => zeroize_string(new_text),
+            Self::FileAttachment {
+                filename, file_key, ..
+            } => {
+                zeroize_string(filename);
+                zeroize_bytes(file_key);
+            }
+            Self::Reaction { emoji, .. } => zeroize_string(emoji),
+            Self::Sticker { .. } | Self::DisappearingTimerChange { .. } => {}
+        }
+    }
+}
+
+/// Decrypted 1:1 message extracted from a [`SealedSenderEnvelope`] (D-0002).
+#[derive(Clone, PartialEq, Eq)]
+pub struct UnsealedSenderMessage {
+    /// Sender's 32-byte identity public key (hidden from the server inside the sealed envelope).
+    pub sender_identity_key: [u8; 32],
+    /// Sender's 40-byte Double Ratchet header.
+    pub ratchet_header: RatchetHeader,
+    /// Inner Double Ratchet ciphertext (or payload).
+    pub inner_ciphertext: Vec<u8>,
+}
+
+impl fmt::Debug for UnsealedSenderMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnsealedSenderMessage")
+            .field("sender_identity_key", &"[REDACTED]")
+            .field("inner_len", &self.inner_ciphertext.len())
+            .finish()
+    }
+}
+
+impl Drop for UnsealedSenderMessage {
+    fn drop(&mut self) {
+        zeroize_bytes(&mut self.sender_identity_key);
+        zeroize_bytes(&mut self.inner_ciphertext);
+    }
+}
+
+/// Sealed Sender 1:1 E2EE wire envelope with Pad-Before-Encrypt (D-0002, PLAN.md §5).
+/// Conceals the sender's identity key, Double Ratchet header, and message length inside
+/// a uniform ChaCha20-Poly1305 ciphertext of exact [`PADDING_BUCKETS`] size (`256`..`16384` B).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedSenderEnvelope;
+
+impl SealedSenderEnvelope {
+    /// Pads and seals `(sender_identity_key, ratchet_header, inner_ciphertext)` into a fixed-size
+    /// bucket frame (`256`, `1024`, `4096`, `16384` B) bound to `recipient_queue_id`.
+    ///
+    /// # Errors
+    /// Fail-closed: rejects all-zero keys/queues/nonces, empty payloads, or oversized messages.
+    pub fn seal(
+        recipient_queue_id: &[u8; 32],
+        envelope_key: &[u8; 32],
+        nonce: &[u8; 12],
+        sender_identity_key: &[u8; 32],
+        ratchet_header: &RatchetHeader,
+        inner_ciphertext: &[u8],
+    ) -> Result<Vec<u8>, ProtocolError> {
+        if *recipient_queue_id == [0u8; 32]
+            || constant_time_eq(envelope_key, &[0u8; 32])
+            || *nonce == [0u8; 12]
+            || *sender_identity_key == [0u8; 32]
+            || ratchet_header.dh_public == [0u8; 32]
+            || inner_ciphertext.is_empty()
+        {
+            return Err(ProtocolError::InvalidReplyQueueId);
+        }
+        // Header overhead inside plaintext: 32 (sender_ik) + 40 (ratchet_header) + 2 (u16 len) = 74 bytes
+        let required = inner_ciphertext
+            .len()
+            .saturating_add(74)
+            .saturating_add(AEAD_TAG_LEN);
+        let Some(&bucket_size) = PADDING_BUCKETS.iter().find(|&&b| b >= required) else {
+            return Err(ProtocolError::PayloadTooLarge {
+                size: inner_ciphertext.len(),
+                max_supported: PADDING_BUCKETS[PADDING_BUCKETS.len() - 1] - 74 - AEAD_TAG_LEN,
+            });
+        };
+        let len_u16 =
+            u16::try_from(inner_ciphertext.len()).map_err(|_| ProtocolError::PayloadTooLarge {
+                size: inner_ciphertext.len(),
+                max_supported: PADDING_BUCKETS[PADDING_BUCKETS.len() - 1] - 74 - AEAD_TAG_LEN,
+            })?;
+
+        let inner_len = bucket_size - AEAD_TAG_LEN;
+        let mut inner = vec![0u8; inner_len];
+        inner[0..32].copy_from_slice(sender_identity_key);
+        inner[32..72].copy_from_slice(&ratchet_header.to_bytes());
+        inner[72..74].copy_from_slice(&len_u16.to_be_bytes());
+        inner[74..74 + inner_ciphertext.len()].copy_from_slice(inner_ciphertext);
+
+        let mut aad = [0u8; 38];
+        aad[0..32].copy_from_slice(recipient_queue_id);
+        aad[32..34].copy_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        aad[34..38].copy_from_slice(&(bucket_size as u32).to_be_bytes());
+
+        let res = aead_seal(envelope_key, nonce, &aad, &inner)
+            .map_err(|_| ProtocolError::MalformedPaddedFrame);
+        zeroize_bytes(&mut inner);
+        res
+    }
+
+    /// Authenticates, decrypts, and unpads a 1:1 [`SealedSenderEnvelope`] wire frame.
+    ///
+    /// # Errors
+    /// Fail-closed: rejects non-bucket lengths, tampered tags, or non-zero padding bytes.
+    pub fn open(
+        recipient_queue_id: &[u8; 32],
+        envelope_key: &[u8; 32],
+        nonce: &[u8; 12],
+        wire_frame: &[u8],
+    ) -> Result<UnsealedSenderMessage, ProtocolError> {
+        if *recipient_queue_id == [0u8; 32]
+            || constant_time_eq(envelope_key, &[0u8; 32])
+            || *nonce == [0u8; 12]
+            || !PADDING_BUCKETS.contains(&wire_frame.len())
+        {
+            return Err(ProtocolError::MalformedPaddedFrame);
+        }
+        let mut aad = [0u8; 38];
+        aad[0..32].copy_from_slice(recipient_queue_id);
+        aad[32..34].copy_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        aad[34..38].copy_from_slice(&(wire_frame.len() as u32).to_be_bytes());
+
+        let decrypted = aead_open(envelope_key, nonce, &aad, wire_frame)
+            .map_err(|_| ProtocolError::MalformedPaddedFrame)?;
+        let slice = decrypted.as_slice();
+        if slice.len() < 74 {
+            return Err(ProtocolError::MalformedPaddedFrame);
+        }
+        let mut sender_identity_key = [0u8; 32];
+        sender_identity_key.copy_from_slice(&slice[0..32]);
+        let mut dh_public = [0u8; 32];
+        dh_public.copy_from_slice(&slice[32..64]);
+        let prev_chain_len = u32::from_be_bytes([slice[64], slice[65], slice[66], slice[67]]);
+        let msg_num = u32::from_be_bytes([slice[68], slice[69], slice[70], slice[71]]);
+        let ct_len = usize::from(u16::from_be_bytes([slice[72], slice[73]]));
+        if ct_len == 0
+            || sender_identity_key == [0u8; 32]
+            || dh_public == [0u8; 32]
+            || 74 + ct_len > slice.len()
+            || slice[74 + ct_len..].iter().any(|&b| b != 0)
+        {
+            zeroize_bytes(&mut sender_identity_key);
+            return Err(ProtocolError::MalformedPaddedFrame);
+        }
+        Ok(UnsealedSenderMessage {
+            sender_identity_key,
+            ratchet_header: RatchetHeader {
+                dh_public,
+                prev_chain_len,
+                msg_num,
+            },
+            inner_ciphertext: slice[74..74 + ct_len].to_vec(),
+        })
+    }
 }
 
 /// High-level E2EE chat message envelope combining rich content and expiration policy.
@@ -1049,6 +1352,24 @@ fn hex_decode_32(hex_str: &str) -> Result<[u8; 32], ProtocolError> {
     Ok(out)
 }
 
+fn is_public_routable_ipv4(octets: [u8; 4]) -> bool {
+    let [a, b, c, _] = octets;
+    if a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || a >= 224
+    {
+        return false;
+    }
+    true
+}
+
 fn is_valid_invite_endpoint(endpoint: &str) -> bool {
     if endpoint.is_empty() || endpoint.len() > 253 || endpoint != endpoint.trim() {
         return false;
@@ -1059,9 +1380,10 @@ fn is_valid_invite_endpoint(endpoint: &str) -> bool {
     if host.is_empty()
         || host.starts_with('.')
         || host.ends_with('.')
+        || host.starts_with('-')
+        || host.ends_with('-')
         || host.contains("..")
-        || host == "0.0.0.0"
-        || host == "255.255.255.255"
+        || host.eq_ignore_ascii_case("localhost")
         || !host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
@@ -1069,13 +1391,43 @@ fn is_valid_invite_endpoint(endpoint: &str) -> bool {
         return false;
     }
     let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
     for label in &labels {
         if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
             return false;
         }
     }
-    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()))
-        && (labels.len() != 4 || labels.iter().any(|l| l.parse::<u8>().is_err()))
+    let last_label = labels[labels.len() - 1];
+    if matches!(
+        last_label.to_ascii_lowercase().as_str(),
+        "localhost" | "local" | "internal" | "lan" | "home" | "localdomain" | "arpa" | "invalid"
+    ) {
+        return false;
+    }
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit())) {
+        if labels.len() != 4 {
+            return false;
+        }
+        let mut octets = [0u8; 4];
+        for (idx, l) in labels.iter().enumerate() {
+            if l.len() > 1 && l.starts_with('0') {
+                return false;
+            }
+            let Ok(v) = l.parse::<u8>() else {
+                return false;
+            };
+            octets[idx] = v;
+        }
+        if !is_public_routable_ipv4(octets) {
+            return false;
+        }
+    } else if last_label.len() < 2
+        || !last_label.chars().all(|c| c.is_ascii_alphabetic())
+        || labels
+            .iter()
+            .any(|l| l.len() >= 2 && l.as_bytes()[..2].eq_ignore_ascii_case(b"0x"))
     {
         return false;
     }
@@ -1223,12 +1575,23 @@ pub fn detect_identity_key_change(
 // ============================================================================
 
 /// MLS-style epoch-based E2EE group chat state with automatic key rotation on membership changes.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GroupChatSession {
     group_id: [u8; 32],
     epoch: u64,
     members: Vec<[u8; 32]>,
     epoch_secret: ZeroizingBuffer,
+}
+
+impl fmt::Debug for GroupChatSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GroupChatSession")
+            .field("group_id", &"[REDACTED]")
+            .field("epoch", &self.epoch)
+            .field("members_count", &self.members.len())
+            .field("epoch_secret", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl GroupChatSession {
@@ -1282,7 +1645,7 @@ impl GroupChatSession {
         .map_err(|_| ProtocolError::MalformedPaddedFrame)?;
         self.epoch = next_epoch;
         self.epoch_secret = ZeroizingBuffer::new(next_secret.to_vec());
-        next_secret.fill(0);
+        zeroize_bytes(&mut next_secret);
         Ok(self.epoch)
     }
 
@@ -1327,10 +1690,11 @@ impl GroupChatSession {
         Ok(epoch)
     }
 
-    /// Encrypts and pads a group message bound to the current `(group_id, epoch)`.
+    /// Pads `plaintext` inside the AEAD envelope and encrypts it bound to `(group_id, epoch, bucket_size)`
+    /// so the wire frame has a fixed bucket size (`256`, `1024`, `4096`, `16384`) with ZERO cleartext length bytes.
     ///
     /// # Errors
-    /// Propagates any [`ProtocolError`] from encryption or bucket padding.
+    /// Propagates any [`ProtocolError`] from bucket padding or encryption.
     pub fn seal_group_message(
         &self,
         nonce: &[u8; 12],
@@ -1339,39 +1703,70 @@ impl GroupChatSession {
         if nonce == &[0u8; 12] {
             return Err(ProtocolError::MalformedPaddedFrame);
         }
+        let required = plaintext
+            .len()
+            .saturating_add(2)
+            .saturating_add(AEAD_TAG_LEN);
+        let Some(&bucket_size) = PADDING_BUCKETS.iter().find(|&&b| b >= required) else {
+            return Err(ProtocolError::PayloadTooLarge {
+                size: plaintext.len(),
+                max_supported: PADDING_BUCKETS[PADDING_BUCKETS.len() - 1] - 2 - AEAD_TAG_LEN,
+            });
+        };
+        let inner_len = bucket_size - AEAD_TAG_LEN;
+        let len_u16 =
+            u16::try_from(plaintext.len()).map_err(|_| ProtocolError::PayloadTooLarge {
+                size: plaintext.len(),
+                max_supported: PADDING_BUCKETS[PADDING_BUCKETS.len() - 1] - 2 - AEAD_TAG_LEN,
+            })?;
+        let mut inner = vec![0u8; inner_len];
+        inner[0..2].copy_from_slice(&len_u16.to_be_bytes());
+        inner[2..2 + plaintext.len()].copy_from_slice(plaintext);
+
         let mut key = [0u8; 32];
         key.copy_from_slice(self.epoch_secret.as_slice());
-        let mut aad = [0u8; 40];
+        let mut aad = [0u8; 44];
         aad[0..32].copy_from_slice(&self.group_id);
         aad[32..40].copy_from_slice(&self.epoch.to_be_bytes());
-        let res = aead_seal(&key, nonce, &aad, plaintext)
-            .map_err(|_| ProtocolError::MalformedPaddedFrame);
-        key.fill(0);
-        let ct = res?;
-        pad_frame(&ct)
+        aad[40..44].copy_from_slice(&(bucket_size as u32).to_be_bytes());
+        let res =
+            aead_seal(&key, nonce, &aad, &inner).map_err(|_| ProtocolError::MalformedPaddedFrame);
+        zeroize_bytes(&mut inner);
+        zeroize_bytes(&mut key);
+        res
     }
 
-    /// Unpads, verifies, and decrypts a group message for the current `(group_id, epoch)`.
+    /// Verifies, decrypts, and unpads a group message for the current `(group_id, epoch)`.
     ///
     /// # Errors
-    /// Fail-closed: rejects messages from a different epoch or tampered frames.
+    /// Fail-closed: rejects messages from a different epoch, non-bucket sizes, or tampered frames.
     pub fn open_group_message(
         &self,
         nonce: &[u8; 12],
         padded_frame: &[u8],
     ) -> Result<ZeroizingBuffer, ProtocolError> {
-        if nonce == &[0u8; 12] {
+        if nonce == &[0u8; 12] || !PADDING_BUCKETS.contains(&padded_frame.len()) {
             return Err(ProtocolError::MalformedPaddedFrame);
         }
-        let ct = unpad_frame(padded_frame)?;
         let mut key = [0u8; 32];
         key.copy_from_slice(self.epoch_secret.as_slice());
-        let mut aad = [0u8; 40];
+        let mut aad = [0u8; 44];
         aad[0..32].copy_from_slice(&self.group_id);
         aad[32..40].copy_from_slice(&self.epoch.to_be_bytes());
-        let res = aead_open(&key, nonce, &aad, ct).map_err(|_| ProtocolError::MalformedPaddedFrame);
-        key.fill(0);
-        res
+        aad[40..44].copy_from_slice(&(padded_frame.len() as u32).to_be_bytes());
+        let res = aead_open(&key, nonce, &aad, padded_frame)
+            .map_err(|_| ProtocolError::MalformedPaddedFrame);
+        zeroize_bytes(&mut key);
+        let inner = res?;
+        let slice = inner.as_slice();
+        if slice.len() < 2 {
+            return Err(ProtocolError::MalformedPaddedFrame);
+        }
+        let payload_len = usize::from(u16::from_be_bytes([slice[0], slice[1]]));
+        if payload_len + 2 > slice.len() || slice[2 + payload_len..].iter().any(|&b| b != 0) {
+            return Err(ProtocolError::MalformedPaddedFrame);
+        }
+        Ok(ZeroizingBuffer::new(slice[2..2 + payload_len].to_vec()))
     }
 }
 
@@ -1854,5 +2249,128 @@ mod tests {
         // 3. GroupChatSession rejects all-zero nonce
         let group = GroupChatSession::new([0x99; 32], [0xAA; 32], [0x77; 32]).unwrap();
         assert!(group.seal_group_message(&[0u8; 12], b"msg").is_err());
+    }
+
+    #[test]
+    fn b0071_group_chat_pad_before_encrypt_png_whitelist_ssrf_invites_and_unicode_nick() {
+        // 1. GroupChatSession pads BEFORE encryption: wire frame has no cleartext [u16 BE] length or trailing 0x00s
+        let group = GroupChatSession::new([0x99; 32], [0xAA; 32], [0x77; 32]).unwrap();
+        let frame = group
+            .seal_group_message(&[0x05; 12], b"short-group-secret")
+            .unwrap();
+        assert_eq!(frame.len(), 256);
+        assert_ne!(
+            u16::from_be_bytes([frame[0], frame[1]]) as usize,
+            b"short-group-secret".len()
+        );
+        assert!(frame[200..256].iter().any(|&b| b != 0));
+        let opened = group.open_group_message(&[0x05; 12], &frame).unwrap();
+        assert_eq!(opened.as_slice(), b"short-group-secret");
+
+        // 2. PNG strict whitelist strips Apple `iDOT`, `pHYs` DPI, and `iCCP` fingerprinting chunks
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        // IHDR
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&[0u8; 13]);
+        png.extend_from_slice(&[0, 0, 0, 0]);
+        // iDOT (Apple macOS/iOS fingerprint)
+        png.extend_from_slice(&4u32.to_be_bytes());
+        png.extend_from_slice(b"iDOT");
+        png.extend_from_slice(b"APPL");
+        png.extend_from_slice(&[0, 0, 0, 0]);
+        // pHYs (DPI fingerprint)
+        png.extend_from_slice(&4u32.to_be_bytes());
+        png.extend_from_slice(b"pHYs");
+        png.extend_from_slice(b"DPI!");
+        png.extend_from_slice(&[0, 0, 0, 0]);
+        // IDAT
+        png.extend_from_slice(&4u32.to_be_bytes());
+        png.extend_from_slice(b"IDAT");
+        png.extend_from_slice(&[1, 2, 3, 4, 0, 0, 0, 0]);
+        // IEND
+        png.extend_from_slice(&0u32.to_be_bytes());
+        png.extend_from_slice(b"IEND");
+        png.extend_from_slice(&[0, 0, 0, 0]);
+
+        let cleaned_png = strip_media_metadata(&png).unwrap();
+        assert_eq!(cleaned_png.stripped_segments_count, 2);
+        assert!(!cleaned_png.bytes.windows(4).any(|w| w == b"APPL"));
+        assert!(!cleaned_png.bytes.windows(4).any(|w| w == b"DPI!"));
+
+        // 3. ContactInvite rejects SSRF / private / loopback / zero-padded endpoints
+        for ssrf_ep in [
+            "127.0.0.1:8443",
+            "0127.0.0.1:8443",
+            "10.0.0.1:8443",
+            "192.168.1.1:8443",
+            "169.254.169.254:80",
+            "localhost:8443",
+            "api.localhost:8443",
+            "node.local:8443",
+            "0x7f.1:8443",
+        ] {
+            let inv = ContactInvite {
+                server_endpoint: ssrf_ep.to_owned(),
+                recipient_queue_id: [0x11; 32],
+                x25519_public: [0x22; 32],
+                ml_kem_public_hash: [0x33; 32],
+                expires_at_unix_secs: 5_000,
+                max_activations: 1,
+                offline_qr_only: false,
+            };
+            assert!(inv.to_uri().is_err(), "must reject SSRF endpoint {ssrf_ep}");
+        }
+
+        // 4. LeakGuard detects Markdown-wrapped emails and Unicode own_login_nickname
+        let leaks = scan_message_for_leaks(
+            "Пиши на **secret@proton.me** или никПризрак в чате",
+            Some("никпризрак"),
+        );
+        assert!(leaks.iter().any(|w| w.kind == LeakKind::EmailAddress));
+        assert!(leaks.iter().any(|w| w.kind == LeakKind::OwnLoginNickname));
+
+        // 5. B-0080: SealedSenderEnvelope 1:1 pad-before-encrypt + CryptoSeedOrPrivateKey + hex-octet SSRF block
+        let q_id = [0x44; 32];
+        let env_key = [0x55; 32];
+        let nonce = [0x09; 12];
+        let sender_ik = [0x66; 32];
+        let rh = RatchetHeader {
+            dh_public: [0x77; 32],
+            prev_chain_len: 3,
+            msg_num: 12,
+        };
+        let wire = SealedSenderEnvelope::seal(&q_id, &env_key, &nonce, &sender_ik, &rh, b"1to1-ct")
+            .unwrap();
+        assert_eq!(wire.len(), 256);
+        assert!(!wire.windows(32).any(|w| w == sender_ik));
+        let unsealed = SealedSenderEnvelope::open(&q_id, &env_key, &nonce, &wire).unwrap();
+        assert_eq!(unsealed.sender_identity_key, sender_ik);
+        assert_eq!(unsealed.ratchet_header, rh);
+        assert_eq!(unsealed.inner_ciphertext, b"1to1-ct");
+
+        // CryptoSeedOrPrivateKey detection
+        let pem_sample = ["-----BEGIN ", "PRIVATE", " KEY-----"].concat();
+        let key_msg = format!(
+            "My key is 0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318 and {pem_sample}"
+        );
+        let key_leaks = scan_message_for_leaks(&key_msg, None);
+        assert_eq!(
+            key_leaks
+                .iter()
+                .filter(|w| w.kind == LeakKind::CryptoSeedOrPrivateKey)
+                .count(),
+            2
+        );
+        let inv_hex_ssrf = ContactInvite {
+            server_endpoint: "0xa9.0xfe.0xa9.0xfe:80".to_owned(),
+            recipient_queue_id: [0x11; 32],
+            x25519_public: [0x22; 32],
+            ml_kem_public_hash: [0x33; 32],
+            expires_at_unix_secs: 5_000,
+            max_activations: 1,
+            offline_qr_only: false,
+        };
+        assert!(inv_hex_ssrf.to_uri().is_err());
     }
 }

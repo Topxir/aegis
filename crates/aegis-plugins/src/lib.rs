@@ -107,6 +107,9 @@ pub fn validate_manifest(manifest: &PluginManifest) -> Result<(), PluginError> {
     if !manifest.allowed_read_chats.is_empty() && manifest.allow_proxied_network {
         return Err(PluginError::ExfiltrationRiskChatAndNetworkCombined);
     }
+    if manifest.allowed_read_chats.len() > 64 {
+        return Err(PluginError::InvalidChatScope);
+    }
     for (idx, chat_id) in manifest.allowed_read_chats.iter().enumerate() {
         if *chat_id == [0u8; 16] || manifest.allowed_read_chats[..idx].contains(chat_id) {
             return Err(PluginError::InvalidChatScope);
@@ -154,6 +157,20 @@ fn is_valid_hex_color(token: &str) -> bool {
     bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(u8::is_ascii_hexdigit)
 }
 
+fn is_public_routable_ipv4(octets: [u8; 4]) -> bool {
+    let [a, b, c, _] = octets;
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || a >= 224)
+}
+
 fn is_valid_bridge_host(host: &str) -> bool {
     if host != host.trim()
         || host.is_empty()
@@ -164,9 +181,6 @@ fn is_valid_bridge_host(host: &str) -> bool {
         || host.ends_with('-')
         || host.contains("..")
         || host.eq_ignore_ascii_case("localhost")
-        || host == "0.0.0.0"
-        || host == "255.255.255.255"
-        || host.starts_with("127.")
         || !host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
@@ -182,12 +196,34 @@ fn is_valid_bridge_host(host: &str) -> bool {
             return false;
         }
     }
-    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()))
-        && (labels.len() != 4 || labels.iter().any(|l| l.parse::<u8>().is_err()))
-    {
+    let last_label = labels[labels.len() - 1];
+    if matches!(
+        last_label.to_ascii_lowercase().as_str(),
+        "localhost" | "local" | "internal" | "lan" | "home" | "localdomain" | "arpa" | "invalid"
+    ) {
         return false;
     }
-    true
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit())) {
+        if labels.len() != 4 {
+            return false;
+        }
+        let mut octets = [0u8; 4];
+        for (idx, l) in labels.iter().enumerate() {
+            if l.len() > 1 && l.starts_with('0') {
+                return false;
+            }
+            let Ok(v) = l.parse::<u8>() else {
+                return false;
+            };
+            octets[idx] = v;
+        }
+        return is_public_routable_ipv4(octets);
+    }
+    last_label.len() >= 2
+        && last_label.chars().all(|c| c.is_ascii_alphabetic())
+        && !labels
+            .iter()
+            .any(|l| l.len() >= 2 && l.as_bytes()[..2].eq_ignore_ascii_case(b"0x"))
 }
 
 impl ThemePack {
@@ -196,21 +232,21 @@ impl ThemePack {
     pub fn from_builtin(preset: BuiltInThemes) -> Self {
         match preset {
             BuiltInThemes::ObsidianDark => Self {
-                theme_id: "obsidian-dark".to_owned(),
-                display_name: "Obsidian Dark".to_owned(),
-                bg_primary_hex: "#0B0F17".to_owned(),
-                bg_surface_hex: "#131B2E".to_owned(),
-                accent_hex: "#10B981".to_owned(),
+                theme_id: "phantom-monolith".to_owned(),
+                display_name: "Phantom Monolith (Tactical Vault)".to_owned(),
+                bg_primary_hex: "#05080F".to_owned(),
+                bg_surface_hex: "#0C121E".to_owned(),
+                accent_hex: "#00F5B8".to_owned(),
                 text_primary_hex: "#E2E8F0".to_owned(),
                 stealth_calculator_disguise: false,
             },
             BuiltInThemes::EmeraldMatrix => Self {
-                theme_id: "emerald-matrix".to_owned(),
-                display_name: "Emerald Matrix".to_owned(),
-                bg_primary_hex: "#050B08".to_owned(),
-                bg_surface_hex: "#0A1912".to_owned(),
-                accent_hex: "#00FF9C".to_owned(),
-                text_primary_hex: "#D1FAE5".to_owned(),
+                theme_id: "cyber-lazulite".to_owned(),
+                display_name: "Cyber Lazulite".to_owned(),
+                bg_primary_hex: "#040A0E".to_owned(),
+                bg_surface_hex: "#091822".to_owned(),
+                accent_hex: "#38BDF8".to_owned(),
+                text_primary_hex: "#E0F2FE".to_owned(),
                 stealth_calculator_disguise: false,
             },
             BuiltInThemes::ArcticLight => Self {
@@ -466,17 +502,17 @@ mod tests {
         };
         assert!(local_bot.validate().is_ok());
 
-        // Matrix bridge (isolated bridge queue + proxied network, zero arbitrary chat-read scope)
+        // Isolated federation relay bridge (isolated bridge queue + proxied network, zero arbitrary chat-read scope)
         let matrix_bridge = BotBridgeDescriptor {
             manifest: PluginManifest {
-                plugin_id: "matrix-relay-bridge".to_owned(),
+                plugin_id: "federation-relay-bridge".to_owned(),
                 declarative_theme_only: false,
                 allowed_read_chats: vec![],
                 allow_proxied_network: true,
                 requested_forbidden_key_access: false,
             },
             config: BotBridgeConfig::MatrixBridge {
-                homeserver_host: "matrix.org".to_owned(),
+                homeserver_host: "relay.aegis.example".to_owned(),
                 isolated_bridge_queue_id: [0x77; 32],
             },
         };
@@ -494,5 +530,37 @@ mod tests {
             bad_bridge.validate(),
             Err(PluginError::InvalidBotBridgeConfig)
         );
+
+        // B-0076: Reject octal/zero-padded loopback, hex IP, private RFC1918, cloud metadata, and *.localhost SSRF bypasses
+        for ssrf_host in [
+            "0127.0.0.1",
+            "000.000.000.000",
+            "0.1.2.3",
+            "0x7f.0.0.1",
+            "0x7f.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "224.0.0.1",
+            "sub.localhost",
+            "node.local",
+            "service.internal",
+            "1.0.0.127.in-addr.arpa",
+        ] {
+            let attempt = BotBridgeDescriptor {
+                manifest: matrix_bridge.manifest.clone(),
+                config: BotBridgeConfig::MatrixBridge {
+                    homeserver_host: ssrf_host.to_owned(),
+                    isolated_bridge_queue_id: [0x77; 32],
+                },
+            };
+            assert_eq!(
+                attempt.validate(),
+                Err(PluginError::InvalidBotBridgeConfig),
+                "must reject SSRF bridge host {ssrf_host}"
+            );
+        }
     }
 }

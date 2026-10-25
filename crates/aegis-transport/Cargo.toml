@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+aegis-crypto.workspace = true
 aegis-protocol.workspace = true
 
 [lints]

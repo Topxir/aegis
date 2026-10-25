@@ -9,10 +9,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.aegis.messenger.core.AegisRustBridge
@@ -49,26 +51,27 @@ fun AegisComposeApp(
     var calculatorDisplay by remember { mutableStateOf("") }
     var chatPinInput by remember { mutableStateOf("") }
     var generatedNickname by remember { mutableStateOf(bridge.generateAnonymousNickname()) }
-    var onboardingPassword by remember { mutableStateOf("AEGis#StrongKey2026!") }
+    var onboardingPassword by remember { mutableStateOf("") }
     var launcherTarget by remember { mutableStateOf("VPS_DOCKER") }
     var customStaticIpInput by remember { mutableStateOf("185.220.101.42:8443") }
+    val incognitoKeyboardOptions = KeyboardOptions(autoCorrect = false)
 
     // Reference uiTick so mutations to bridge state trigger Compose recomposition
     val currentTick = uiTick
 
     MaterialTheme(
         colorScheme = darkColorScheme(
-            primary = Color(0xFF1F6FEB),
-            secondary = Color(0xFF238636),
-            background = Color(0xFF0B0F17),
-            surface = Color(0xFF141B26)
+            primary = Color(0xFF00F5B8),
+            secondary = Color(0xFF38BDF8),
+            background = Color(0xFF05080F),
+            surface = Color(0xFF0C121E)
         )
     ) {
         Surface(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF0B0F17)),
-            color = Color(0xFF0B0F17)
+                .background(Color(0xFF05080F)),
+            color = Color(0xFF05080F)
         ) {
             if (bridge.wipedByPanicOrDuress && currentTick >= 0) {
                 draftText = ""
@@ -96,7 +99,7 @@ fun AegisComposeApp(
                 return@Surface
             }
 
-            if (activeTab == "CALCULATOR_DISGUISE") {
+            if (activeTab == "CALCULATOR_DISGUISE" || bridge.calculatorDisguiseActive) {
                 Column(
                     modifier = Modifier.fillMaxSize().padding(24.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -105,21 +108,38 @@ fun AegisComposeApp(
                     OutlinedTextField(
                         value = calculatorDisplay,
                         onValueChange = { calculatorDisplay = it },
-                        label = { Text("Выражение или секретный PIN (2580)") },
+                        label = { Text("Введите выражение") },
+                        keyboardOptions = incognitoKeyboardOptions,
                         modifier = Modifier.fillMaxWidth()
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = {
-                            if (calculatorDisplay.trim() == "2580") {
-                                calculatorDisplay = ""
-                                onToggleCalculatorLauncherIcon(false)
-                                activeTab = "CHATS"
-                                statusBanner = "Секретный PIN принят: маскировка снята."
-                            } else {
-                                calculatorDisplay = "500"
+                            when (val res = bridge.evaluateCalculatorOrPin(calculatorDisplay)) {
+                                "UNLOCKED" -> {
+                                    calculatorDisplay = ""
+                                    onToggleCalculatorLauncherIcon(false)
+                                    activeTab = "CHATS"
+                                    statusBanner = "Секретный PIN принят: маскировка снята."
+                                    uiTick++
+                                }
+                                "DURESS" -> {
+                                    calculatorDisplay = ""
+                                    activeTab = "CHATS"
+                                    activeChatIndex = 0
+                                    statusBanner = "Открыт профиль по умолчанию."
+                                    uiTick++
+                                }
+                                "WIPED" -> {
+                                    calculatorDisplay = ""
+                                    onPanicWipeTriggered()
+                                    uiTick++
+                                }
+                                else -> {
+                                    calculatorDisplay = res
+                                }
                             }
                         }) {
-                            Text("= (Вычислить / Разблокировать)")
+                            Text("=")
                         }
                     }
                 }
@@ -137,14 +157,17 @@ fun AegisComposeApp(
                 ) {
                     val srv = bridge.activeServer
                     Text(
-                        text = "🛡 Aegis [${srv.staticIpOrHost}:${srv.port} ${srv.badge}]",
-                        color = Color(0xFF79C0FF),
+                        text = "◈ AEGIS // PHANTOM MONOLITH [${srv.staticIpOrHost}:${srv.port} ${srv.badge}]",
+                        color = Color(0xFF00F5B8),
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Button(onClick = {
+                            bridge.onAppBackgrounded()
+                            bridge.calculatorDisguiseActive = true
+                            pendingLeakWarning = null
                             onToggleCalculatorLauncherIcon(true)
                             activeTab = "CALCULATOR_DISGUISE"
                         }) {
@@ -206,7 +229,10 @@ fun AegisComposeApp(
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             bridge.chats.forEachIndexed { idx, chat ->
-                                Button(onClick = { activeChatIndex = idx }) {
+                                Button(onClick = {
+                                    activeChatIndex = idx
+                                    pendingLeakWarning = null
+                                }) {
                                     Text(chat.title.take(20), fontSize = 11.sp)
                                 }
                             }
@@ -232,17 +258,22 @@ fun AegisComposeApp(
                                         value = chatPinInput,
                                         onValueChange = { chatPinInput = it },
                                         label = { Text("Введите PIN чата") },
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        keyboardOptions = incognitoKeyboardOptions,
                                         modifier = Modifier.fillMaxWidth()
                                     )
                                     Button(onClick = {
-                                        if (currentChat.perChatPin != null && chatPinInput == currentChat.perChatPin) {
-                                            currentChat.isLocked = false
+                                        if (bridge.unlockChatWithPin(safeIndex, chatPinInput)) {
                                             chatPinInput = ""
                                             statusBanner = "Чат разблокирован персональным PIN-кодом."
                                             uiTick++
                                         } else {
                                             chatPinInput = ""
-                                            statusBanner = "⛔ Неверный PIN-код чата."
+                                            if (bridge.wipedByPanicOrDuress) {
+                                                onPanicWipeTriggered()
+                                            }
+                                            statusBanner = "⛔ Неверный PIN-код чата (осталось попыток: ${bridge.remainingPinAttempts})."
+                                            uiTick++
                                         }
                                     }) {
                                         Text("Разблокировать чат")
@@ -301,14 +332,21 @@ fun AegisComposeApp(
                                 Card(
                                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                     colors = CardDefaults.cardColors(
-                                        containerColor = if (msg.outgoing) Color(0xFF132F23) else Color(0xFF1C2536)
+                                        containerColor = if (msg.outgoing) Color(0xFF0A1E22) else Color(0xFF0C121E)
                                     )
                                 ) {
                                     Column(modifier = Modifier.padding(10.dp)) {
+                                        Text(
+                                            text = if (msg.outgoing) "◈ TX // SEALED CAPSULE • PQXDH+DR" else "◈ RX // VERIFIED CAPSULE • PQXDH+DR",
+                                            color = Color(0xFF00F5B8),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
                                         Text(msg.text, color = Color.White)
                                         Text(
-                                            "📦 Паддинг: ${msg.paddedBucketBytes} B | TTL: ${msg.ttlSeconds ?: "∞"}с",
-                                            color = Color.Gray,
+                                            "PAD-BUCKET: ${msg.paddedBucketBytes} B (ENTROPY 100%) | TTL: ${msg.ttlSeconds ?: "∞"}с",
+                                            color = Color(0xFF38BDF8),
                                             fontSize = 11.sp
                                         )
                                     }
@@ -320,6 +358,7 @@ fun AegisComposeApp(
                             value = draftText,
                             onValueChange = { draftText = it },
                             label = { Text("Сообщение (Инкогнито-клавиатура + LeakGuard)") },
+                            keyboardOptions = incognitoKeyboardOptions,
                             modifier = Modifier.fillMaxWidth()
                         )
 
@@ -374,18 +413,7 @@ fun AegisComposeApp(
                                     uiTick++
                                 }
                             }) {
-                                Text("📷 View-Once")
-                            }
-                            Button(onClick = {
-                                if (bridge.shieldState == AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED) {
-                                    statusBanner = "⛔ Звонок заблокирован Kill Switch."
-                                } else {
-                                    bridge.callActive = true
-                                    statusBanner = "📞 Звонок E2EE (TURN Relay-Only, тембр ${bridge.voicePitchSemitones} пт)"
-                                    uiTick++
-                                }
-                            }) {
-                                Text("📞 Звонок")
+                                Text("📷 View-Once Капсула")
                             }
                         }
                     }
@@ -405,6 +433,8 @@ fun AegisComposeApp(
                                 value = onboardingPassword,
                                 onValueChange = { onboardingPassword = it },
                                 label = { Text("Строгий пароль (≥12 симв., ≥3 ЗАГЛАВНЫЕ)") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = incognitoKeyboardOptions,
                                 modifier = Modifier.fillMaxWidth()
                             )
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -518,11 +548,11 @@ fun AegisComposeApp(
                         ) {
                             Text("✓ Зашифрованная поддержка и Декларативные темы (WASM-песочница)", color = Color.White)
                             Button(onClick = {
-                                bridge.activeThemeId = "cyber-emerald-oled"
-                                statusBanner = "Применена декларативная тема: ${bridge.activeThemeId}"
+                                bridge.activeThemeId = "phantom-monolith"
+                                statusBanner = "Применена декларативная тема: ${bridge.activeThemeId} (Phantom Monolith)"
                                 uiTick++
                             }) {
-                                Text("🎨 Включить тему Cyber Emerald OLED")
+                                Text("🎨 Включить тему Phantom Monolith (#00F5B8)")
                             }
                         }
                     }

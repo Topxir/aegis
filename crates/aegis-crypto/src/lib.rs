@@ -60,10 +60,18 @@ impl std::error::Error for CryptoError {}
 
 /// Memory-safe buffer for secret material that overwrites its contents with zeroes on `Drop`
 /// without using `unsafe` code, and redacts its contents in `Debug` output (AGENTS.md §2.4, §2.7).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ZeroizingBuffer {
     bytes: Vec<u8>,
 }
+
+impl PartialEq for ZeroizingBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        constant_time_eq(&self.bytes, &other.bytes)
+    }
+}
+
+impl Eq for ZeroizingBuffer {}
 
 impl ZeroizingBuffer {
     /// Creates a new secret buffer taking ownership of `bytes`.
@@ -103,14 +111,18 @@ impl ZeroizingBuffer {
         self.bytes.is_empty()
     }
 
-    /// Explicitly zeroes the buffer contents using `black_box` and a compiler fence
-    /// to prevent dead-store elimination.
+    /// Explicitly zeroes the buffer contents (including spare capacity `len..capacity`)
+    /// using `black_box` and a compiler fence to prevent dead-store elimination.
     pub fn zeroize(&mut self) {
+        let orig_len = self.bytes.len();
+        let cap = self.bytes.capacity();
+        self.bytes.resize(cap, 0u8);
         for byte in &mut self.bytes {
             *byte = black_box(0u8);
         }
         let _ = black_box(self.bytes.as_mut_slice());
         compiler_fence(Ordering::SeqCst);
+        self.bytes.truncate(orig_len);
     }
 }
 
@@ -126,15 +138,15 @@ impl fmt::Debug for ZeroizingBuffer {
     }
 }
 
-/// Constant-time slice equality check to avoid timing side-channels on MAC/tag comparisons.
+/// Constant-time slice equality check (without early length return) to avoid timing side-channels.
 #[must_use]
 pub fn constant_time_eq(lhs: &[u8], rhs: &[u8]) -> bool {
-    if lhs.len() != rhs.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&a, &b) in lhs.iter().zip(rhs.iter()) {
-        diff |= a ^ b;
+    let max_len = lhs.len().max(rhs.len());
+    let mut diff = lhs.len() ^ rhs.len();
+    for i in 0..max_len {
+        let a = black_box(lhs.get(i).copied().unwrap_or(0));
+        let b = black_box(rhs.get(i).copied().unwrap_or(0));
+        diff |= usize::from(a ^ b);
     }
     black_box(diff) == 0
 }
@@ -184,22 +196,13 @@ pub fn count_leading_zero_bits(digest: &[u8]) -> u32 {
 pub struct DeterministicPowVerifier;
 
 impl DeterministicPowVerifier {
-    /// Computes a deterministic 32-byte digest placeholder for Phase 0 contract testing.
-    /// Replaced by `blake3::Hasher` in Phase 1 (T-0004).
+    /// Computes a cryptographic 32-byte SHA-256 digest over `(challenge || nonce_le)` with full 256-bit avalanche.
     #[must_use]
     pub fn digest_for_test(challenge: &[u8; 32], nonce: u64) -> [u8; 32] {
-        let mut out = [0u8; 32];
-        let nonce_bytes = nonce.to_le_bytes();
-        for (i, slot) in out.iter_mut().enumerate() {
-            let c = challenge[i];
-            let n = nonce_bytes[i % 8];
-            let mixed = c
-                .wrapping_add(n)
-                .wrapping_mul(0x9E)
-                .rotate_left((i as u32) % 7 + 1);
-            *slot = mixed ^ n;
-        }
-        out
+        let mut preimage = [0u8; 40];
+        preimage[0..32].copy_from_slice(challenge);
+        preimage[32..40].copy_from_slice(&nonce.to_le_bytes());
+        sha256(&preimage)
     }
 }
 
@@ -329,6 +332,11 @@ fn sha256_compress(state: &mut [u32; 8], block: &[u8; 64]) {
     state[5] = state[5].wrapping_add(f);
     state[6] = state[6].wrapping_add(g);
     state[7] = state[7].wrapping_add(h);
+
+    for word in &mut w {
+        *word = black_box(0);
+    }
+    compiler_fence(Ordering::SeqCst);
 }
 
 /// Computes the standard FIPS 180-4 SHA-256 digest of `data`.
@@ -354,6 +362,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         let mut block = [0u8; 64];
         block.copy_from_slice(&tail[..64]);
         sha256_compress(&mut state, &block);
+        zeroize_slice(&mut block);
     } else {
         tail[120..128].copy_from_slice(&bit_len.to_be_bytes());
         let mut block1 = [0u8; 64];
@@ -362,14 +371,19 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         block2.copy_from_slice(&tail[64..128]);
         sha256_compress(&mut state, &block1);
         sha256_compress(&mut state, &block2);
+        zeroize_slice(&mut block1);
+        zeroize_slice(&mut block2);
     }
+    zeroize_slice(&mut tail);
 
     let mut out = [0u8; 32];
-    for (i, word) in state.iter().enumerate() {
+    for (i, word) in state.iter_mut().enumerate() {
         let bytes = word.to_be_bytes();
         let base = i * 4;
         out[base..base + 4].copy_from_slice(&bytes);
+        *word = black_box(0);
     }
+    compiler_fence(Ordering::SeqCst);
     out
 }
 
@@ -517,7 +531,10 @@ pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64
         let word = working[i].wrapping_add(initial[i]);
         let base = i * 4;
         out[base..base + 4].copy_from_slice(&word.to_le_bytes());
+        initial[i] = black_box(0);
+        working[i] = black_box(0);
     }
+    compiler_fence(Ordering::SeqCst);
     out
 }
 
@@ -710,6 +727,7 @@ pub fn poly1305_mac(msg: &[u8], key: &[u8; 32]) -> [u8; 16] {
     tag[4..8].copy_from_slice(&out1.to_le_bytes());
     tag[8..12].copy_from_slice(&out2.to_le_bytes());
     tag[12..16].copy_from_slice(&out3.to_le_bytes());
+    zeroize_slice(&mut r_bytes);
     tag
 }
 
@@ -737,7 +755,7 @@ pub fn aead_seal(
     aad: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    if key == &[0u8; 32] {
+    if constant_time_eq(key, &[0u8; 32]) {
         return Err(CryptoError::InvalidLength {
             expected: 32,
             actual: 0,
@@ -771,7 +789,7 @@ pub fn aead_open(
     aad: &[u8],
     ciphertext_and_tag: &[u8],
 ) -> Result<ZeroizingBuffer, CryptoError> {
-    if key == &[0u8; 32] || ciphertext_and_tag.len() < AEAD_TAG_LEN {
+    if constant_time_eq(key, &[0u8; 32]) || ciphertext_and_tag.len() < AEAD_TAG_LEN {
         return Err(CryptoError::AuthenticationFailed);
     }
     let ct_len = ciphertext_and_tag.len() - AEAD_TAG_LEN;
@@ -783,10 +801,12 @@ pub fn aead_open(
     otk.copy_from_slice(&block0[0..32]);
     zeroize_slice(&mut block0);
 
-    let expected_tag = compute_rfc8439_tag(&otk, aad, ciphertext);
+    let mut expected_tag = compute_rfc8439_tag(&otk, aad, ciphertext);
     zeroize_slice(&mut otk);
 
-    if !constant_time_eq(received_tag, &expected_tag) {
+    let tag_ok = constant_time_eq(received_tag, &expected_tag);
+    zeroize_slice(&mut expected_tag);
+    if !tag_ok {
         return Err(CryptoError::AuthenticationFailed);
     }
 
@@ -826,7 +846,7 @@ pub fn combine_pqxdh_secrets(
     ml_kem_ss: &[u8; 32],
     context: &[u8],
 ) -> Result<ZeroizingBuffer, CryptoError> {
-    if x25519_dh == &[0u8; 32] || ml_kem_ss == &[0u8; 32] {
+    if constant_time_eq(x25519_dh, &[0u8; 32]) || constant_time_eq(ml_kem_ss, &[0u8; 32]) {
         return Err(CryptoError::KeyDerivationFailed);
     }
     let mut ikm = ZeroizingBuffer::zeroed(64);
@@ -851,6 +871,26 @@ pub struct RatchetHeader {
     pub msg_num: u32,
 }
 
+impl RatchetHeader {
+    /// Serializes the header into a canonical 40-byte representation bound into AEAD AAD.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; 40] {
+        let mut out = [0u8; 40];
+        out[0..32].copy_from_slice(&self.dh_public);
+        out[32..36].copy_from_slice(&self.prev_chain_len.to_be_bytes());
+        out[36..40].copy_from_slice(&self.msg_num.to_be_bytes());
+        out
+    }
+}
+
+fn build_ratchet_aad(header: &RatchetHeader, caller_aad: &[u8]) -> Vec<u8> {
+    let hdr_bytes = header.to_bytes();
+    let mut full_aad = Vec::with_capacity(hdr_bytes.len() + caller_aad.len());
+    full_aad.extend_from_slice(&hdr_bytes);
+    full_aad.extend_from_slice(caller_aad);
+    full_aad
+}
+
 fn kdf_chain_step(chain_key: &[u8]) -> ([u8; 32], [u8; 32]) {
     let next_chain_key = hmac_sha256(chain_key, &[0x02]);
     let message_key = hmac_sha256(chain_key, &[0x01]);
@@ -866,7 +906,7 @@ fn message_nonce(dh_public: &[u8; 32], msg_num: u32) -> [u8; 12] {
 
 /// Stateful Double Ratchet session with forward secrecy, post-compromise recovery,
 /// out-of-order skipped key caching (`MAX_SKIPPED_KEYS`), and replay rejection (D-0012).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RatchetSession {
     root_key: ZeroizingBuffer,
     send_chain_key: ZeroizingBuffer,
@@ -878,6 +918,32 @@ pub struct RatchetSession {
     recv_msg_num: u32,
     prev_send_chain_len: u32,
     skipped_keys: Vec<([u8; 32], u32, ZeroizingBuffer)>,
+}
+
+impl fmt::Debug for RatchetSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RatchetSession")
+            .field("root_key", &"[REDACTED]")
+            .field("send_chain_key", &"[REDACTED]")
+            .field("recv_chain_key", &"[REDACTED]")
+            .field("our_dh_public", &"[REDACTED]")
+            .field("peer_dh_public", &"[REDACTED]")
+            .field("skipped_keys_count", &self.skipped_keys.len())
+            .finish()
+    }
+}
+
+impl Drop for RatchetSession {
+    fn drop(&mut self) {
+        zeroize_slice(&mut self.our_dh_public);
+        zeroize_slice(&mut self.peer_dh_public);
+        for (dh, num, mk) in &mut self.skipped_keys {
+            zeroize_slice(dh);
+            *num = black_box(0);
+            mk.zeroize();
+        }
+        self.skipped_keys.clear();
+    }
 }
 
 /// Type alias for compatibility with protocol state references.
@@ -940,10 +1006,12 @@ impl RatchetSession {
         new_peer_dh_public: [u8; 32],
         dh_shared_secret: &[u8; 32],
     ) -> Result<(), CryptoError> {
-        if dh_shared_secret == &[0u8; 32]
+        if constant_time_eq(dh_shared_secret, &[0u8; 32])
             || new_our_dh_public == [0u8; 32]
             || new_peer_dh_public == [0u8; 32]
             || new_our_dh_public == new_peer_dh_public
+            || new_our_dh_public == self.peer_dh_public
+            || new_peer_dh_public == self.our_dh_public
             || (new_our_dh_public == self.our_dh_public
                 && new_peer_dh_public == self.peer_dh_public)
         {
@@ -983,6 +1051,9 @@ impl RatchetSession {
         plaintext: &[u8],
         aad: &[u8],
     ) -> Result<(RatchetHeader, Vec<u8>), CryptoError> {
+        if self.send_msg_num == u32::MAX {
+            return Err(CryptoError::KeyDerivationFailed);
+        }
         let (mut next_ck, mut msg_key) = kdf_chain_step(self.send_chain_key.as_slice());
         self.send_chain_key = ZeroizingBuffer::new(next_ck.to_vec());
         zeroize_slice(&mut next_ck);
@@ -993,11 +1064,12 @@ impl RatchetSession {
             msg_num: self.send_msg_num,
         };
         let nonce = message_nonce(&header.dh_public, header.msg_num);
-        let res = aead_seal(&msg_key, &nonce, aad, plaintext);
+        let full_aad = build_ratchet_aad(&header, aad);
+        let res = aead_seal(&msg_key, &nonce, &full_aad, plaintext);
         zeroize_slice(&mut msg_key);
         let ciphertext = res?;
 
-        self.send_msg_num = self.send_msg_num.saturating_add(1);
+        self.send_msg_num += 1;
         Ok((header, ciphertext))
     }
 
@@ -1013,6 +1085,11 @@ impl RatchetSession {
         ciphertext_and_tag: &[u8],
         aad: &[u8],
     ) -> Result<ZeroizingBuffer, CryptoError> {
+        if header.msg_num == u32::MAX {
+            return Err(CryptoError::AuthenticationFailed);
+        }
+        let full_aad = build_ratchet_aad(header, aad);
+
         // 1. Check if this is an out-of-order message whose key was previously skipped
         if let Some(pos) = self
             .skipped_keys
@@ -1022,7 +1099,7 @@ impl RatchetSession {
             let mut mk = [0u8; 32];
             mk.copy_from_slice(self.skipped_keys[pos].2.as_slice());
             let nonce = message_nonce(&header.dh_public, header.msg_num);
-            let res = aead_open(&mk, &nonce, aad, ciphertext_and_tag);
+            let res = aead_open(&mk, &nonce, &full_aad, ciphertext_and_tag);
             zeroize_slice(&mut mk);
             let pt = res?;
             self.skipped_keys.remove(pos);
@@ -1034,7 +1111,9 @@ impl RatchetSession {
         }
 
         let skip_count = (header.msg_num - self.recv_msg_num) as usize;
-        if skip_count > MAX_SKIPPED_KEYS {
+        if skip_count > MAX_SKIPPED_KEYS
+            || self.skipped_keys.len().saturating_add(skip_count) > MAX_SKIPPED_KEYS
+        {
             return Err(CryptoError::AuthenticationFailed);
         }
 
@@ -1057,7 +1136,7 @@ impl RatchetSession {
 
         let (mut final_ck, mut target_mk) = kdf_chain_step(&temp_ck);
         let nonce = message_nonce(&header.dh_public, header.msg_num);
-        let plaintext = aead_open(&target_mk, &nonce, aad, ciphertext_and_tag);
+        let plaintext = aead_open(&target_mk, &nonce, &full_aad, ciphertext_and_tag);
 
         zeroize_slice(&mut target_mk);
         zeroize_slice(&mut temp_ck);
@@ -1070,11 +1149,8 @@ impl RatchetSession {
         // Commit state only after AEAD verification succeeded
         self.recv_chain_key = ZeroizingBuffer::new(final_ck.to_vec());
         zeroize_slice(&mut final_ck);
-        self.recv_msg_num = header.msg_num.saturating_add(1);
+        self.recv_msg_num = header.msg_num + 1;
         for item in newly_skipped {
-            if self.skipped_keys.len() >= MAX_SKIPPED_KEYS {
-                self.skipped_keys.remove(0);
-            }
             self.skipped_keys.push(item);
         }
 
@@ -1420,5 +1496,55 @@ mod tests {
         let (h_after, c_after) = alice.send_ratchet_step(b"post-dh-step", b"aad").unwrap();
         let p_after = bob.recv_ratchet_step(&h_after, &c_after, b"aad").unwrap();
         assert_eq!(p_after.as_slice(), b"post-dh-step");
+    }
+
+    #[test]
+    fn b0068_pow_full_avalanche_ratchet_header_aad_binding_and_redacted_debug() {
+        // 1. PoW SHA-256 avalanche: changing challenge[31] changes digest[0..4] non-linearly,
+        // and any 8-bit challenge is solvable without dead-ends
+        for seed in [0x01u8, 0x42, 0x9E, 0xFF] {
+            let ch = PowChallenge {
+                challenge: [seed; 32],
+                difficulty_bits: 8,
+                expires_at_unix_secs: 5_000,
+            };
+            let sol = solve_pow(&ch, 20_000).expect("8-bit SHA-256 PoW must always be solvable");
+            assert!(DeterministicPowVerifier
+                .verify_pow(&ch, sol.nonce, 1_000)
+                .is_ok());
+        }
+        let mut ch_a = [0x55u8; 32];
+        let mut ch_b = [0x55u8; 32];
+        ch_b[31] ^= 0x01;
+        let d_a = DeterministicPowVerifier::digest_for_test(&ch_a, 7);
+        let d_b = DeterministicPowVerifier::digest_for_test(&ch_b, 7);
+        assert_ne!(d_a[0..4], d_b[0..4]);
+        zeroize_slice(&mut ch_a);
+        zeroize_slice(&mut ch_b);
+
+        // 2. RatchetHeader is bound into AEAD AAD: tampering with prev_chain_len must fail closed
+        let root = combine_pqxdh_secrets(&[0x33; 32], &[0x44; 32], b"b0068-ctx").unwrap();
+        let alice_dh = [0xA1; 32];
+        let bob_dh = [0xB2; 32];
+        let mut alice = RatchetSession::new(root.as_slice(), alice_dh, bob_dh, true).unwrap();
+        let mut bob = RatchetSession::new(root.as_slice(), bob_dh, alice_dh, false).unwrap();
+
+        let (hdr, ct) = alice
+            .send_ratchet_step(b"header-bound-msg", b"aad")
+            .unwrap();
+        let mut forged_hdr = hdr;
+        forged_hdr.prev_chain_len = 999;
+        assert_eq!(
+            bob.recv_ratchet_step(&forged_hdr, &ct, b"aad"),
+            Err(CryptoError::AuthenticationFailed)
+        );
+        // Untampered header still decrypts
+        let pt = bob.recv_ratchet_step(&hdr, &ct, b"aad").unwrap();
+        assert_eq!(pt.as_slice(), b"header-bound-msg");
+
+        // 3. RatchetSession Debug output redacts all keys
+        let dbg = format!("{alice:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("161")); // 0xA1
     }
 }

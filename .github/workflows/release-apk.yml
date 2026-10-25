@@ -47,16 +47,15 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      - name: Build Signed Android APKs (Debug & Release)
+      - name: Build Signed Release Android APK
         run: |
-          gradle -p apps/aegis-android assembleDebug assembleRelease
+          gradle -p apps/aegis-android assembleRelease
 
-      - name: Upload Built Android APKs & Binaries
+      - name: Upload Global Release Builds
         uses: actions/upload-artifact@v4
         with:
           name: aegis-release-builds
           path: |
             apps/aegis-android/app/build/outputs/apk/release/*.apk
-            apps/aegis-android/app/build/outputs/apk/debug/*.apk
             target/release/aegis-desktop
             target/release/aegis-serverd

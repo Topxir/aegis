@@ -113,6 +113,20 @@ fn hex_encode_32(bytes: &[u8; 32]) -> String {
     out
 }
 
+fn is_public_routable_ipv4(octets: [u8; 4]) -> bool {
+    let [a, b, c, _] = octets;
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || a >= 224)
+}
+
 fn is_safe_host(host: &str) -> bool {
     let trimmed = host.trim();
     if trimmed.is_empty()
@@ -122,8 +136,7 @@ fn is_safe_host(host: &str) -> bool {
         || trimmed.starts_with('-')
         || trimmed.ends_with('-')
         || trimmed.contains("..")
-        || trimmed == "0.0.0.0"
-        || trimmed == "255.255.255.255"
+        || trimmed.eq_ignore_ascii_case("localhost")
         || !trimmed
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
@@ -131,17 +144,42 @@ fn is_safe_host(host: &str) -> bool {
         return false;
     }
     let labels: Vec<&str> = trimmed.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
     for label in &labels {
         if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
             return false;
         }
     }
-    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit()))
-        && (labels.len() != 4 || labels.iter().any(|l| l.parse::<u8>().is_err()))
-    {
+    let last_label = labels[labels.len() - 1];
+    if matches!(
+        last_label.to_ascii_lowercase().as_str(),
+        "localhost" | "local" | "internal" | "lan" | "home" | "localdomain" | "arpa" | "invalid"
+    ) {
         return false;
     }
-    true
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit())) {
+        if labels.len() != 4 {
+            return false;
+        }
+        let mut octets = [0u8; 4];
+        for (idx, l) in labels.iter().enumerate() {
+            if l.len() > 1 && l.starts_with('0') {
+                return false;
+            }
+            let Ok(v) = l.parse::<u8>() else {
+                return false;
+            };
+            octets[idx] = v;
+        }
+        return is_public_routable_ipv4(octets);
+    }
+    last_label.len() >= 2
+        && last_label.chars().all(|c| c.is_ascii_alphabetic())
+        && !labels
+            .iter()
+            .any(|l| l.len() >= 2 && l.as_bytes()[..2].eq_ignore_ascii_case(b"0x"))
 }
 
 fn validate_ttl_secs(ttl_secs: u64) -> Result<(), LauncherError> {
@@ -201,6 +239,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    logging:
+      driver: "none"
     ports:
       - "0.0.0.0:{port}:{port}/tcp"
       - "0.0.0.0:{port}:{port}/udp"
@@ -210,7 +250,6 @@ services:
       AEGIS_QUEUE_TTL_SECS: "{ttl}"
       AEGIS_SERVER_PUBKEY_HEX: "{fp}"
       AEGIS_IP_LOGGING: "false"
-      AEGIS_TURN_RELAY_ONLY: "true"
     volumes:
       - aegis_data:/var/lib/aegis
 volumes:
@@ -254,6 +293,7 @@ write_files:
     content: |
 {indented_compose}runcmd:
   - ufw default deny incoming
+  - ufw allow 22/tcp
   - ufw allow {port}/tcp
   - ufw allow {port}/udp
   - ufw --force enable
@@ -290,6 +330,8 @@ SocksPort 0
 HiddenServiceDir /var/lib/tor/aegis_hidden_service/
 HiddenServiceVersion 3
 HiddenServicePort {port} 127.0.0.1:{port}
+HiddenServiceSingleHopMode 0
+HiddenServiceNonAnonymousMode 0
 SafeLogging 1
 "#
     ))
@@ -305,11 +347,7 @@ pub fn generate_static_ip_vps_script(
     static_ipv4: [u8; 4],
     server_public_key: &[u8; 32],
 ) -> Result<String, LauncherError> {
-    if static_ipv4 == [0, 0, 0, 0]
-        || static_ipv4[0] == 0
-        || static_ipv4[0] == 127
-        || static_ipv4 == [255, 255, 255, 255]
-    {
+    if !is_public_routable_ipv4(static_ipv4) {
         return Err(LauncherError::InvalidServerIdentity);
     }
     let ip_str = format!(
@@ -434,5 +472,23 @@ mod tests {
             generate_docker_compose(&huge_ttl_plan, "node1.aegis.example", &pubkey),
             Err(LauncherError::InsecureQueueTtl { days: u16::MAX })
         );
+
+        // B-0075: Reject private/metadata IPv4, zero-padded loopback, and preserve SSH in cloud-init
+        for bad_ip in [
+            [10, 0, 0, 1],
+            [192, 168, 1, 1],
+            [169, 254, 169, 254],
+            [172, 16, 0, 1],
+        ] {
+            assert_eq!(
+                generate_static_ip_vps_script(&plan, bad_ip, &pubkey),
+                Err(LauncherError::InvalidServerIdentity)
+            );
+        }
+        assert_eq!(
+            format_server_invite_uri("0127.0.0.1", 8443, &pubkey),
+            Err(LauncherError::InvalidServerIdentity)
+        );
+        assert!(cloud_init.contains("ufw allow 22/tcp"));
     }
 }

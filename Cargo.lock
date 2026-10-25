@@ -3,14 +3,6 @@
 version = 4
 
 [[package]]
-name = "aegis-calls"
-version = "0.1.0"
-dependencies = [
- "aegis-protocol",
- "aegis-transport",
-]
-
-[[package]]
 name = "aegis-crypto"
 version = "0.1.0"
 
@@ -25,7 +17,6 @@ dependencies = [
 name = "aegis-ffi"
 version = "0.1.0"
 dependencies = [
- "aegis-calls",
  "aegis-crypto",
  "aegis-directory",
  "aegis-identity",
@@ -72,6 +63,7 @@ dependencies = [
 name = "aegis-server"
 version = "0.1.0"
 dependencies = [
+ "aegis-crypto",
  "aegis-protocol",
 ]
 
@@ -86,6 +78,7 @@ dependencies = [
 name = "aegis-transport"
 version = "0.1.0"
 dependencies = [
+ "aegis-crypto",
  "aegis-protocol",
 ]
 

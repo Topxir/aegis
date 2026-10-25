@@ -11,7 +11,6 @@ aegis-identity.workspace = true
 aegis-storage.workspace = true
 aegis-protocol.workspace = true
 aegis-transport.workspace = true
-aegis-calls.workspace = true
 aegis-server.workspace = true
 aegis-directory.workspace = true
 aegis-launcher.workspace = true

@@ -206,18 +206,26 @@ pub struct DirectoryServerEntry {
 }
 
 fn is_valid_public_static_ipv4(ip: [u8; 4]) -> bool {
-    ip != [0, 0, 0, 0] && ip[0] != 0 && ip[0] != 127 && ip != [255, 255, 255, 255]
+    let [a, b, c, _] = ip;
+    !(a == 0
+        || a == 10
+        || a == 127
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || a >= 224)
 }
 
-fn is_valid_directory_endpoint(uri: &str) -> bool {
-    let Some(rest) = uri.strip_prefix("aegis://") else {
-        return false;
-    };
+fn extract_directory_host_and_port(uri: &str) -> Option<(&str, u16)> {
+    let rest = uri.strip_prefix("aegis://")?;
     let host_port = rest.strip_prefix("server/").unwrap_or(rest);
-    let host_port = host_port.split('?').next().unwrap_or(host_port);
-    let Some((host, port_str)) = host_port.rsplit_once(':') else {
-        return false;
-    };
+    if host_port.contains('?') || host_port.contains('#') {
+        return None;
+    }
+    let (host, port_str) = host_port.rsplit_once(':')?;
     if host.is_empty()
         || host.len() > 253
         || host.starts_with('.')
@@ -225,16 +233,56 @@ fn is_valid_directory_endpoint(uri: &str) -> bool {
         || host.starts_with('-')
         || host.ends_with('-')
         || host.contains("..")
+        || host.eq_ignore_ascii_case("localhost")
         || !host
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
     {
-        return false;
+        return None;
     }
-    let Ok(port) = port_str.parse::<u16>() else {
-        return false;
-    };
-    port > 0
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 {
+        return None;
+    }
+    for label in &labels {
+        if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
+            return None;
+        }
+    }
+    let last_label = labels[labels.len() - 1];
+    if matches!(
+        last_label.to_ascii_lowercase().as_str(),
+        "localhost" | "local" | "internal" | "lan" | "home" | "localdomain" | "arpa" | "invalid"
+    ) {
+        return None;
+    }
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit())) {
+        if labels.len() != 4 {
+            return None;
+        }
+        let mut octets = [0u8; 4];
+        for (idx, l) in labels.iter().enumerate() {
+            if l.len() > 1 && l.starts_with('0') {
+                return None;
+            }
+            octets[idx] = l.parse::<u8>().ok()?;
+        }
+        if !is_valid_public_static_ipv4(octets) {
+            return None;
+        }
+    } else if last_label.len() < 2
+        || !last_label.chars().all(|c| c.is_ascii_alphabetic())
+        || labels
+            .iter()
+            .any(|l| l.len() >= 2 && l.as_bytes()[..2].eq_ignore_ascii_case(b"0x"))
+    {
+        return None;
+    }
+    let port = port_str.parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+    Some((host, port))
 }
 
 /// Built-in signed catalog of Official (`✓✓`), Verified (`✓`), Static-IP, and Tor `.onion` servers (PLAN.md §6.3, D-0019).
@@ -348,22 +396,34 @@ impl BuiltInDirectory {
         let mut seen_keys: Vec<[u8; 32]> = Vec::new();
         let mut out = Vec::new();
         for entry in &self.entries {
+            let Some((host, _)) = extract_directory_host_and_port(&entry.endpoint_uri) else {
+                continue;
+            };
+            let host_is_onion = host.to_ascii_lowercase().ends_with(".onion");
             let valid_static_ip = match (entry.is_tor_onion, entry.static_ipv4) {
                 (true, Some(_)) => false,
                 (true, None) => true,
-                (false, Some(ip)) => is_valid_public_static_ipv4(ip),
+                (false, Some(ip)) => {
+                    is_valid_public_static_ipv4(ip)
+                        && host == format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+                }
                 (false, None) => true,
+            };
+            let badge_name_consistent = match entry.badge {
+                ServerBadge::OfficialDoubleCheck => true,
+                ServerBadge::VerifiedSingleCheck => !entry.name.contains("✓✓"),
+                ServerBadge::CommunityUnverified => false,
             };
             let is_valid = !entry.name.trim().is_empty()
                 && !entry.name.chars().any(char::is_control)
+                && badge_name_consistent
                 && entry.endpoint_uri == entry.endpoint_uri.trim()
                 && !entry
                     .endpoint_uri
                     .chars()
                     .any(|c| c.is_control() || c.is_whitespace())
-                && is_valid_directory_endpoint(&entry.endpoint_uri)
                 && entry.uptime_bps <= 10_000
-                && entry.is_tor_onion == entry.endpoint_uri.contains(".onion:")
+                && entry.is_tor_onion == host_is_onion
                 && valid_static_ip
                 && !seen_keys.contains(&entry.server_public_key)
                 && verify_server_badge(
@@ -556,5 +616,24 @@ mod tests {
             &dir.policy,
         )
         .is_err());
+    }
+
+    #[test]
+    fn b0075_directory_rejects_private_static_ips_mismatched_endpoint_and_onion_query_spoofing() {
+        let mut dir = BuiltInDirectory::embedded_catalog();
+        // 1. Mismatch between static_ipv4 and endpoint_uri must be rejected
+        dir.entries[0].static_ipv4 = Some([91, 108, 56, 110]);
+        assert_eq!(dir.verified_entries().len(), 3);
+
+        // 2. Private IPv4 (192.168.1.1) in static_ipv4 / endpoint_uri must be rejected
+        dir.entries[1].static_ipv4 = Some([192, 168, 1, 1]);
+        dir.entries[1].endpoint_uri = "aegis://192.168.1.1:8443".to_owned();
+        assert_eq!(dir.verified_entries().len(), 2);
+
+        // 3. Query-string `.onion:` spoofing on clearnet IP must be rejected
+        dir.entries[2].is_tor_onion = true;
+        dir.entries[2].static_ipv4 = None;
+        dir.entries[2].endpoint_uri = "aegis://193.163.125.18:8443?x=.onion:1".to_owned();
+        assert_eq!(dir.verified_entries().len(), 1);
     }
 }

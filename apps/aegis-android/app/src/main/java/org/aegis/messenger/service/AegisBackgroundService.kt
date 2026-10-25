@@ -49,7 +49,7 @@ class AegisBackgroundService : Service() {
                 "Aegis Зашифрованный Канал (Zero-GMS)",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Фоновый приём зашифрованных сообщений и звонков без утечки метаданных"
+                description = "Фоновый приём зашифрованных капсул сообщений без утечки метаданных"
                 setShowBadge(false)
                 lockscreenVisibility = Notification.VISIBILITY_SECRET
             }
@@ -67,8 +67,8 @@ class AegisBackgroundService : Service() {
         }
 
         return builder
-            .setContentTitle("Aegis: Активна защита соединения")
-            .setContentText("Прямой Static-IP E2EE / Опциональный Tor • Без телеметрии • Паддинг 256B")
+            .setContentTitle("Система: Фоновая синхронизация")
+            .setContentText("Активен защищённый канал (0 телеметрии • 256B)")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
             .setVisibility(Notification.VISIBILITY_SECRET)

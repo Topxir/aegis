@@ -2,6 +2,7 @@
 //! constant-shape OPAQUE record storage, anti-DDoS adaptive Proof-of-Work without IP logging (D-0007),
 //! and built-in Support & Donation Web Portal (D-0006, D-0010, PLAN.md §4.4, §6).
 
+use aegis_crypto::{hkdf_sha256, hmac_sha256};
 use aegis_protocol::{pad_frame, SupportTicket, SupportTicketCategory, PADDING_BUCKETS};
 use core::fmt;
 use std::collections::BTreeMap;
@@ -121,13 +122,25 @@ impl std::error::Error for ServerError {}
 /// Zero-knowledge Federation Server Engine (PLAN.md §6.1, §7.2, D-0002, D-0007).
 /// Stores only padded E2EE queue frames and blinded OPAQUE records in RAM/storage.
 /// Never logs IP addresses, nicknames, or social graphs.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FederationServerState {
     server_blinding_salt: [u8; 32],
     queues: BTreeMap<[u8; 32], Vec<Vec<u8>>>,
     opaque_records: BTreeMap<[u8; 32], Vec<u8>>,
     requests_in_window: u32,
     suspicious_burst: bool,
+}
+
+impl fmt::Debug for FederationServerState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FederationServerState")
+            .field("server_blinding_salt", &"[REDACTED]")
+            .field("active_queues_count", &self.queues.len())
+            .field("opaque_records_count", &self.opaque_records.len())
+            .field("requests_in_window", &self.requests_in_window)
+            .field("suspicious_burst", &self.suspicious_burst)
+            .finish()
+    }
 }
 
 impl Default for FederationServerState {
@@ -267,10 +280,11 @@ impl FederationServerState {
         if record.len() != CONSTANT_OPAQUE_RECORD_LEN {
             return Err(ServerError::InvalidOpaqueRecordLength(record.len()));
         }
-        if !self.opaque_records.contains_key(&login_id)
-            && self.opaque_records.len() >= MAX_OPAQUE_ACCOUNTS
-        {
+        if self.opaque_records.len() >= MAX_OPAQUE_ACCOUNTS {
             return Err(ServerError::QueueFull);
+        }
+        if self.opaque_records.contains_key(&login_id) {
+            return Err(ServerError::InvalidIdentifier);
         }
         let _ = self.record_request(false);
         self.opaque_records.insert(login_id, record);
@@ -278,31 +292,27 @@ impl FederationServerState {
     }
 
     /// Fetches an OPAQUE record for `login_id` with a **constant-shape response** (PLAN.md §7.2, D-0007).
-    /// If `login_id` is not registered, deterministically derives a synthetic `1024`-byte blinded record
-    /// from `(server_blinding_salt, login_id)` so an attacker cannot probe whether a nickname exists!
+    /// If `login_id` is not registered, deterministically derives a cryptographic `1024`-byte blinded record
+    /// via `HKDF-SHA256(server_blinding_salt, login_id)` so an attacker cannot probe whether a nickname exists!
     pub fn fetch_opaque_record(&mut self, login_id: &[u8; 32]) -> Result<Vec<u8>, ServerError> {
         if *login_id == [0u8; 32] {
             return Err(ServerError::InvalidIdentifier);
         }
         let _ = self.record_request(false);
 
-        // Always compute synthetic record first to keep execution shape uniform
-        let mut synthetic = vec![0u8; CONSTANT_OPAQUE_RECORD_LEN];
-        for (i, byte) in synthetic.iter_mut().enumerate() {
-            let s = self.server_blinding_salt[i % 32];
-            let l = login_id[(i / 32 + i) % 32];
-            *byte = s
-                .wrapping_add(l)
-                .wrapping_add(i as u8)
-                .wrapping_mul(0x9D)
-                .rotate_left((i as u32 % 7) + 1);
-        }
+        // Always compute the cryptographic synthetic 1024-byte HKDF record first to keep execution shape and allocation uniform
+        let mut out = vec![0u8; CONSTANT_OPAQUE_RECORD_LEN];
+        let _ = hkdf_sha256(
+            &self.server_blinding_salt,
+            login_id,
+            b"Aegis-OPAQUE-SyntheticRecord-v1",
+            &mut out,
+        );
 
         if let Some(real) = self.opaque_records.get(login_id) {
-            Ok(real.clone())
-        } else {
-            Ok(synthetic)
+            out.copy_from_slice(real);
         }
+        Ok(out)
     }
 
     /// Returns the number of active queues currently holding frames in memory.
@@ -395,21 +405,15 @@ impl SupportPortalState {
         }
         self.redeemed_blinded_nonces.push(blinded_nonce.to_vec());
         self.issued_passes_count = self.issued_passes_count.saturating_add(1);
+        let token_digest = hmac_sha256(&self.issued_passes_count.to_le_bytes(), blinded_nonce);
         let mut token_id = [0u8; 16];
-        let seq = self.issued_passes_count.to_le_bytes();
-        for (i, slot) in token_id.iter_mut().enumerate() {
-            let b = blinded_nonce[i % blinded_nonce.len()];
-            *slot = b
-                .wrapping_add(seq[i % 8])
-                .wrapping_mul(0x5B)
-                .rotate_left((i as u32 % 5) + 1);
-            if *slot == 0 {
-                *slot = (i as u8) + 1;
-            }
+        token_id.copy_from_slice(&token_digest[0..16]);
+        if token_id == [0u8; 16] {
+            token_id[0] = 1;
         }
+        let sig_bytes = hmac_sha256(b"Aegis-Foundation-SupporterPass-Signer-v1", &token_id);
         let mut sig_hex = String::with_capacity(64);
-        for i in 0..32usize {
-            let byte = token_id[i % 16].wrapping_mul((i as u8).wrapping_add(0x33));
+        for &byte in &sig_bytes {
             let _ = fmt::Write::write_fmt(&mut sig_hex, format_args!("{byte:02x}"));
         }
         Ok(BlindSupporterPassGrant {
@@ -559,15 +563,11 @@ pub fn handle_http_request(
             render_support_portal_html("en"),
         ),
         ("GET", "/health") => {
-            let pow = server.current_pow_difficulty();
-            let queues = server.active_queue_count();
-            let tickets = portal.ticket_count();
+            let pow = server.record_request(false);
             (
                 200,
                 "application/json",
-                format!(
-                    r#"{{"status":"ok","ip_logging":false,"pow_difficulty_bits":{pow},"active_queues":{queues},"support_tickets":{tickets}}}"#
-                ),
+                format!(r#"{{"status":"ok","ip_logging":false,"pow_difficulty_bits":{pow}}}"#),
             )
         }
         ("GET", "/api/v1/pow") => {
@@ -592,11 +592,7 @@ pub fn handle_http_request(
                 );
             };
             match server.enqueue_frame([0x22; 32], padded) {
-                Ok(buffered) => (
-                    200,
-                    "application/json",
-                    format!(r#"{{"status":"queued","buffered_frames":{buffered}}}"#),
-                ),
+                Ok(_) => (200, "application/json", r#"{"status":"queued"}"#.to_owned()),
                 Err(_) => (
                     429,
                     "application/json",
@@ -630,10 +626,10 @@ pub fn handle_http_request(
                 SupportTicketCategory::SecurityOrBugReport,
                 payload,
             ) {
-                Ok(total) => (
+                Ok(_) => (
                     200,
                     "application/json",
-                    format!(r#"{{"status":"ticket_accepted","ticket_index":{total}}}"#),
+                    r#"{"status":"ticket_accepted"}"#.to_owned(),
                 ),
                 Err(_) => (
                     400,
@@ -832,5 +828,30 @@ mod tests {
             handle_http_request(&mut srv, &mut portal, " get ", "/health?probe=1", "");
         assert_eq!(code, 200);
         assert!(body.contains(r#""status":"ok""#));
+    }
+
+    #[test]
+    fn b0074_opaque_hkdf_synthetic_non_invertibility_no_account_overwrite_and_redacted_debug() {
+        let mut srv = FederationServerState::new([0x99; 32]);
+        let login = [0x42; 32];
+        let syn = srv.fetch_opaque_record(&login).unwrap();
+        assert_eq!(syn.len(), CONSTANT_OPAQUE_RECORD_LEN);
+        // Synthetic record is HKDF-SHA256 output: blocks 0..32 and 32..64 are cryptographically independent
+        assert_ne!(syn[0..32], syn[32..64]);
+
+        // Registering an account succeeds once, and unauthenticated overwrite of existing login_id is rejected
+        let rec1 = vec![0xAA; CONSTANT_OPAQUE_RECORD_LEN];
+        let rec2 = vec![0xBB; CONSTANT_OPAQUE_RECORD_LEN];
+        assert!(srv.store_opaque_record(login, rec1.clone()).is_ok());
+        assert_eq!(
+            srv.store_opaque_record(login, rec2),
+            Err(ServerError::InvalidIdentifier)
+        );
+        assert_eq!(srv.fetch_opaque_record(&login).unwrap(), rec1);
+
+        // FederationServerState Debug redacts server_blinding_salt and raw records
+        let dbg = format!("{srv:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("153")); // 0x99
     }
 }

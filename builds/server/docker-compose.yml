@@ -11,6 +11,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    logging:
+      driver: "none"
     ports:
       - "0.0.0.0:8443:8443/tcp"
       - "0.0.0.0:8443:8443/udp"
@@ -20,7 +22,6 @@ services:
       AEGIS_QUEUE_TTL_SECS: "2592000"
       AEGIS_SERVER_PUBKEY_HEX: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
       AEGIS_IP_LOGGING: "false"
-      AEGIS_TURN_RELAY_ONLY: "true"
     volumes:
       - aegis_data:/var/lib/aegis
 volumes:

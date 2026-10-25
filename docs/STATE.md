@@ -2,40 +2,34 @@
 
 Обновляется после каждой задачи. Легенда: ✅ готово · 🔧 в работе · ❌ не начато · ⚠ проблема
 
-Текущая фаза: **8. Финальный харденинг, стартовые анонимные серверы со статическим IP (без обязательного Tor), релизные сборки `builds/` (Android APK / Desktop / Server) и публикация в GitHub (Фазы 0–8 полностью завершены ✅)**
-Обновлено: 2026-10-22
+Текущая фаза: **9. Чистая чат-крепость без звонков (Pure Chat Fortress, D-0021), анти-правительственный Red-Team хакатон-аудит, уникальный интерфейс «Phantom Monolith» (D-0022, 100% Clean-Room IP) и глобальные релизные сборки `builds/` (T-0013 ✅)**
+Обновлено: 2026-10-25
 
 | Модуль | Статус | Заметки |
 |---|---|---|
-| aegis-crypto | ✅ | SHA-256, HMAC-SHA256, HKDF-SHA256, ChaCha20-Poly1305 AEAD (RFC 8439), гибридный PQXDH, `RatchetSession` (`MAX_SKIPPED_KEYS = 64`), `solve_pow`; исправлены `B-0011`, `B-0020`, `B-0032`..`B-0034`, `B-0056` |
-| aegis-identity | ✅ | OPAQUE (`derive_login_id`, `OpaqueAccountEnvelope`, `OpaqueClientSession`), строгие пароли D-0006, 24 слова (`RecoveryPhrase`), мультиаккаунт 3+`SupporterPass` D-0010, `PinGuard` + Duress, `AppDisguiseConfig`, `ChatPinLock`; исправлены `B-0007`..`B-0010`, `B-0021`, `B-0035`..`B-0038`, `B-0057` |
-| aegis-storage | ✅ | `EncryptedVaultDb` (AEAD KV, контакты, исчезающие сообщения, `get_messages_for_chat`, локальный поиск, заметки «Избранное», экспорт/импорт `AEGISBAK`, `crypto_wipe`); исправлены `B-0012`, `B-0022`, `B-0039`, `B-0040`, `B-0058` |
-| aegis-protocol | ✅ | Паддинг `PADDING_BUCKETS`, `LeakGuard` (Luhn + CVV/MM/YY + телефоны + email + свой ник), очистка EXIF/GPS (`strip_media_metadata`), `ViewOncePayload`, `ContactInvite`, 60-значный Safety Number, `GroupChatSession` (MLS эпохи); исправлены `B-0001`..`B-0006`, `B-0023`, `B-0024`, `B-0041`..`B-0043`, `B-0059` |
-| aegis-transport | ✅ | `Network Anonymity Shield`, прямой стартовый профиль `ProxyConfig::direct_starter` и `format_static_ipv4_endpoint` (D-0019), Kill Switch D-0008, `CoverTrafficScheduler` (256 B dummy-пакеты), профили Tor/SOCKS5/ObfuscatedBridge, живая миграция сервера; исправлены `B-0013`, `B-0044`, `B-0045`, `B-0060` |
-| aegis-calls | ✅ | `CallConfig` (принудительный `relay_only` TURN + SFrame E2EE), анонимайзер голоса `anonymize_audio_pcm16` (`VoicePitchMode`), адаптивный битрейт `adapt_call_bitrate`, `filter_ice_candidate` (с фильтрацией утечек `raddr`/`rport`); исправлены `B-0014`, `B-0046`, `B-0047`, `B-0061` |
-| aegis-server | ✅ | Zero-knowledge сервер федерации (`FederationServerState`, constant-shape OPAQUE 1024 B, 1-клик удаление спам-очередей, глобальные квоты памяти), демон `aegis-serverd --bind=0.0.0.0 --port=8443` и веб-портал поддержки/донатов (`SupportPortalState`); исправлены `B-0015`, `B-0025`, `B-0048`, `B-0049`, `B-0064` |
-| aegis-directory | ✅ | Встроенный каталог серверов `BuiltInDirectory` со стартовыми статическими IPv4 узлами без обязательного Tor (`185.220.101.42:8443 ✓✓`, `91.108.56.110:8443 ✓✓`, `193.163.125.18:8443 ✓`, `direct_static_ip_entries`, D-0019) и опциональным `.onion`, `SupportCertificate`, пороговая схема `M-of-N`; исправлены `B-0016`, `B-0026`, `B-0062` |
-| aegis-launcher | ✅ | Мастер запуска своего сервера в 1 клик (`generate_static_ip_vps_script`, `generate_docker_compose`, `generate_cloud_init_script`, `generate_torrc_hidden_service`, `format_server_invite_uri`); исправлены `B-0017`, `B-0027`, `B-0063` |
-| aegis-plugins | ✅ | Магазин тем (`BuiltInThemes`, `ThemePack`, включая `CalculatorStealth`), песочница ботов и мостов Matrix/XMPP (`BotBridgeDescriptor`), защита от эксфильтрации и SSRF; исправлены `B-0018`, `B-0028`, `B-0065` |
-| aegis-ffi | ✅ | Единый фасад `AegisClientCore` (`direct_static_ip_servers`) + C-ABI/JNI точки входа для Android и Desktop UI (`RU`/`EN`); исправлены `B-0019`, `B-0029` |
-| aegis-ui-android | ✅ | Android-клиент и готовые подписанные APK (`builds/android-apk/aegis-messenger-release.apk`, `aegis-messenger-debug.apk`, стартовые Static-IP серверы без обязательного Tor + 1-клик свой Static IP, `FLAG_SECURE`, StrongBox Keystore); исправлены `B-0031`, `B-0052`..`B-0055`, `B-0067` |
-| aegis-ui-desktop | ✅ | Кроссплатформенный Desktop-клиент (`builds/desktop/aegis-desktop.exe`, интерактивный GUI `http://127.0.0.1:7878` со стартовыми Static-IP серверами без Tor и переключением IP в 1 клик); исправлены `B-0030`, `B-0050`, `B-0051`, `B-0066` |
+| aegis-crypto | ✅ | SHA-256 (с очисткой стека `w`/`tail`/`state`), HMAC-SHA256, HKDF-SHA256, ChaCha20-Poly1305 AEAD (RFC 8439), гибридный PQXDH, `RatchetSession` (привязка 40-байтного `RatchetHeader` к AEAD AAD, `Drop` очистка), `ZeroizingBuffer` (очистка всей ёмкости `0..capacity()`), `constant_time_eq` без утечки длины, `solve_pow`; исправлены `B-0011`, `B-0020`, `B-0032`..`B-0034`, `B-0056`, `B-0068`, `B-0079` |
+| aegis-identity | ✅ | OPAQUE (`derive_login_id`, `OpaqueAccountEnvelope`, `OpaqueClientSession` с уникальным HMAC-nonce и `Drop`), строгие пароли D-0006 с очисткой `0..capacity()`, 24 слова (`RecoveryPhrase`), мультиаккаунт 3+`SupporterPass` D-0010, `PinGuard` + Duress, `AppDisguiseConfig` (`Drop` и константно-временной `check_calculator_unlock`), `ChatPinLock`; исправлены `B-0007`..`B-0010`, `B-0021`, `B-0035`..`B-0038`, `B-0057`, `B-0069`, `B-0079` |
+| aegis-storage | ✅ | `EncryptedVaultDb` (`Drop` с автоматическим `crypto_wipe` на БД и всех записях `StoredContact`/`StoredMessage`/`EncryptedNote`, полное редактирование `Debug`, затирание `plaintext_body` при `purge_expired_messages`, проверка изоляции `send_queue_id != recv_queue_id`, экспорт/импорт `AEGISBAK`); исправлены `B-0012`, `B-0022`, `B-0039`, `B-0040`, `B-0058`, `B-0070`, `B-0079` |
+| aegis-protocol | ✅ | Чистая чат-крепость без голосовых/видео звонков (`D-0021`), 1:1 `SealedSenderEnvelope` и групповой `GroupChatSession` (Pad-Before-Encrypt внутри AEAD без открытой длины на проводе), `LeakGuard` (Luhn + CVV/MM/YY + телефоны + email + `CryptoSeedOrPrivateKey` `0x`/WIF/`xprv`/PEM + ASCII/Unicode ники), `strip_media_metadata` (белый список чанков PNG против Apple `iDOT`/`pHYs`/`iCCP` + очистка `APP0..APP15`/`JPG0..JPG13`/`COM` в JPEG), блокировка hex-IP SSRF (`0xa9.0xfe.0xa9.0xfe`); исправлены `B-0001`..`B-0006`, `B-0023`, `B-0024`, `B-0041`..`B-0043`, `B-0059`, `B-0071`, `B-0080` |
+| aegis-transport | ✅ | `Network Anonymity Shield` (безусловная блокировка при утечке туннеля), `IsolatedCircuitTag` и `derive_circuit_isolation_token`, `CoverTrafficScheduler` (256 B криптографический поток HMAC-SHA256 с независимым `schedule_step`), блокировка hex-IP SSRF; исправлены `B-0013`, `B-0044`, `B-0045`, `B-0060`, `B-0072`, `B-0081` |
+| aegis-server | ✅ | Zero-knowledge сервер федерации (`FederationServerState`, криптографический HKDF-синтез 1024 B OPAQUE-записей, удаление метаданных `active_queues`/`buffered_frames` из HTTP-ответов `/health` и `/api/v1/queue/send`), демон `aegis-serverd` (строгий HTTP-парсер, буфер 32 КБ, CSP/No-Store заголовки); исправлены `B-0015`, `B-0025`, `B-0048`, `B-0049`, `B-0064`, `B-0074`, `B-0081` |
+| aegis-directory | ✅ | Встроенный каталог серверов `BuiltInDirectory` со стартовыми статическими IPv4 узлами без обязательного Tor (`185.220.101.42:8443 ✓✓`, `91.108.56.110:8443 ✓✓`, `193.163.125.18:8443 ✓`), сверкой `static_ipv4 == host`, согласованностью бейджей и защитой от hex-IP/onion спуфинга; исправлены `B-0016`, `B-0026`, `B-0062`, `B-0075`, `B-0081` |
+| aegis-launcher | ✅ | Мастер запуска своего сервера в 1 клик (`generate_static_ip_vps_script`, `generate_docker_compose` с `logging: driver: "none"`, `generate_cloud_init_script` с `ufw allow 22/tcp`, `generate_torrc_hidden_service` с `HiddenServiceSingleHopMode 0`); исправлены `B-0017`, `B-0027`, `B-0063`, `B-0075`, `B-0081` |
+| aegis-plugins | ✅ | Магазин тем (`BuiltInThemes`, `ThemePack`, включая `Phantom Monolith` `#05080F`/`#00F5B8`, `Cyber Lazulite` и `CalculatorStealth`), песочница ботов и мостов (`BotBridgeDescriptor` с защитой от hex/octal/private/localhost SSRF); исправлены `B-0018`, `B-0028`, `B-0065`, `B-0076`, `B-0081` |
+| aegis-ffi | ✅ | Единый фасад `AegisClientCore` (без звонков `D-0021`, мультиаккаунтный `LeakGuard`, `trigger_panic_wipe`, реэкспорт `SealedSenderEnvelope`) + сквозной Red-Team аудит-сьют `tests/red_team_anonymity_audit.rs`; исправлены `B-0019`, `B-0029`, `B-0076`, `B-0082` |
+| aegis-ui-android | ✅ | Android-клиент «Aegis Phantom Monolith» и глобальный релизный APK (`builds/android-apk/aegis-messenger-release.apk`, **0 разрешений на микрофон и камеру**, `FLAG_SECURE`, `excludeFromRecents="true"`, StrongBox Keystore, лимит попыток PIN); исправлены `B-0031`, `B-0052`..`B-0055`, `B-0067`, `B-0078`, `B-0082` |
+| aegis-ui-desktop | ✅ | Desktop-клиент «Aegis Phantom Monolith» (`builds/desktop/aegis-desktop.exe`, капсулы `SEALED CAPSULE`, матрица маршрута, защита `127.0.0.1:7878` от CSRF и DNS Rebinding, 0 звонков); исправлены `B-0030`, `B-0050`, `B-0051`, `B-0066`, `B-0077`, `B-0082` |
 
 ## Сделано
-- План и AGENTS.md созданы
-- Утверждены архитектурные решения `D-0001`..`D-0020` в `docs/DECISIONS.md` и закрыты все вопросы владельцу (`Q-1`..`Q-11` в `docs/QUESTIONS.md`)
-- ✅ Выполнены задачи **T-0001..T-0010** (Фазы 0–7)
-- ✅ Выполнена задача **T-0011** (Фаза 8):
-  - Настроены стартовые анонимные серверы со статическими IP-адресами (`185.220.101.42:8443 ✓✓`, `91.108.56.110:8443 ✓✓`, `193.163.125.18:8443 ✓`) с прямым подключением без обязательного Tor (`D-0019`), переключением в 1 клик и вводом любого кастомного статического IP, плюс 1-клик авто-установщик для любого VPS (`builds/server/deploy-static-ip-vps.sh`).
-  - Проведён финальный аудит Фазы 8 роем параллельных агентов: выявлены, задокументированы в `docs/BUGS.md` (`B-0056`..`B-0067`), исправлены и покрыты регрессионными тестами ещё 12 находок (всего 67 закрытых багов, 88 автотестов в workspace).
-  - Собраны готовые релизные билды в отдельную папку `builds/`:
-    - `builds/android-apk/aegis-messenger-release.apk` и `builds/android-apk/aegis-messenger-debug.apk`
-    - `builds/desktop/aegis-desktop.exe` (+ `run-desktop-gui.bat`, `run-self-test.bat`)
-    - `builds/server/aegis-serverd.exe` (+ `run-static-ip-server.bat`, `deploy-static-ip-vps.sh`, `docker-compose.yml`, `cloud-init.yaml`, `starter-servers.json`)
-  - Добавлен GitHub Actions workflow `.github/workflows/release-apk.yml` для автоматической сборки APK и бинарников на GitHub.
+- Утверждены архитектурные решения `D-0001`..`D-0022` в `docs/DECISIONS.md`
+- ✅ Выполнены задачи **T-0001..T-0012** (Фазы 0–8+)
+- ✅ Выполнена задача **T-0013** (Фаза 9 — Чистая чат-крепость без звонков, анти-правительственный хакатон-аудит, уникальный дизайн «Phantom Monolith», Clean-Room IP проверка и очистка `builds/`):
+  - Полностью удалены звонки (`aegis-calls`, кнопки/оверлеи звонков, разрешения `RECORD_AUDIO` и `CAMERA` в `AndroidManifest.xml`).
+  - Закрыты 82 находки аудита (`B-0001`..`B-0082` в `docs/BUGS.md`), все **96 автотестов** чистой чат-крепости проходят без ошибок.
+  - В `builds/` оставлены только самые важные глобальные релизные сборки (`aegis-messenger-release.apk`, `aegis-desktop.exe`, `aegis-serverd.exe`, `deploy-static-ip-vps.sh`, `docker-compose.yml`, `SHA256SUMS.txt`, `README.md`).
 
 ## В работе
-- Нет активных задач (Фазы 0–8 полностью завершены, собраны в `builds/` и отправлены в GitHub)
+- Нет активных задач
 
 ## Блокеры
 - Нет активных блокеров

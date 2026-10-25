@@ -4,13 +4,14 @@
 //! Never accesses raw cryptographic keys or internal state directly.
 
 use aegis_ffi::{
-    build_launch_plan, compute_pow_difficulty, constant_time_eq, core_version_info,
-    evaluate_network_shield, format_server_invite_uri, generate_nickname, pad_frame, redact_leaks,
-    scan_message_for_leaks, validate_call_config, validate_launch_config, validate_manifest,
+    build_launch_plan, combine_pqxdh_secrets, compute_pow_difficulty, constant_time_eq,
+    core_version_info, evaluate_network_shield, format_server_invite_uri, generate_docker_compose,
+    generate_nickname, generate_torrc_hidden_service, pad_frame, redact_leaks,
+    scan_message_for_leaks, strip_media_metadata, validate_launch_config, validate_manifest,
     validate_nickname, validate_password, verify_server_badge, AccountSlotError,
-    AccountSlotManager, CallConfig, CallError, CoreVersionInfo, DirectoryError, LaunchPlan,
-    LaunchTarget, LauncherError, LeakWarning, Locale, NetworkRouteStatus, NicknameError,
-    PasswordPolicyError, PluginError, PluginManifest, ProtocolError, RouteProbe, ServerBadge,
+    AccountSlotManager, CoreVersionInfo, DirectoryError, LaunchPlan, LaunchTarget, LauncherError,
+    LeakWarning, Locale, NetworkRouteStatus, NicknameError, PasswordPolicyError, PluginError,
+    PluginManifest, ProtocolError, RatchetSession, RouteProbe, SealedSenderEnvelope, ServerBadge,
     ShieldEvaluation, SignerAttestation, SupportTicket, SupportTicketCategory, SupporterPass,
     ThresholdPolicy,
 };
@@ -33,8 +34,6 @@ pub enum DesktopUiError {
     ChatLockedWithPin,
     /// Invalid PIN provided for unlocking app or chat.
     InvalidPin { remaining_attempts: u8 },
-    /// Call configuration rejected by `aegis-calls`.
-    Call(CallError),
     /// Server directory verification failed.
     Directory(DirectoryError),
     /// Server launcher configuration invalid.
@@ -62,7 +61,6 @@ impl fmt::Display for DesktopUiError {
             Self::InvalidPin { remaining_attempts } => {
                 write!(f, "неверный PIN (осталось попыток: {remaining_attempts})")
             }
-            Self::Call(e) => write!(f, "ошибка звонка / call error: {e}"),
             Self::Directory(e) => write!(f, "ошибка каталога серверов / directory error: {e}"),
             Self::Launcher(e) => write!(f, "ошибка запуска сервера / launcher error: {e}"),
             Self::Plugin(e) => write!(f, "ошибка песочницы плагина / plugin error: {e}"),
@@ -191,15 +189,17 @@ pub struct MediaAttachmentView {
 }
 
 impl MediaAttachmentView {
-    /// Creates a sanitized media attachment after stripping EXIF APP1 (`0xFFE1`) / GPS segments.
+    /// Creates a sanitized media attachment after stripping EXIF/GPS/XMP/comment metadata via `aegis-ffi`.
     #[must_use]
     pub fn strip_exif_and_create(filename: &str, raw_bytes: &[u8], view_once: bool) -> Self {
         let stripped = strip_jpeg_exif_segments(raw_bytes);
+        let was_stripped =
+            stripped.len() < raw_bytes.len() || strip_media_metadata(raw_bytes).is_ok();
         Self {
             filename: filename.to_owned(),
             original_size_bytes: raw_bytes.len(),
             stripped_size_bytes: stripped.len(),
-            exif_gps_stripped: true,
+            exif_gps_stripped: was_stripped,
             view_once,
             consumed: false,
         }
@@ -217,11 +217,14 @@ impl MediaAttachmentView {
     }
 }
 
-/// Strips JPEG APP1/EXIF (`0xFF 0xE1`) and comment (`0xFF 0xFE`) metadata segments from image bytes.
+/// Strips EXIF/GPS/XMP/comment metadata segments from JPEG/PNG image bytes via `aegis_ffi::strip_media_metadata`.
 #[must_use]
 pub fn strip_jpeg_exif_segments(raw: &[u8]) -> Vec<u8> {
+    if let Ok(cleaned) = strip_media_metadata(raw) {
+        return cleaned.bytes;
+    }
     if raw.len() < 4 || raw[0] != 0xFF || raw[1] != 0xD8 {
-        return raw.to_vec();
+        return Vec::new();
     }
     let mut clean = Vec::with_capacity(raw.len());
     clean.push(0xFF);
@@ -233,18 +236,15 @@ pub fn strip_jpeg_exif_segments(raw: &[u8]) -> Vec<u8> {
             break;
         }
         let marker = raw[i + 1];
-        // SOS (Start of Scan) or EOI: copy the remainder
         if marker == 0xDA || marker == 0xD9 {
             clean.extend_from_slice(&raw[i..]);
             break;
         }
         let seg_len = usize::from(u16::from_be_bytes([raw[i + 2], raw[i + 3]]));
         if seg_len < 2 || i + 2 + seg_len > raw.len() {
-            clean.extend_from_slice(&raw[i..]);
             break;
         }
-        // Drop APP1 (EXIF/GPS = 0xE1) and COM (Comment = 0xFE)
-        if marker != 0xE1 && marker != 0xFE {
+        if !(0xE0..=0xEF).contains(&marker) && !(0xF0..=0xFD).contains(&marker) && marker != 0xFE {
             clean.extend_from_slice(&raw[i..i + 2 + seg_len]);
         }
         i += 2 + seg_len;
@@ -448,21 +448,17 @@ impl ServerLauncherWizardView {
 
 fn render_deployment_bundle(plan: &LaunchPlan) -> String {
     match plan.target {
-        LaunchTarget::VpsDocker => format!(
-            "services:\n  aegis-server:\n    image: ghcr.io/aegis-project/aegis-server:0.1.0\n    ports:\n      - \"0.0.0.0:{port}:{port}/udp\"\n      - \"0.0.0.0:{port}:{port}/tcp\"\n    environment:\n      - AEGIS_BIND_HOST=0.0.0.0\n      - AEGIS_BIND_PORT={port}\n      - AEGIS_ZERO_KNOWLEDGE=1\n      - AEGIS_NO_IP_LOGS=1\n      - AEGIS_QUEUE_TTL_SECS={ttl}\n    restart: unless-stopped",
-            port = plan.bind_port,
-            ttl = plan.queue_ttl_secs
-        ),
+        LaunchTarget::VpsDocker => {
+            generate_docker_compose(plan, "185.220.101.42", &[0xAB; 32]).unwrap_or_default()
+        }
         LaunchTarget::DesktopLocal => format!(
             "aegis-serverd --bind=0.0.0.0 --port={port} # (Static-IP / LAN ready, Queue TTL: {ttl}s, Zero IP Logs)",
             port = plan.bind_port,
             ttl = plan.queue_ttl_secs
         ),
-        LaunchTarget::TorOnionService => format!(
-            "# torrc HiddenService configuration\nHiddenServiceDir /var/lib/tor/aegis_hidden_service/\nHiddenServiceVersion 3\nHiddenServicePort {port} 127.0.0.1:{port}\n# Queue TTL: {ttl}s",
-            port = plan.bind_port,
-            ttl = plan.queue_ttl_secs
-        ),
+        LaunchTarget::TorOnionService => {
+            generate_torrc_hidden_service(plan, &[0xAB; 32]).unwrap_or_default()
+        }
         LaunchTarget::AndroidTestOnly => format!(
             "# ⚠ ТЕСТОВЫЙ РЕЖИМ ANDROID LAN (Порт {port}, TTL {ttl}с) — Не использовать для продакшена из-за NAT и сна батареи",
             port = plan.bind_port,
@@ -482,76 +478,6 @@ pub struct SupportPortalView {
     pub supporter_pass_active: bool,
     /// Total unlocked account slots on this device (`3` free by default, `5+` with pass).
     pub max_account_slots: usize,
-}
-
-/// Encrypted Voice/Video Call overlay with TURN Relay-Only and Voice Pitch Anonymizer (PLAN.md §8.2, §14).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallOverlayView {
-    /// Whether a call is currently active.
-    pub active: bool,
-    /// Remote peer display name.
-    pub peer_name: String,
-    /// Validated `CallConfig` (`relay_only: true`, `require_e2ee_media: true`).
-    pub config: CallConfig,
-    /// Real-time voice pitch shift in semitones (`-6` deep anonymous voice .. `0` natural .. `+6` high).
-    pub voice_pitch_semitones: i8,
-    /// Whether video stream (VP9/AV1 E2EE SFrame) is enabled.
-    pub video_enabled: bool,
-    /// Short emoji/hex SAS verification string for the E2EE media key.
-    pub media_sas_fingerprint: String,
-}
-
-impl CallOverlayView {
-    /// Creates an idle call overlay with privacy-preserving defaults (`relay_only = true`, `require_e2ee_media = true`).
-    #[must_use]
-    pub fn new_idle() -> Self {
-        Self {
-            active: false,
-            peer_name: String::new(),
-            config: CallConfig::default(),
-            voice_pitch_semitones: -4, // Anonymizer pre-configured to -4 semitones
-            video_enabled: false,
-            media_sas_fingerprint: "🛡 SAS: 7F3A • 99C1 • E2EE-SFrame (TURN Relay-Only)".to_owned(),
-        }
-    }
-
-    /// Starts an E2EE call after validating `CallConfig` via `aegis-ffi` (fail-closed if P2P IP leak or unencrypted).
-    ///
-    /// # Errors
-    /// Returns [`DesktopUiError::Call`] if `config` violates privacy invariants.
-    pub fn start_call(
-        &mut self,
-        peer_name: &str,
-        config: CallConfig,
-        pitch_semitones: i8,
-        video_enabled: bool,
-    ) -> Result<(), DesktopUiError> {
-        validate_call_config(&config).map_err(DesktopUiError::Call)?;
-        self.config = config;
-        self.peer_name = peer_name.to_owned();
-        self.voice_pitch_semitones = pitch_semitones.clamp(-12, 12);
-        self.video_enabled = video_enabled;
-        self.active = true;
-        Ok(())
-    }
-
-    /// Applies real-time pitch shifting to 16-bit PCM audio samples in memory so the caller's natural voice print is masked.
-    #[must_use]
-    pub fn anonymize_pcm_frame(&self, pcm_samples: &[i16]) -> Vec<i16> {
-        if self.voice_pitch_semitones == 0 || pcm_samples.is_empty() {
-            return pcm_samples.to_vec();
-        }
-        let shift = i32::from(self.voice_pitch_semitones);
-        pcm_samples
-            .iter()
-            .enumerate()
-            .map(|(idx, &sample)| {
-                let modulated =
-                    (i32::from(sample) * (100 + shift * 3)) / 100 + ((idx as i32 & 1) * shift * 7);
-                modulated.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
-            })
-            .collect()
-    }
 }
 
 /// Declarative Theme & Sandboxed WASM Plugin view-model (`aegis-plugins`, PLAN.md §10).
@@ -707,8 +633,6 @@ pub struct DesktopAppState {
     pub server_launcher: ServerLauncherWizardView,
     /// Encrypted Support Portal & `SupporterPass` state.
     pub support_portal: SupportPortalView,
-    /// Voice/Video Call overlay with Voice Pitch Anonymizer.
-    pub call_overlay: CallOverlayView,
     /// Theme Store & WASM Plugin Sandbox state.
     pub theme_selector: ThemeSelectorView,
     /// Status banner message for user feedback.
@@ -907,9 +831,8 @@ impl DesktopAppState {
                 supporter_pass_active: false,
                 max_account_slots: 3,
             },
-            call_overlay: CallOverlayView::new_idle(),
             theme_selector: ThemeSelectorView {
-                active_theme_id: "obsidian-stealth-dark".to_owned(),
+                active_theme_id: "phantom-monolith".to_owned(),
                 verified_manifests: vec![obsidian_theme],
             },
             status_banner: "Ядро Aegis инициализировано (Zero-Knowledge / OPAQUE / PQXDH)."
@@ -998,6 +921,11 @@ impl DesktopAppState {
         host_or_ip: &str,
         port: u16,
     ) -> Result<usize, DesktopUiError> {
+        if self.directory_servers.len() >= 64 {
+            return Err(DesktopUiError::Launcher(
+                LauncherError::InvalidServerIdentity,
+            ));
+        }
         let trimmed = host_or_ip.trim();
         let _ = format_server_invite_uri(trimmed, port, &[0xCC; 32])
             .map_err(DesktopUiError::Launcher)?;
@@ -1022,9 +950,9 @@ impl DesktopAppState {
         self.directory_servers.push(DirectoryServerEntry {
             endpoint: endpoint.clone(),
             static_ipv4: parsed_ipv4,
-            is_tor_onion: trimmed.ends_with(".onion"),
+            is_tor_onion: trimmed.to_ascii_lowercase().ends_with(".onion"),
             public_key: [0xCC; 32],
-            badge: ServerBadge::VerifiedSingleCheck,
+            badge: ServerBadge::CommunityUnverified,
             description: format!("Пользовательский сервер со статическим IP ({endpoint})"),
         });
         let idx = self.directory_servers.len() - 1;
@@ -1056,14 +984,22 @@ impl DesktopAppState {
             return Err(DesktopUiError::KillSwitchBlocked);
         }
 
-        let own_nick = self
-            .accounts
-            .profiles
-            .get(self.accounts.active_index)
-            .map(|p| p.login_nickname.as_str());
-
         if !force_send {
-            let warnings = scan_message_for_leaks(draft, own_nick);
+            let mut warnings = scan_message_for_leaks(draft, None);
+            if !self.onboarding_nickname.is_empty() {
+                for w in scan_message_for_leaks(draft, Some(self.onboarding_nickname.as_str())) {
+                    if !warnings.contains(&w) {
+                        warnings.push(w);
+                    }
+                }
+            }
+            for prof in &self.accounts.profiles {
+                for w in scan_message_for_leaks(draft, Some(prof.login_nickname.as_str())) {
+                    if !warnings.contains(&w) {
+                        warnings.push(w);
+                    }
+                }
+            }
             if !warnings.is_empty() {
                 let redacted = redact_leaks(draft, &warnings);
                 self.leak_guard_modal = Some(LeakGuardModal {
@@ -1147,6 +1083,7 @@ impl DesktopAppState {
     pub fn enable_calculator_disguise(&mut self) {
         self.calculator_disguise.disguise_active = true;
         self.calculator_disguise.display_buffer.clear();
+        self.leak_guard_modal = None;
         self.current_screen = Screen::CalculatorDisguise;
         self.status_banner =
             "Режим маскировки активирован: приложение выглядит как калькулятор.".to_owned();
@@ -1203,9 +1140,11 @@ impl DesktopAppState {
         self.support_portal.submitted_tickets.clear();
         self.support_portal.supporter_pass_active = false;
         self.support_portal.max_account_slots = 3;
-        self.call_overlay.active = false;
-        self.call_overlay.peer_name.clear();
-        self.call_overlay.video_enabled = false;
+        self.directory_servers.truncate(4);
+        self.selected_server_index = 0;
+        self.server_launcher = ServerLauncherWizardView::new_default();
+        self.theme_selector.active_theme_id = "phantom-monolith".to_owned();
+        self.theme_selector.verified_manifests.truncate(1);
         self.chats = vec![ChatView {
             chat_id: [0xD0; 16],
             title: "Покупки и бытовые заметки".to_owned(),
@@ -1228,26 +1167,29 @@ impl DesktopAppState {
         self.status_banner = "Открыт профиль по умолчанию.".to_owned();
     }
 
-    /// Emergency Panic Button: immediately wipes all accounts, messages, tickets, PINs, and keys in memory.
+    /// Emergency Panic Button: immediately wipes all accounts, messages, tickets, PINs, custom servers, and keys in memory.
     pub fn trigger_panic_wipe(&mut self) {
         self.onboarding_nickname.clear();
         self.last_password_score = None;
         self.app_pin.clear();
         self.duress_pin = None;
         self.remaining_pin_attempts = 0;
+        self.duress_mode_active = false;
         self.accounts = AccountSwitcherView::new();
         self.chats.clear();
+        self.directory_servers.clear();
+        self.selected_server_index = 0;
         self.active_chat_index = 0;
         self.leak_guard_modal = None;
         self.calculator_disguise.display_buffer.clear();
         self.calculator_disguise.last_result = "0".to_owned();
         self.calculator_disguise.disguise_active = false;
+        self.server_launcher = ServerLauncherWizardView::new_default();
+        self.theme_selector.active_theme_id = "phantom-monolith".to_owned();
+        self.theme_selector.verified_manifests.clear();
         self.support_portal.submitted_tickets.clear();
         self.support_portal.supporter_pass_active = false;
         self.support_portal.max_account_slots = 3;
-        self.call_overlay.active = false;
-        self.call_overlay.peer_name.clear();
-        self.call_overlay.video_enabled = false;
         self.current_screen = Screen::PanicWiped;
         self.status_banner =
             "🚨 Криптографическое стирание (Crypto-Wipe) выполнено. Все ключи и чаты уничтожены."
@@ -1383,14 +1325,19 @@ impl DesktopGuiServer {
         if let Some(chat) = active_chat {
             if chat.is_locked {
                 messages_html.push_str(
-                    "<div class='warn-box'>🔒 Чат заблокирован персональным PIN-кодом. Нажмите «Разблокировать чат PIN 7788».</div>",
+                    "<div class='warn-box'>🔒 Чат заблокирован персональным PIN-кодом. Введите PIN чата для разблокировки.</div>",
                 );
             } else {
-                for m in &chat.messages {
+                for (idx, m) in chat.messages.iter().enumerate() {
                     let side = if m.outgoing { "msg out" } else { "msg in" };
+                    let dir_tag = if m.outgoing {
+                        "TX // SEALED CAPSULE"
+                    } else {
+                        "RX // VERIFIED CAPSULE"
+                    };
                     let ttl_badge = m
                         .disappearing_ttl_secs
-                        .map_or(String::new(), |t| format!(" ⏱ {t}с"));
+                        .map_or("TTL: ∞".to_owned(), |t| format!("TTL: {t}s"));
                     let att_badge = m.attachment.as_ref().map_or(String::new(), |a| {
                         format!(
                             " <span class='tag'>📷 {} (EXIF очищен: {} -> {} B, View-Once: {})</span>",
@@ -1401,9 +1348,10 @@ impl DesktopGuiServer {
                         )
                     });
                     messages_html.push_str(&format!(
-                        "<div class='{side}'><div>{}</div><small>📦 Паддинг: {} B{ttl_badge}{att_badge}</small></div>",
+                        "<div class='{side}'><div class='cap-hdr'><span>◈ {dir_tag} #{step:02}</span><span>PAD-BUCKET: {bucket} B • {ttl_badge} • PQXDH+DR</span></div><div class='cap-body'>{}</div><div class='cap-bar'><span class='cap-fill'></span></div><small>{att_badge}</small></div>",
                         html_escape(&m.text),
-                        m.padded_bucket_bytes
+                        step = idx + 1,
+                        bucket = m.padded_bucket_bytes
                     ));
                 }
             }
@@ -1485,101 +1433,187 @@ impl DesktopGuiServer {
 <meta charset='utf-8'>
 <title>{title}</title>
 <style>
-  body {{ background:#0b0f17; color:#e6edf3; font-family:system-ui,-apple-system,sans-serif; margin:0; padding:16px; }}
-  .top {{ display:flex; justify-content:space-between; align-items:center; background:#141b26; padding:12px 16px; border-radius:10px; border:1px solid #263245; margin-bottom:14px; }}
-  .grid {{ display:grid; grid-template-columns: 320px 1fr 360px; gap:14px; }}
-  .card {{ background:#141b26; border:1px solid #263245; border-radius:10px; padding:14px; }}
-  h2, h3 {{ margin-top:0; color:#79c0ff; }}
-  .btn {{ display:inline-block; background:#1f6feb; color:#fff; text-decoration:none; padding:7px 12px; border-radius:6px; font-size:13px; margin:3px 2px; border:none; cursor:pointer; }}
-  .btn.ok {{ background:#238636; }}
-  .btn.warn {{ background:#9e6a03; }}
-  .btn.danger {{ background:#da3633; }}
-  .tag {{ display:inline-block; background:#1f2937; color:#a5d6ff; padding:3px 8px; border-radius:5px; font-size:12px; margin:2px; border:1px solid #374151; }}
-  .msg {{ padding:8px 12px; border-radius:8px; margin:6px 0; }}
-  .msg.in {{ background:#1c2536; border-left:3px solid #58a6ff; }}
-  .msg.out {{ background:#132f23; border-left:3px solid #3fb950; }}
-  .modal {{ background:#2b161b; border:2px solid #f85149; padding:12px; border-radius:8px; margin-bottom:12px; }}
-  .warn-box {{ background:#2d2111; border:1px solid #d29922; padding:10px; border-radius:8px; }}
-  pre {{ background:#090d13; padding:10px; border-radius:6px; overflow-x:auto; font-size:12px; color:#7ee787; }}
-  input[type=text] {{ background:#090d13; color:#fff; border:1px solid #30363d; padding:8px; border-radius:6px; width:72%; }}
+  :root {{
+    --void: #05080f;
+    --monolith: #0c121e;
+    --panel: #10192b;
+    --lazulite: #00f5b8;
+    --cyan: #38bdf8;
+    --crimson: #f43f5e;
+    --amber: #f59e0b;
+    --text: #e2e8f0;
+    --muted: #64748b;
+  }}
+  body {{
+    background-color: var(--void);
+    background-image: radial-gradient(rgba(0,245,184,0.06) 1px, transparent 1px), linear-gradient(180deg, #05080f 0%, #09101d 100%);
+    background-size: 24px 24px, 100% 100%;
+    color: var(--text);
+    font-family: 'JetBrains Mono', 'Cascadia Code', 'Segoe UI', system-ui, monospace;
+    margin: 0;
+    padding: 18px;
+  }}
+  .top {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: linear-gradient(90deg, rgba(12,18,30,0.96) 0%, rgba(16,25,43,0.96) 100%);
+    padding: 14px 20px;
+    border: 1px solid rgba(0,245,184,0.35);
+    box-shadow: 0 0 28px rgba(0,245,184,0.08);
+    clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+    margin-bottom: 14px;
+  }}
+  .topology {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(12,18,30,0.9);
+    border-left: 3px solid var(--lazulite);
+    border-right: 3px solid var(--cyan);
+    padding: 8px 16px;
+    margin-bottom: 14px;
+    font-size: 12px;
+    letter-spacing: 0.4px;
+  }}
+  .grid {{ display: grid; grid-template-columns: 330px 1fr 370px; gap: 16px; }}
+  .card {{
+    background: var(--monolith);
+    border: 1px solid rgba(56,189,248,0.22);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 10px 30px rgba(0,0,0,0.45);
+    clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
+    padding: 16px;
+  }}
+  h2, h3 {{
+    margin-top: 0;
+    color: var(--lazulite);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    font-size: 14px;
+    border-bottom: 1px solid rgba(0,245,184,0.18);
+    padding-bottom: 8px;
+  }}
+  .btn {{
+    display: inline-block;
+    background: rgba(56,189,248,0.14);
+    color: var(--cyan);
+    border: 1px solid rgba(56,189,248,0.45);
+    text-decoration: none;
+    padding: 7px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    margin: 3px 2px;
+    cursor: pointer;
+    clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 6px, 100% 100%, 0 100%);
+  }}
+  .btn.ok {{ background: rgba(0,245,184,0.14); color: var(--lazulite); border-color: var(--lazulite); }}
+  .btn.warn {{ background: rgba(245,158,11,0.15); color: var(--amber); border-color: var(--amber); }}
+  .btn.danger {{ background: rgba(244,63,94,0.18); color: var(--crimson); border-color: var(--crimson); }}
+  .tag {{
+    display: inline-block;
+    background: rgba(16,25,43,0.95);
+    color: var(--cyan);
+    padding: 3px 9px;
+    font-size: 11px;
+    margin: 2px;
+    border: 1px solid rgba(56,189,248,0.3);
+  }}
+  .msg {{
+    padding: 10px 14px;
+    margin: 10px 0;
+    background: var(--panel);
+    clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+  }}
+  .msg.in {{ border-left: 3px solid var(--cyan); border-top: 1px solid rgba(56,189,248,0.25); }}
+  .msg.out {{ border-left: 3px solid var(--lazulite); border-top: 1px solid rgba(0,245,184,0.25); background: rgba(0,245,184,0.05); }}
+  .cap-hdr {{ display: flex; justify-content: space-between; font-size: 10px; color: var(--lazulite); letter-spacing: 0.6px; margin-bottom: 6px; opacity: 0.85; }}
+  .cap-body {{ font-size: 13px; color: #f8fafc; line-height: 1.45; margin-bottom: 6px; }}
+  .cap-bar {{ height: 3px; background: rgba(255,255,255,0.06); width: 100%; overflow: hidden; margin-bottom: 4px; }}
+  .cap-fill {{ display: block; height: 100%; width: 100%; background: linear-gradient(90deg, var(--lazulite), var(--cyan)); }}
+  .modal {{ background: rgba(244,63,94,0.12); border: 1px solid var(--crimson); padding: 14px; margin-bottom: 12px; }}
+  .warn-box {{ background: rgba(245,158,11,0.12); border: 1px solid var(--amber); padding: 12px; }}
+  pre {{ background: #03060c; border: 1px solid rgba(0,245,184,0.2); padding: 10px; overflow-x: auto; font-size: 11px; color: var(--lazulite); }}
+  input[type=text] {{ background: #03060c; color: #fff; border: 1px solid rgba(0,245,184,0.4); padding: 9px; width: 70%; font-family: inherit; }}
 </style>
 </head>
 <body>
   <div class='top'>
     <div>
-      <strong>🛡 {title}</strong>
+      <strong style='color:var(--lazulite);font-size:15px;'>◈ AEGIS // PHANTOM MONOLITH — {title}</strong>
       <span class='tag'>{shield}</span>
-      <span class='tag'>Cover Traffic: {cover}</span>
-      <span class='tag'>Suite v{cv} / Proto v{pv} / DB v{sv}</span>
+      <span class='tag'>COVER-TRAFFIC: {cover} (256B HMAC-STREAM)</span>
+      <span class='tag'>SUITE v{cv} • PROTO v{pv} • VAULT v{sv}</span>
     </div>
     <div>
       <a class='btn' href='/action?cmd=lang_ru'>RU</a>
       <a class='btn' href='/action?cmd=lang_en'>EN</a>
-      <a class='btn warn' href='/action?cmd=disguise'>🧮 Маскировка под калькулятор</a>
+      <a class='btn warn' href='/action?cmd=disguise'>🧮 Маскировка (Stealth Calc)</a>
       <a class='btn danger' href='/action?cmd=panic'>{panic_btn}</a>
     </div>
   </div>
 
-  <div style='margin-bottom:10px;' class='tag'>Статус: {status}</div>
+  <div class='topology'>
+    <span>⚡ МАТРИЦА НЕОТСЛЕЖИВАЕМОСТИ: <b>CLIENT VAULT</b> ──[PQXDH + DOUBLE RATCHET + PAD-BEFORE-ENCRYPT]──► <b>STATIC-IP / ONION QUEUE</b> (0 МЕТАДАННЫХ • БЕЗ ЗВОНКОВ/МИКРОФОНА)</span>
+    <span>СТАТУС: <b style='color:var(--lazulite);'>{status}</b></span>
+  </div>
 
   <div class='grid'>
     <div class='card'>
-      <h3>👤 Мультиаккаунты (до 3 бесплатно + SupporterPass)</h3>
+      <h3>👤 Изолированные контуры (Мультиаккаунты 3+Pass)</h3>
       <div>{accounts}</div>
       <div style='margin-top:8px;'>
         <a class='btn' href='/action?cmd=gen_nick'>{gen_nick_btn} ({curr_nick})</a>
         <a class='btn ok' href='/action?cmd=add_account'>+ Добавить изолированный аккаунт</a>
         <a class='btn warn' href='/action?cmd=activate_pass'>🎫 Активировать SupporterPass (5 слотов)</a>
       </div>
-      <hr style='border-color:#263245;margin:12px 0;'>
-      <h3>💬 Чаты и «Избранное»</h3>
-      <a class='btn' href='/action?cmd=chat_0'>📌 Избранное (Локально)</a>
-      <a class='btn' href='/action?cmd=chat_1'>🔐 nordic-falcon (E2EE)</a>
+      <hr style='border-color:rgba(56,189,248,0.18);margin:14px 0;'>
+      <h3>💬 Капсульные Чаты и Сейф «Избранное»</h3>
+      <a class='btn' href='/action?cmd=chat_0'>📌 Избранное (Локальный сейф)</a>
+      <a class='btn ok' href='/action?cmd=chat_1'>🔐 nordic-falcon (Sealed Capsule)</a>
       <a class='btn' href='/action?cmd=chat_2'>✓ Поддержка Aegis</a>
-      <a class='btn warn' href='/action?cmd=toggle_chat_pin'>🔒 Блок/Разблок чата PIN 7788</a>
-      <hr style='border-color:#263245;margin:12px 0;'>
-      <h3>🌐 Сетевой щит (D-0008)</h3>
+      <a class='btn warn' href='/action?cmd=toggle_chat_pin'>🔒 Блок/Разблок чата по PIN</a>
+      <hr style='border-color:rgba(56,189,248,0.18);margin:14px 0;'>
+      <h3>🌐 Сетевой щит (Anti-DPI / D-0008)</h3>
       <a class='btn ok' href='/action?cmd=route_tor'>🔒 Маршрут Tor / Onion</a>
       <a class='btn' href='/action?cmd=route_vpn'>🛡 Маршрут VPN</a>
-      <a class='btn warn' href='/action?cmd=route_direct'>⚠ Прямой IP</a>
-      <a class='btn danger' href='/action?cmd=route_leak'>🧪 Тест обрыва VPN (Kill Switch)</a>
+      <a class='btn warn' href='/action?cmd=route_direct'>🌐 Прямой Static-IP</a>
+      <a class='btn danger' href='/action?cmd=route_leak'>🧪 Тест обрыва туннеля (Kill Switch)</a>
     </div>
 
     <div class='card'>
-      <h2>{chat_title}</h2>
+      <h2>◈ КАНАЛ КАПСУЛ: {chat_title}</h2>
       {leak_modal}
       <div>{messages}</div>
-      <hr style='border-color:#263245;margin:12px 0;'>
+      <hr style='border-color:rgba(0,245,184,0.18);margin:14px 0;'>
       <form action='/action' method='get'>
         <input type='hidden' name='cmd' value='send_text'>
-        <input type='text' name='text' placeholder='Введите сообщение (LeakGuard проверяет карты/CVV/телефоны/почту локально)...'>
-        <button class='btn ok' type='submit'>Отправить E2EE</button>
+        <input type='text' name='text' placeholder='Введите текст капсулы (LeakGuard проверяет карты/CVV/телефоны/ключи/почту локально)...'>
+        <button class='btn ok' type='submit'>Запечатать 256B</button>
       </form>
       <div style='margin-top:10px;'>
-        <a class='btn warn' href='/action?cmd=test_leak_card'>💳 Тест LeakGuard: Отправить карту Visa + CVV</a>
-        <a class='btn' href='/action?cmd=send_photo_view_once'>📷 Отправить View-Once фото (с авто-очисткой EXIF/GPS)</a>
-        <a class='btn ok' href='/action?cmd=start_call'>📞 E2EE Звонок (TURN Relay-Only + Анонимайзер голоса -4 пт)</a>
+        <a class='btn warn' href='/action?cmd=test_leak_card'>💳 Тест LeakGuard: Карта Visa + CVV</a>
+        <a class='btn ok' href='/action?cmd=send_photo_view_once'>📷 Отправить View-Once капсулу (очистка EXIF/GPS/iDOT)</a>
       </div>
     </div>
 
     <div class='card'>
       <h3>{launcher_title}</h3>
-      <a class='btn' href='/action?cmd=launch_vps'>VPS Docker</a>
+      <a class='btn ok' href='/action?cmd=launch_vps'>VPS Static-IP Docker</a>
       <a class='btn' href='/action?cmd=launch_onion'>Tor .onion сервис</a>
-      <a class='btn' href='/action?cmd=launch_desktop'>Локальный демон</a>
+      <a class='btn' href='/action?cmd=launch_desktop'>Локальный узел</a>
       <pre>{launcher_bundle}</pre>
-      <small>Инвайт сервера: <code>{server_invite}</code></small>
-      <hr style='border-color:#263245;margin:12px 0;'>
-      <h3>📋 Стартовые анонимные серверы со статическим IP (Без обязательного Tor)</h3>
-      <ul style='padding-left:18px;font-size:13px;'>{servers}</ul>
+      <small>Инвайт узла: <code>{server_invite}</code></small>
+      <hr style='border-color:rgba(56,189,248,0.18);margin:14px 0;'>
+      <h3>📋 Стартовые Static-IP узлы (Без обязательного Tor)</h3>
+      <ul style='padding-left:18px;font-size:12px;'>{servers}</ul>
       <form action='/action' method='get' style='margin-top:8px;'>
         <input type='hidden' name='cmd' value='custom_server'>
-        <input type='text' name='ip' placeholder='Свой статический IP или хост (напр. 185.220.101.42)...'>
-        <button class='btn ok' type='submit'>⚡ Подключить Static IP</button>
+        <input type='text' name='ip' placeholder='Свой статический IP:порт (напр. 185.220.101.42:8443)...'>
+        <button class='btn ok' type='submit'>⚡ Подключить узел</button>
       </form>
-      <hr style='border-color:#263245;margin:12px 0;'>
+      <hr style='border-color:rgba(56,189,248,0.18);margin:14px 0;'>
       <h3>{support_title}</h3>
-      <p style='font-size:13px;'>Отправлено E2EE тикетов в поддержку ✓: <b>{ticket_count}</b> | Слотов аккаунтов: <b>{max_slots}</b></p>
+      <p style='font-size:12px;'>Отправлено E2EE тикетов в поддержку ✓: <b>{ticket_count}</b> | Слотов аккаунтов: <b>{max_slots}</b></p>
       <a class='btn ok' href='/action?cmd=send_ticket'>📨 Отправить анонимный тикет в поддержку ✓</a>
     </div>
   </div>
@@ -1636,13 +1670,18 @@ impl DesktopGuiServer {
             "custom_server" => {
                 if let Some(ip) = extract_query_param(query, "ip") {
                     let trimmed = ip.trim();
-                    let (host_part, port_part) = if let Some((h, p)) = trimmed.rsplit_once(':') {
-                        (h, p.parse::<u16>().unwrap_or(8443))
+                    let parsed_pair = if let Some((h, p)) = trimmed.rsplit_once(':') {
+                        p.parse::<u16>().ok().map(|port| (h, port))
                     } else {
-                        (trimmed, 8443)
+                        Some((trimmed, 8443))
                     };
-                    if let Err(e) = self.state.connect_custom_static_ip(host_part, port_part) {
-                        self.state.status_banner = format!("Ошибка подключения Static IP: {e}");
+                    if let Some((host_part, port_part)) = parsed_pair {
+                        if let Err(e) = self.state.connect_custom_static_ip(host_part, port_part) {
+                            self.state.status_banner = format!("Ошибка подключения Static IP: {e}");
+                        }
+                    } else {
+                        self.state.status_banner =
+                            "Ошибка подключения Static IP: некорректный порт".to_owned();
                     }
                 }
             }
@@ -1701,13 +1740,23 @@ impl DesktopGuiServer {
             "chat_1" => self.state.active_chat_index = 1,
             "chat_2" => self.state.active_chat_index = 2,
             "toggle_chat_pin" => {
-                if let Some(chat) = self.state.chats.get_mut(self.state.active_chat_index) {
-                    chat.is_locked = !chat.is_locked;
-                    self.state.status_banner = if chat.is_locked {
-                        "Чат закрыт персональным PIN-кодом.".to_owned()
+                let idx = self.state.active_chat_index;
+                if let Some(chat) = self.state.chats.get_mut(idx) {
+                    if chat.is_locked {
+                        let pin = extract_query_param(query, "pin").unwrap_or_default();
+                        match self.state.unlock_chat_with_pin(idx, &pin) {
+                            Ok(()) => {
+                                self.state.status_banner =
+                                    "Чат разблокирован персональным PIN-кодом.".to_owned();
+                            }
+                            Err(e) => {
+                                self.state.status_banner = format!("Отказ разблокировки чата: {e}");
+                            }
+                        }
                     } else {
-                        "Чат разблокирован персональным PIN 7788.".to_owned()
-                    };
+                        chat.is_locked = true;
+                        self.state.status_banner = "Чат закрыт персональным PIN-кодом.".to_owned();
+                    }
                 }
             }
             "route_tor" => {
@@ -1768,7 +1817,7 @@ impl DesktopGuiServer {
             "send_photo_view_once" => {
                 let fake_jpeg_with_exif = [
                     0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x08, b'E', b'x', b'i', b'f', 0x00, 0x00, 0xFF,
-                    0xDA, 0x01, 0x02, 0x03, 0xFF, 0xD9,
+                    0xDA, 0x00, 0x04, 0x00, 0x00, 0x01, 0x02, 0x03, 0xFF, 0xD9,
                 ];
                 let att = MediaAttachmentView::strip_exif_and_create(
                     "secret_document.jpg",
@@ -1782,18 +1831,6 @@ impl DesktopGuiServer {
                 {
                     self.state.status_banner =
                         "Фото очищено от EXIF/GPS координат и отправлено в режиме View-Once."
-                            .to_owned();
-                }
-            }
-            "start_call" => {
-                if self
-                    .state
-                    .call_overlay
-                    .start_call("nordic-falcon", CallConfig::default(), -4, true)
-                    .is_ok()
-                {
-                    self.state.status_banner =
-                        "📞 Активен E2EE звонок через TURN Relay-Only (голос изменён на -4 полутона)."
                             .to_owned();
                 }
             }
@@ -1832,7 +1869,13 @@ impl DesktopGuiServer {
                 self.state.enable_calculator_disguise();
             }
             "calc_eval" => {
+                if self.state.remaining_pin_attempts == 0 {
+                    self.state.trigger_panic_wipe();
+                    return;
+                }
                 let expr = extract_query_param(query, "expr").unwrap_or_default();
+                let is_pin_guess =
+                    !expr.trim().is_empty() && expr.trim().chars().all(|c| c.is_ascii_digit());
                 self.state.calculator_disguise.display_buffer = expr;
                 let pin = self.state.app_pin.clone();
                 let duress = self.state.duress_pin.clone();
@@ -1842,6 +1885,7 @@ impl DesktopGuiServer {
                     .press_equals(&pin, duress.as_deref())
                 {
                     CalculatorAction::UnlockRealVault => {
+                        self.state.remaining_pin_attempts = 10;
                         self.state.current_screen = Screen::ChatWorkspace;
                         self.state.status_banner =
                             "Секретный PIN принят: маскировка снята.".to_owned();
@@ -1849,7 +1893,15 @@ impl DesktopGuiServer {
                     CalculatorAction::TriggerDuressDecoy => {
                         self.state.activate_duress_decoy_mode();
                     }
-                    CalculatorAction::ComputedMath => {}
+                    CalculatorAction::ComputedMath => {
+                        if is_pin_guess {
+                            self.state.remaining_pin_attempts =
+                                self.state.remaining_pin_attempts.saturating_sub(1);
+                            if self.state.remaining_pin_attempts == 0 {
+                                self.state.trigger_panic_wipe();
+                            }
+                        }
+                    }
                 }
             }
             "panic" => {
@@ -1894,6 +1946,18 @@ impl DesktopGuiServer {
             let n = stream.read(&mut buf).unwrap_or(0);
             if n > 0 {
                 let req = String::from_utf8_lossy(&buf[..n]);
+                if !is_trusted_local_http_request(&req) {
+                    let forbidden = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 9\r\nCache-Control: no-store\r\nConnection: close\r\n\r\nForbidden";
+                    let _ = stream.write_all(forbidden.as_bytes());
+                    let _ = stream.flush();
+                    handled = handled.saturating_add(1);
+                    if let Some(limit) = max_requests {
+                        if handled >= limit {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 if let Some(first_line) = req.lines().next() {
                     if let Some(path_and_query) = first_line.split_whitespace().nth(1) {
                         if let Some((route_path, query)) = path_and_query.split_once('?') {
@@ -1907,7 +1971,7 @@ impl DesktopGuiServer {
 
             let html = self.render_html();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n{}",
                 html.len(),
                 html
             );
@@ -1923,6 +1987,44 @@ impl DesktopGuiServer {
         }
         Ok(())
     }
+}
+
+/// Verifies that an incoming HTTP request to the local Desktop GUI server (`127.0.0.1`)
+/// is not a Cross-Site Request Forgery (CSRF) or DNS Rebinding attack from an external website.
+#[must_use]
+pub fn is_trusted_local_http_request(raw_request: &str) -> bool {
+    let head = raw_request
+        .split_once("\r\n\r\n")
+        .map_or(raw_request, |(h, _)| h);
+    for line in head.lines().skip(1) {
+        let Some((name, val)) = line.split_once(':') else {
+            continue;
+        };
+        let header_name = name.trim().to_ascii_lowercase();
+        let header_val = val.trim().to_ascii_lowercase();
+        match header_name.as_str() {
+            "host" => {
+                let host_only = header_val
+                    .rsplit_once(':')
+                    .map_or(header_val.as_str(), |(h, _)| h);
+                if host_only != "127.0.0.1" && host_only != "localhost" {
+                    return false;
+                }
+            }
+            "sec-fetch-site" if header_val == "cross-site" => {
+                return false;
+            }
+            "origin"
+                if header_val != "null"
+                    && !header_val.starts_with("http://127.0.0.1")
+                    && !header_val.starts_with("http://localhost") =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 fn html_escape(input: &str) -> String {
@@ -2061,8 +2163,8 @@ pub fn run_automated_demo_walkthrough() -> Result<String, DesktopUiError> {
 
     // 6. View-Once photo with EXIF/GPS stripping
     let raw_jpeg = [
-        0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x06, b'G', b'P', b'S', 0x00, 0xFF, 0xDA, 0x99, 0x88, 0xFF,
-        0xD9,
+        0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x06, b'G', b'P', b'S', 0x00, 0xFF, 0xDA, 0x00, 0x04, 0x00,
+        0x00, 0x99, 0x88, 0xFF, 0xD9,
     ];
     let mut photo = MediaAttachmentView::strip_exif_and_create("passport.jpg", &raw_jpeg, true);
     let orig_len = photo.original_size_bytes;
@@ -2074,14 +2176,20 @@ pub fn run_automated_demo_walkthrough() -> Result<String, DesktopUiError> {
         !opened_second
     ));
 
-    // 7. Encrypted Voice/Video Call with TURN Relay-Only & Voice Pitch Anonymizer
-    app.call_overlay
-        .start_call("nordic-falcon", CallConfig::default(), -5, true)?;
-    let raw_audio = [1200i16, -1200, 2400, -2400];
-    let pitch_shifted = app.call_overlay.anonymize_pcm_frame(&raw_audio);
+    // 7. Pure Chat Fortress SealedSenderEnvelope (Pad-Before-Encrypt 1:1 capsule, zero calls D-0021)
+    let root = combine_pqxdh_secrets(&[0x11; 32], &[0x22; 32], b"walkthrough")
+        .unwrap_or_else(|_| unreachable!());
+    let mut alice_dr = RatchetSession::new(root.as_slice(), [0xA1; 32], [0xB2; 32], true)
+        .map_err(|_| DesktopUiError::Protocol(ProtocolError::MalformedPaddedFrame))?;
+    let (rh, ct) = alice_dr
+        .send_ratchet_step(b"sealed-capsule-payload", b"aad")
+        .map_err(|_| DesktopUiError::Protocol(ProtocolError::MalformedPaddedFrame))?;
+    let sealed_wire =
+        SealedSenderEnvelope::seal(&[0x91; 32], &[0x92; 32], &[0x05; 12], &[0xA9; 32], &rh, &ct)
+            .map_err(DesktopUiError::Protocol)?;
     report.push_str(&format!(
-        "7. [OK] Звонки E2EE (TURN Relay-Only): активен={}, изменение тембра голоса ({} пт): {:?} -> {:?}\n",
-        app.call_overlay.active, app.call_overlay.voice_pitch_semitones, raw_audio, pitch_shifted
+        "7. [OK] Чистая чат-крепость (D-0021, 0 звонков): 1:1 SealedSenderEnvelope запечатан в {} B (Pad-Before-Encrypt)\n",
+        sealed_wire.len()
     ));
 
     // 8. 1-Click Server Launcher (VPS Docker & Tor Onion) + Signed Server Directory ✓✓
@@ -2229,7 +2337,7 @@ mod tests {
     fn desktop_exif_stripper_and_view_once_attachment() {
         let jpeg_with_exif = [
             0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x08, b'E', b'x', b'i', b'f', 0x00, 0x00, 0xFF, 0xDA,
-            0xAA, 0xBB, 0xFF, 0xD9,
+            0x00, 0x04, 0x00, 0x00, 0xAA, 0xBB, 0xFF, 0xD9,
         ];
         let mut att =
             MediaAttachmentView::strip_exif_and_create("photo.jpg", &jpeg_with_exif, true);
@@ -2340,15 +2448,10 @@ mod tests {
         assert!(gui.state.confirm_leak_guard_masked_send().is_err());
 
         // B-0050 & B-0051: Panic wipe scrubs all sensitive fields and renders only wiped screen
-        gui.state
-            .call_overlay
-            .start_call("nordic-falcon", CallConfig::default(), -4, true)
-            .unwrap();
         gui.handle_command("cmd=panic");
         assert!(gui.state.onboarding_nickname.is_empty());
         assert!(gui.state.app_pin.is_empty());
         assert!(gui.state.duress_pin.is_none());
-        assert!(gui.state.call_overlay.peer_name.is_empty());
         assert!(!gui.state.support_portal.supporter_pass_active);
 
         let wiped_html = gui.render_html();
@@ -2382,5 +2485,58 @@ mod tests {
             Some([203, 0, 113, 50])
         );
         assert!(app.shield_evaluation.traffic_permitted);
+    }
+
+    #[test]
+    fn b0077_localhost_csrf_dns_rebinding_chat_pin_bypass_and_calculator_bruteforce_protection() {
+        // 1. Localhost CSRF & DNS Rebinding protection
+        assert!(is_trusted_local_http_request(
+            "GET /action?cmd=gen_nick HTTP/1.1\r\nHost: 127.0.0.1:7878\r\nSec-Fetch-Site: same-origin\r\n\r\n"
+        ));
+        assert!(!is_trusted_local_http_request(
+            "GET /action?cmd=panic HTTP/1.1\r\nHost: 127.0.0.1:7878\r\nSec-Fetch-Site: cross-site\r\n\r\n"
+        ));
+        assert!(!is_trusted_local_http_request(
+            "GET /action?cmd=panic HTTP/1.1\r\nHost: evil-rebind.example.com:7878\r\n\r\n"
+        ));
+        assert!(!is_trusted_local_http_request(
+            "GET /action?cmd=panic HTTP/1.1\r\nHost: 127.0.0.1:7878\r\nOrigin: https://evil.example.com\r\n\r\n"
+        ));
+
+        let mut gui = DesktopGuiServer::new(0, DesktopAppState::new(Locale::Ru));
+        // 2. HTML never exposes cleartext per-chat PIN "7788"
+        let html = gui.render_html();
+        assert!(!html.contains("7788"));
+
+        // 3. Locking chat via toggle_chat_pin works, but unlocking without `&pin=7788` is rejected and decrements attempts
+        gui.handle_command("cmd=toggle_chat_pin");
+        assert!(gui.state.chats[1].is_locked);
+        gui.handle_command("cmd=toggle_chat_pin");
+        assert!(gui.state.chats[1].is_locked);
+        assert_eq!(gui.state.remaining_pin_attempts, 9);
+        gui.handle_command("cmd=toggle_chat_pin&pin=7788");
+        assert!(!gui.state.chats[1].is_locked);
+
+        // 4. Custom server receives CommunityUnverified badge (never VerifiedSingleCheck ✓) and gets scrubbed on Duress/Panic
+        let custom_idx = gui
+            .state
+            .connect_custom_static_ip("203.0.113.99", 8443)
+            .unwrap();
+        assert_eq!(
+            gui.state.directory_servers[custom_idx].badge,
+            ServerBadge::CommunityUnverified
+        );
+        gui.state.activate_duress_decoy_mode();
+        assert_eq!(gui.state.directory_servers.len(), 4);
+
+        // 5. Calculator disguise brute-force lockout triggers PanicWiped after exhausting remaining_pin_attempts
+        let mut gui2 = DesktopGuiServer::new(0, DesktopAppState::new(Locale::Ru));
+        gui2.handle_command("cmd=disguise");
+        assert_eq!(gui2.state.current_screen, Screen::CalculatorDisguise);
+        for _ in 0..10 {
+            gui2.handle_command("cmd=calc_eval&expr=0000");
+        }
+        assert_eq!(gui2.state.current_screen, Screen::PanicWiped);
+        assert!(gui2.state.chats.is_empty());
     }
 }

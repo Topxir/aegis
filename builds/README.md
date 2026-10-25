@@ -1,21 +1,14 @@
-# Сборки Aegis (Android APK, Desktop GUI и Стартовые Анонимные Серверы со статическим IP)
+# Глобальные релизные сборки Aegis (Pure Chat Fortress // Phantom Monolith)
 
-Эта папка (`builds/`) содержит готовые к запуску и установке релизные сборки проекта **Aegis v0.1.0**:
+Эта папка (`builds/`) содержит только ключевые финальные релизные артефакты проекта **Aegis v0.1.0** (`D-0021`, `D-0022`):
 
-## 1. 📱 `builds/android-apk/` — Готовые APK для Android
-- **`aegis-messenger-release.apk`** — подписанный оптимизированный релизный APK (R8/ProGuard, `FLAG_SECURE`, Android StrongBox Keystore, инкогнито-клавиатура, маскировка под калькулятор).
-- **`aegis-messenger-debug.apk`** — отладочный APK для быстрой проверки на эмуляторе или телефоне.
-- **Стартовые серверы из коробки (без обязательного Tor):**
-  В APK уже вшиты 3 стартовых анонимных сервера со статическим IP (`185.220.101.42:8443 ✓✓`, `91.108.56.110:8443 ✓✓`, `193.163.125.18:8443 ✓`), которые работают **напрямую без необходимости включать Tor или VPN**. Во вкладке **«🌐 Серверы (Static IP)»** можно в 1 клик переключить сервер, ввести свой статический IP (`IP:порт`) или по желанию включить Tor `.onion`.
+## 1. 📱 `builds/android-apk/aegis-messenger-release.apk`
+- Подписанный релизный APK для Android 9.0+ (авторский интерфейс **«Aegis Phantom Monolith»**, `FLAG_SECURE`, `excludeFromRecents="true"`, Android StrongBox Keystore, инкогнито-клавиатура, маскировка под калькулятор, **0 разрешений на микрофон и камеру**).
+- Вшиты 3 стартовых анонимных сервера со статическим IP (`185.220.101.42:8443 ✓✓`, `91.108.56.110:8443 ✓✓`, `193.163.125.18:8443 ✓`), работающие напрямую без обязательного Tor, плюс 1-клик ввод своего Static IP и опциональный Tor `.onion`.
 
-## 2. 🖥 `builds/desktop/` — Клиент для ПК (Windows)
-- **`aegis-desktop.exe`** — автономный бинарный клиент Aegis для ПК.
-- **`run-desktop-gui.bat`** — запускает интерактивный графический интерфейс на `http://127.0.0.1:7878` и открывает его в браузере.
-- **`run-self-test.bat`** — запускает полный автотест всех 10 подсистем ядра и протокола.
+## 2. 🖥 `builds/desktop/aegis-desktop.exe`
+- Автономный бинарный клиент Aegis для ПК (Windows) с локальным защищённым GUI «Phantom Monolith» (`aegis-desktop.exe --gui --port 7878`) и встроенным полным автотестом (`aegis-desktop.exe --self-test`).
 
-## 3. 🌐 `builds/server/` — Стартовый сервер федерации со статическим IP (`Zero-IP-Logs`)
-- **`aegis-serverd.exe`** — бинарный демон сервера федерации (односторонние очереди с паддингом `256..16384 B`, constant-shape OPAQUE, адаптивный PoW без IP-логов и веб-портал поддержки/донатов `SupporterPass`).
-- **`run-static-ip-server.bat`** — запускает сервер на всех сетевых интерфейсах (`--bind=0.0.0.0 --port=8443`) для раздачи по статическому IP.
-- **`deploy-static-ip-vps.sh`** — скрипт развёртывания анонимного стартового сервера в 1 команду на любом Linux VPS со статическим IP (Aeza, 1984 Hosting, Njalla, FlokiNET и др.) без необходимости Tor у клиентов.
-- **`docker-compose.yml` / `cloud-init.yaml`** — готовые манифесты контейнера с `read_only: true`, `cap_drop: ALL` и `AEGIS_IP_LOGGING: "false"`.
-- **`starter-servers.json`** — подписанный список стартовых статических IP-узлов каталога `aegis-directory`.
+## 3. 🌐 `builds/server/`
+- **`aegis-serverd.exe`** — бинарный демон сервера федерации (`--bind=0.0.0.0 --port=8443`, `Zero-IP-Logs`, односторонние очереди `256..16384 B`, constant-shape `OPAQUE` 1024 B, адаптивный PoW и портал `SupporterPass`).
+- **`deploy-static-ip-vps.sh`** и **`docker-compose.yml`** — однокомандное развёртывание анонимного стартового узла на любом Linux VPS со статическим IP (`logging: driver: "none"`, `read_only: true`, `cap_drop: ALL`).

@@ -6,7 +6,6 @@ members = [
     "crates/aegis-storage",
     "crates/aegis-protocol",
     "crates/aegis-transport",
-    "crates/aegis-calls",
     "crates/aegis-server",
     "crates/aegis-directory",
     "crates/aegis-launcher",
@@ -29,7 +28,6 @@ aegis-identity = { path = "crates/aegis-identity" }
 aegis-storage = { path = "crates/aegis-storage" }
 aegis-protocol = { path = "crates/aegis-protocol" }
 aegis-transport = { path = "crates/aegis-transport" }
-aegis-calls = { path = "crates/aegis-calls" }
 aegis-server = { path = "crates/aegis-server" }
 aegis-directory = { path = "crates/aegis-directory" }
 aegis-launcher = { path = "crates/aegis-launcher" }

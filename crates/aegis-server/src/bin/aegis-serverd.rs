@@ -19,16 +19,21 @@ use std::time::Duration;
 
 fn parse_http_request(raw: &[u8]) -> Option<(&str, &str, &str)> {
     let text = core::str::from_utf8(raw).ok()?;
-    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text, ""));
+    let (head, body) = text.split_once("\r\n\r\n")?;
     let mut lines = head.lines();
     let first_line = lines.next()?.trim();
-    if first_line.is_empty() {
+    if first_line.is_empty() || first_line.chars().any(char::is_control) {
         return None;
     }
     let mut parts = first_line.split_whitespace();
     let method = parts.next()?;
     let path = parts.next()?;
-    if !path.starts_with('/') {
+    let version = parts.next()?;
+    if parts.next().is_some()
+        || !path.starts_with('/')
+        || path.len() > 256
+        || !(version == "HTTP/1.1" || version == "HTTP/1.0")
+    {
         return None;
     }
     Some((method, path, body))
@@ -155,7 +160,7 @@ fn main() {
         let _ = stream.set_read_timeout(io_timeout);
         let _ = stream.set_write_timeout(io_timeout);
         // Note: peer_addr() is intentionally NEVER inspected or logged (AGENTS.md §2.3, D-0007).
-        let mut buf = [0u8; 8192];
+        let mut buf = [0u8; 32_768];
         let Ok(n) = stream.read(&mut buf) else {
             continue;
         };
@@ -179,7 +184,7 @@ fn main() {
             _ => "Not Found",
         };
         let header = format!(
-            "HTTP/1.1 {status} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n",
             response_body.len()
         );
         let _ = stream.write_all(header.as_bytes());

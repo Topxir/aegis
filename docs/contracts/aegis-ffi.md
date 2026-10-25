@@ -31,7 +31,8 @@
 - Запрещено делать скриншоты или сохранять в системный буфер обмена чувствительные данные без явного действия пользователя.
 
 ## Зависимости
-- Внутренние модули: `aegis-crypto`, `aegis-identity`, `aegis-storage`, `aegis-protocol`, `aegis-transport`, `aegis-calls`, `aegis-server`, `aegis-directory`, `aegis-launcher`, `aegis-plugins`.
+- Внутренние модули: `aegis-crypto`, `aegis-identity`, `aegis-storage`, `aegis-protocol`, `aegis-transport`, `aegis-server`, `aegis-directory`, `aegis-launcher`, `aegis-plugins`.
 
 ## История изменений
 - `0.1` (2026-10-20, T-0002 / T-0003): Первичная спецификация контракта.
+- `0.2` (2026-10-25, T-0013 / D-0021): Удалён модуль `aegis-calls` (переход к архитектуре чистой чат-крепости без звонков), реэкспортирован `SealedSenderEnvelope`.

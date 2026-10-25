@@ -16,6 +16,8 @@ fn zeroize_bytes(buf: &mut [u8]) {
 
 fn zeroize_string(s: &mut String) {
     let mut bytes = core::mem::take(s).into_bytes();
+    let cap = bytes.capacity();
+    bytes.resize(cap, 0u8);
     zeroize_bytes(&mut bytes);
 }
 
@@ -121,7 +123,7 @@ impl EncryptedStoreHeader {
 }
 
 /// Contact record stored inside [`EncryptedVaultDb`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StoredContact {
     /// Pairwise anonymous contact identifier.
     pub contact_id: [u8; 32],
@@ -137,8 +139,31 @@ pub struct StoredContact {
     pub verified: bool,
 }
 
+impl fmt::Debug for StoredContact {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredContact")
+            .field("contact_id", &"[REDACTED]")
+            .field("display_name", &"[REDACTED]")
+            .field("peer_identity_key", &"[REDACTED]")
+            .field("send_queue_id", &"[REDACTED]")
+            .field("recv_queue_id", &"[REDACTED]")
+            .field("verified", &self.verified)
+            .finish()
+    }
+}
+
+impl Drop for StoredContact {
+    fn drop(&mut self) {
+        zeroize_bytes(&mut self.contact_id);
+        zeroize_string(&mut self.display_name);
+        zeroize_bytes(&mut self.peer_identity_key);
+        zeroize_bytes(&mut self.send_queue_id);
+        zeroize_bytes(&mut self.recv_queue_id);
+    }
+}
+
 /// Chat message record stored inside [`EncryptedVaultDb`] with optional disappearing TTL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StoredMessage {
     /// Unique message identifier.
     pub message_id: [u8; 32],
@@ -154,9 +179,30 @@ pub struct StoredMessage {
     pub expires_at_unix_secs: Option<u64>,
 }
 
+impl fmt::Debug for StoredMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredMessage")
+            .field("message_id", &"[REDACTED]")
+            .field("chat_id", &"[REDACTED]")
+            .field("sender_is_self", &self.sender_is_self)
+            .field("plaintext_body", &"[REDACTED]")
+            .field("created_at_unix_secs", &self.created_at_unix_secs)
+            .field("expires_at_unix_secs", &self.expires_at_unix_secs)
+            .finish()
+    }
+}
+
+impl Drop for StoredMessage {
+    fn drop(&mut self) {
+        zeroize_bytes(&mut self.message_id);
+        zeroize_bytes(&mut self.chat_id);
+        zeroize_string(&mut self.plaintext_body);
+    }
+}
+
 /// Device-only encrypted note ("Избранное" / Favorites, PLAN.md §14).
 /// Never leaves the device over the network unless explicitly exported in an encrypted backup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EncryptedNote {
     /// Unique note identifier.
     pub note_id: [u8; 32],
@@ -168,10 +214,28 @@ pub struct EncryptedNote {
     pub updated_at_unix_secs: u64,
 }
 
+impl fmt::Debug for EncryptedNote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptedNote")
+            .field("note_id", &"[REDACTED]")
+            .field("title", &"[REDACTED]")
+            .field("body", &"[REDACTED]")
+            .field("updated_at_unix_secs", &self.updated_at_unix_secs)
+            .finish()
+    }
+}
+
+impl Drop for EncryptedNote {
+    fn drop(&mut self) {
+        zeroize_bytes(&mut self.note_id);
+        zeroize_string(&mut self.title);
+        zeroize_string(&mut self.body);
+    }
+}
+
 /// Encrypted local database (`EncryptedVaultDb`) backed by `DB_KEY` and ChaCha20-Poly1305 AEAD.
 /// Supports contacts, disappearing messages, local full-text search, device-only notes,
 /// encrypted backup export/import, and instant `crypto_wipe` (PLAN.md §9, §14).
-#[derive(Debug)]
 pub struct EncryptedVaultDb {
     header: EncryptedStoreHeader,
     record_counter: u64,
@@ -179,6 +243,23 @@ pub struct EncryptedVaultDb {
     contacts: Vec<StoredContact>,
     messages: Vec<StoredMessage>,
     notes: Vec<EncryptedNote>,
+}
+
+impl fmt::Debug for EncryptedVaultDb {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptedVaultDb")
+            .field("wiped", &self.header.is_wiped())
+            .field("contacts_count", &self.contacts.len())
+            .field("messages_count", &self.messages.len())
+            .field("notes_count", &self.notes.len())
+            .finish()
+    }
+}
+
+impl Drop for EncryptedVaultDb {
+    fn drop(&mut self) {
+        self.crypto_wipe();
+    }
 }
 
 impl EncryptedVaultDb {
@@ -284,6 +365,8 @@ impl EncryptedVaultDb {
         let ct = res?;
 
         if let Some(slot) = self.kv_ciphertext.iter_mut().find(|(k, _, _)| k == key) {
+            zeroize_bytes(&mut slot.1);
+            zeroize_bytes(&mut slot.2);
             slot.1 = nonce;
             slot.2 = ct;
         } else {
@@ -313,13 +396,15 @@ impl EncryptedVaultDb {
     /// # Errors
     /// Returns [`StorageError::StorageLockedOrWiped`] if wiped, or [`StorageError::CorruptedRecord`]
     /// if any contact identifier or queue/key is all-zero.
-    pub fn upsert_contact(&mut self, contact: StoredContact) -> Result<(), StorageError> {
+    pub fn upsert_contact(&mut self, mut contact: StoredContact) -> Result<(), StorageError> {
         self.check_unlocked()?;
         if contact.contact_id == [0u8; 32]
             || contact.peer_identity_key == [0u8; 32]
             || contact.send_queue_id == [0u8; 32]
             || contact.recv_queue_id == [0u8; 32]
+            || contact.send_queue_id == contact.recv_queue_id
         {
+            zeroize_string(&mut contact.display_name);
             return Err(StorageError::CorruptedRecord);
         }
         if let Some(existing) = self
@@ -327,6 +412,10 @@ impl EncryptedVaultDb {
             .iter_mut()
             .find(|c| c.contact_id == contact.contact_id)
         {
+            zeroize_string(&mut existing.display_name);
+            zeroize_bytes(&mut existing.peer_identity_key);
+            zeroize_bytes(&mut existing.send_queue_id);
+            zeroize_bytes(&mut existing.recv_queue_id);
             *existing = contact;
         } else {
             self.contacts.push(contact);
@@ -348,9 +437,10 @@ impl EncryptedVaultDb {
     /// # Errors
     /// Returns [`StorageError::StorageLockedOrWiped`] if wiped, or [`StorageError::CorruptedRecord`]
     /// if `message_id` or `chat_id` is all-zero or `expires_at_unix_secs <= created_at_unix_secs`.
-    pub fn insert_message(&mut self, message: StoredMessage) -> Result<(), StorageError> {
+    pub fn insert_message(&mut self, mut message: StoredMessage) -> Result<(), StorageError> {
         self.check_unlocked()?;
         if message.message_id == [0u8; 32] || message.chat_id == [0u8; 32] {
+            zeroize_string(&mut message.plaintext_body);
             return Err(StorageError::CorruptedRecord);
         }
         if let Some(existing) = self
@@ -358,6 +448,8 @@ impl EncryptedVaultDb {
             .iter_mut()
             .find(|m| m.message_id == message.message_id)
         {
+            zeroize_string(&mut existing.plaintext_body);
+            zeroize_bytes(&mut existing.chat_id);
             *existing = message;
         } else {
             self.messages.push(message);
@@ -394,10 +486,20 @@ impl EncryptedVaultDb {
     pub fn purge_expired_messages(&mut self, now_unix_secs: u64) -> Result<usize, StorageError> {
         self.check_unlocked()?;
         let before = self.messages.len();
-        self.messages.retain(|m| {
-            m.expires_at_unix_secs
-                .is_none_or(|exp| exp > now_unix_secs && exp > m.created_at_unix_secs)
-        });
+        let mut kept = Vec::with_capacity(before);
+        for mut m in core::mem::take(&mut self.messages) {
+            let active = m
+                .expires_at_unix_secs
+                .is_none_or(|exp| exp > now_unix_secs && exp > m.created_at_unix_secs);
+            if active {
+                kept.push(m);
+            } else {
+                zeroize_bytes(&mut m.message_id);
+                zeroize_bytes(&mut m.chat_id);
+                zeroize_string(&mut m.plaintext_body);
+            }
+        }
+        self.messages = kept;
         Ok(before.saturating_sub(self.messages.len()))
     }
 
@@ -411,20 +513,26 @@ impl EncryptedVaultDb {
         now_unix_secs: u64,
     ) -> Result<Vec<StoredMessage>, StorageError> {
         self.check_unlocked()?;
-        let q = query.trim().to_lowercase();
+        let mut q = query.trim().to_lowercase();
         if q.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(self
-            .messages
-            .iter()
-            .filter(|m| {
-                m.expires_at_unix_secs
-                    .is_none_or(|exp| exp > now_unix_secs && exp > m.created_at_unix_secs)
-                    && m.plaintext_body.to_lowercase().contains(&q)
-            })
-            .cloned()
-            .collect())
+        let mut results = Vec::new();
+        for m in &self.messages {
+            let active = m
+                .expires_at_unix_secs
+                .is_none_or(|exp| exp > now_unix_secs && exp > m.created_at_unix_secs);
+            if active {
+                let mut lower_body = m.plaintext_body.to_lowercase();
+                let matched = lower_body.contains(&q);
+                zeroize_string(&mut lower_body);
+                if matched {
+                    results.push(m.clone());
+                }
+            }
+        }
+        zeroize_string(&mut q);
+        Ok(results)
     }
 
     /// Saves a device-only encrypted note ("Избранное", PLAN.md §14).
@@ -432,12 +540,16 @@ impl EncryptedVaultDb {
     /// # Errors
     /// Returns [`StorageError::StorageLockedOrWiped`] if wiped, or [`StorageError::CorruptedRecord`]
     /// if `note_id` is all-zero.
-    pub fn put_local_note(&mut self, note: EncryptedNote) -> Result<(), StorageError> {
+    pub fn put_local_note(&mut self, mut note: EncryptedNote) -> Result<(), StorageError> {
         self.check_unlocked()?;
         if note.note_id == [0u8; 32] {
+            zeroize_string(&mut note.title);
+            zeroize_string(&mut note.body);
             return Err(StorageError::CorruptedRecord);
         }
         if let Some(existing) = self.notes.iter_mut().find(|n| n.note_id == note.note_id) {
+            zeroize_string(&mut existing.title);
+            zeroize_string(&mut existing.body);
             *existing = note;
         } else {
             self.notes.push(note);
@@ -739,6 +851,7 @@ impl EncryptedVaultDb {
             return Err(StorageError::CorruptedRecord);
         }
 
+        db.record_counter = (db.contacts.len() + db.notes.len() + db.messages.len()) as u64;
         Ok(db)
     }
 }
@@ -1032,5 +1145,39 @@ mod tests {
                 .unwrap_err(),
             StorageError::CorruptedRecord
         );
+    }
+
+    #[test]
+    fn b0070_storage_redacts_debug_rejects_colliding_queues_and_zeroizes_purged_messages() {
+        let mut db = EncryptedVaultDb::open(SCHEMA_VERSION, vec![0x77; 32]).unwrap();
+        // Send queue == recv queue must be rejected (unidirectional queue isolation)
+        assert_eq!(
+            db.upsert_contact(StoredContact {
+                contact_id: [0x11; 32],
+                display_name: "secret-contact".to_owned(),
+                peer_identity_key: [0x22; 32],
+                send_queue_id: [0x33; 32],
+                recv_queue_id: [0x33; 32],
+                verified: true,
+            }),
+            Err(StorageError::CorruptedRecord)
+        );
+
+        let msg = StoredMessage {
+            message_id: [0x09; 32],
+            chat_id: [0xAA; 32],
+            sender_is_self: true,
+            plaintext_body: "super-secret-disappearing-text".to_owned(),
+            created_at_unix_secs: 100,
+            expires_at_unix_secs: Some(200),
+        };
+        let msg_dbg = format!("{msg:?}");
+        assert!(!msg_dbg.contains("super-secret"));
+        assert!(msg_dbg.contains("[REDACTED]"));
+
+        db.insert_message(msg).unwrap();
+        let db_dbg = format!("{db:?}");
+        assert!(!db_dbg.contains("super-secret"));
+        assert_eq!(db.purge_expired_messages(250).unwrap(), 1);
     }
 }
