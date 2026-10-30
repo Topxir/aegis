@@ -233,8 +233,10 @@ Mixnet — после MVP, как **opt-in paranoid mode**, только есл�
 
 ## Что осталось сделать
 
-1. Сделать shortlist fiscal sponsor/партнёрских НКО и проверить их
-   требования к открытости кода, юрлицу и отчётности.
+1. Shortlist fiscal sponsor/партнёрских НКО готов —
+   [`FISCAL_SPONSOR_SHORTLIST.md`](FISCAL_SPONSOR_SHORTLIST.md); выбрать
+   кандидата и отправить запросы после решения владельца о раскрытии
+   legal identity.
 2. Подготовить concept note, бюджет и milestones для NLnet/OTF/Prototype
    Fund (см. `GRANT_PLAN.md`).
 3. Получить юридическую консультацию по юрисдикции, налогам и
