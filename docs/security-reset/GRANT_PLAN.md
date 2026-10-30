@@ -174,7 +174,9 @@ governance-вариант.
    [`FISCAL_SPONSOR_SHORTLIST.md`](FISCAL_SPONSOR_SHORTLIST.md); выбрать
    2–3 кандидата и отправить запросы после решения о раскрытии legal
    identity.
-3. Написать concept note 2–3 страницы.
+3. Concept note 2–3 страницы — черновик
+   [`GRANT_CONCEPT_NOTE.md`](GRANT_CONCEPT_NOTE.md); утвердить бюджет и
+   публичность.
 4. Проверить актуальные условия NLnet/OTF/Prototype Fund.
 5. Получить юридическую консультацию по юрформе/юрисдикции.
 6. После выбора fiscal sponsor — подать первую заявку.

@@ -46,6 +46,9 @@
 - ✅ Подготовлен shortlist `docs/security-reset/FISCAL_SPONSOR_SHORTLIST.md`:
   CCT, SPI, OSC, The Commons Conservancy, MAGIC Grants; вопросы и шаблон
   письма. Отправка — после решения владельца о раскрытии legal identity.
+- ✅ Подготовлен черновик `docs/security-reset/GRANT_CONCEPT_NOTE.md`
+  (EN): проблема, решение, threat model, milestones, бюджет, честные
+  ограничения.
 
 ## В работе
 - **T-0017 (Phase 0, планирование)**: утвердить бюджет/подход к
