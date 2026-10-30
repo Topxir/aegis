@@ -83,6 +83,7 @@
 | [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) | Компоненты, границы доверия, деплой, сборка, структура репозитория |
 | [`ROADMAP_V2.md`](ROADMAP_V2.md) | Поэтапный план для соло-разработчика, критерии выхода, риски |
 | [`../adr/README.md`](../adr/README.md) | ADR на зависимости: версии, лицензии, аудит, альтернативы |
+| [`PHASE0_Q23_Q28.md`](PHASE0_Q23_Q28.md) | Разбор Q-23..Q-28: грант, аудитор, юрисдикция, mixnet, key transparency, push |
 | [`../tasks/T-0017.md`](../tasks/T-0017.md) | Задача на security reset |
 
 ## Честный статус
