@@ -49,6 +49,8 @@
 - ✅ Подготовлен черновик `docs/security-reset/GRANT_CONCEPT_NOTE.md`
   (EN): проблема, решение, threat model, milestones, бюджет, честные
   ограничения.
+- ✅ Подготовлен `docs/security-reset/LEGAL_CONSULTATION_BRIEF.md`:
+  вопросы юристу по юрформе, гранту, псевдонимности, liability и IP.
 
 ## В работе
 - **T-0017 (Phase 0, планирование)**: утвердить бюджет/подход к

@@ -178,7 +178,9 @@ governance-вариант.
    [`GRANT_CONCEPT_NOTE.md`](GRANT_CONCEPT_NOTE.md); утвердить бюджет и
    публичность.
 4. Проверить актуальные условия NLnet/OTF/Prototype Fund.
-5. Получить юридическую консультацию по юрформе/юрисдикции.
+5. Brief для юриста готов —
+   [`LEGAL_CONSULTATION_BRIEF.md`](LEGAL_CONSULTATION_BRIEF.md); получить
+   консультацию по юрформе/юрисдикции.
 6. После выбора fiscal sponsor — подать первую заявку.
 
 ## 10. Что не делаем

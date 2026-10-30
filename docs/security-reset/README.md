@@ -87,6 +87,7 @@
 | [`GRANT_PLAN.md`](GRANT_PLAN.md) | Черновик грантовой заявки: фонды, бюджет, milestones, fiscal sponsor |
 | [`FISCAL_SPONSOR_SHORTLIST.md`](FISCAL_SPONSOR_SHORTLIST.md) | Кандидаты fiscal sponsor, fees, вопросы и шаблон письма |
 | [`GRANT_CONCEPT_NOTE.md`](GRANT_CONCEPT_NOTE.md) | Черновик concept note для фонда: проблема, решение, бюджет, milestones |
+| [`LEGAL_CONSULTATION_BRIEF.md`](LEGAL_CONSULTATION_BRIEF.md) | Вопросы юристу: юрформа, грант, псевдонимность, liability, IP |
 | [`../tasks/T-0017.md`](../tasks/T-0017.md) | Задача на security reset |
 
 ## Честный статус
