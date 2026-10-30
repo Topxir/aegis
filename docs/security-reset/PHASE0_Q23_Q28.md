@@ -237,9 +237,12 @@ Mixnet — после MVP, как **opt-in paranoid mode**, только есл�
    [`FISCAL_SPONSOR_SHORTLIST.md`](FISCAL_SPONSOR_SHORTLIST.md); выбрать
    кандидата и отправить запросы после решения владельца о раскрытии
    legal identity.
-2. Подготовить concept note, бюджет и milestones для NLnet/OTF/Prototype
-   Fund (см. `GRANT_PLAN.md`).
-3. Получить юридическую консультацию по юрисдикции, налогам и
-   liability, прежде чем создавать свою юрформу.
+2. Черновики concept note, бюджета и milestones готовы —
+   [`GRANT_CONCEPT_NOTE.md`](GRANT_CONCEPT_NOTE.md),
+   [`GRANT_PLAN.md`](GRANT_PLAN.md); утвердить бюджет и публичность.
+3. Brief для юриста готов —
+   [`LEGAL_CONSULTATION_BRIEF.md`](LEGAL_CONSULTATION_BRIEF.md); получить
+   консультацию по юрисдикции, налогам и liability, прежде чем создавать
+   свою юрформу.
 4. Решить, допустим ли отдельный публичный docs-репозиторий до internal
    red team.
