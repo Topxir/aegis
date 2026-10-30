@@ -37,19 +37,25 @@
 - ✅ Подготовлены ADR `docs/adr/ADR-0001..ADR-0010` на зависимости:
   libsignal, OpenMLS, rustls, arti-client, opaque-ke, argon2,
   SQLCipher/rusqlite, OHTTP, VOPRF, ed25519-dalek.
+- ✅ **Q-23..Q-28 утверждены** владельцем 2026-10-30 (`D-0027`):
+  грант, независимый сборщик/аудитор, fiscal sponsor, mixnet после MVP,
+  key transparency после MVP/аудита, UnifiedPush/ntfy.
+- ✅ Подготовлен черновик `docs/security-reset/GRANT_PLAN.md`: целевые
+  фонды, вилка бюджета, milestones, критерии fiscal sponsor, публичность
+  репозитория.
 
 ## В работе
-- **T-0017 (Phase 0, планирование)**: ADR готовы; подготовлен разбор
-  Q-23..Q-28 (`docs/security-reset/PHASE0_Q23_Q28.md`) — ждёт решения
-  владельца. Далее: лицензии, пиннинг libsignal, гранты. Код не меняется
-  до отдельной задачи Phase 1.
+- **T-0017 (Phase 0, планирование)**: утвердить бюджет/подход к
+  публичности `GRANT_PLAN.md`; shortlist fiscal sponsor; юридическая
+  консультация; закрыть подвопросы ADR. Код не меняется до отдельной
+  задачи Phase 1.
 
 ## Блокеры
 - Внешний аудит — до 1.0, после финансирования; public alpha — после
   внутреннего red team.
 - Default MSVC build: отсутствует `link.exe`; GNU toolchain работает.
-- Открытые вопросы Q-23..Q-28 (грант, независимый сборщик, юрисдикция,
-  mixnet, key transparency, Android push).
+- Подача гранта блокируется выбором fiscal sponsor и юридической
+  консультацией по юрформе/юрисдикции.
 - libsignal vendored vs git dependency; провайдер rustls; параметры
   Argon2id; вариант SQLCipher; ciphersuite VOPRF — закрываются в Phase 1/2
   spike (см. `docs/adr/README.md`).

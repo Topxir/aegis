@@ -21,14 +21,19 @@ P2P после MVP; группы ≤ 20; OPAQUE opt-in; только явный 
       opaque-ke, argon2, sqlcipher, ohttp, voprf, ed25519-dalek (инфра).
 - [x] Проверить лицензии и совместимость с AGPL; зафиксировать commit/hash
       libsignal (кандидат `v0.106.1`, `904c8dc...`).
-- [ ] Решить: libsignal vendored или git dependency.
+- [ ] Решить: libsignal vendored или git dependency (Phase 1 spike).
 - [x] Решить: ML-KEM параметр — брать из libsignal, не подменять.
-- [ ] Решить: стабильный inbox ID или per-contact.
-- [ ] Решить: формат Android push (UnifiedPush/ntfy/WebSocket).
-- [ ] Решить: оператор account service и OHTTP gateway.
+- [x] Решить: стабильный inbox ID или per-contact — в MVP стабильный,
+      per-contact позже (`PROTOCOL_V2.md` §5).
+- [x] Решить: формат Android push — UnifiedPush + self-hosted ntfy через
+      Tor; foreground WebSocket fallback; FCM не по умолчанию (Q-28).
+- [ ] Решить: оператор account service и OHTTP gateway (Phase 2).
 - [x] Создать ветку `security/t0017-plan` только с документами.
 - [x] Обновить `STATE.md`, `DECISIONS.md`, `QUESTIONS.md`.
-- [ ] Начать заявки на грант (NLnet/OTF/Prototype Fund), не дожидаясь кода.
+- [x] Начать подготовку грантовых заявок (NLnet/OTF/Prototype Fund), не
+      дожидаясь кода; черновик — `GRANT_PLAN.md` (`D-0027`).
+- [ ] Выбрать fiscal sponsor/партнёрскую НКО и получить юридическую
+      консультацию по юрформе/юрисдикции (Q-25).
 
 **Выход:** владелец утвердил документы; нет открытых критических вопросов.
 

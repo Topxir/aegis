@@ -516,14 +516,29 @@ padding: zero bytes
 
 ## 15. Открытые вопросы
 
+Статус на 2026-10-30: п.3–6 и 8–10 закрыты решениями `D-0027`
+(`QUESTIONS.md` Q-23..Q-28); п.1, 2, 7 остаются.
+
 1. libsignal: vendored subtree или git dependency с pinned commit? Как
-   собирать на Android?
-2. ML-KEM параметр: ровно тот, что в libsignal, или 768? Не смешивать.
-3. Стабильный inbox ID в MVP или per-contact сразу? Сейчас — стабильный.
-4. Key transparency сейчас или после аудита?
-5. Mixnet (Nym/Loopix) как paranoid mode или достаточно Tor?
-6. Android push: UnifiedPush/ntfy или свой WebSocket через Tor?
-7. Кто оператор account service и OHTTP gateway? Как не связать их с relay?
-8. Кто независимый сборщик/аудитор при соло-разработке?
-9. Какой бюджет на аудит и когда его искать?
-10. Юрисдикция и юридическая форма проекта.
+   собирать на Android? — **открыто**, Phase 1 spike.
+2. ML-KEM параметр: ровно тот, что в libsignal, или 768? Не смешивать. —
+   **открыто**, Phase 1 spike.
+3. Стабильный inbox ID в MVP или per-contact сразу? — **решено:** в MVP
+   стабильный, per-contact позже (§5).
+4. Key transparency сейчас или после аудита? — **решено:** после
+   MVP/аудита; в MVP — safety number + key-change warning (Q-27).
+5. Mixnet (Nym/Loopix) как paranoid mode или достаточно Tor? — **решено:**
+   в MVP Tor + OHTTP + cover traffic; mixnet после MVP, opt-in (Q-26).
+6. Android push: UnifiedPush/ntfy или свой WebSocket через Tor? —
+   **решено:** UnifiedPush + self-hosted ntfy через Tor; foreground
+   WebSocket fallback; FCM не по умолчанию (Q-28).
+7. Кто оператор account service и OHTTP gateway? Как не связать их с
+   relay? — **открыто**, Phase 2; отдельный оператор, минимум данных.
+8. Кто независимый сборщик/аудитор при соло-разработке? — **решено:** два
+   независимых reproducible-сборщика (минимум один — не автор) + внешняя
+   аудиторская фирма до 1.0 (Q-24).
+9. Какой бюджет на аудит и когда его искать? — **решено:** готовить
+   заявку сейчас; бюджет и milestones — `GRANT_PLAN.md` (Q-23).
+10. Юрисдикция и юридическая форма проекта. — **решено:** первая заявка
+    через fiscal sponsor/партнёрскую НКО; свою юрформу не создавать до
+    юридической консультации (Q-25).

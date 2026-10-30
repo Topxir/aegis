@@ -84,6 +84,7 @@
 | [`ROADMAP_V2.md`](ROADMAP_V2.md) | Поэтапный план для соло-разработчика, критерии выхода, риски |
 | [`../adr/README.md`](../adr/README.md) | ADR на зависимости: версии, лицензии, аудит, альтернативы |
 | [`PHASE0_Q23_Q28.md`](PHASE0_Q23_Q28.md) | Разбор Q-23..Q-28: грант, аудитор, юрисдикция, mixnet, key transparency, push |
+| [`GRANT_PLAN.md`](GRANT_PLAN.md) | Черновик грантовой заявки: фонды, бюджет, milestones, fiscal sponsor |
 | [`../tasks/T-0017.md`](../tasks/T-0017.md) | Задача на security reset |
 
 ## Честный статус
@@ -114,6 +115,8 @@
    `PROTOCOL_V2.md`, `ARCHITECTURE_V2.md`, `ROADMAP_V2.md`.
 2. ✅ Создана ветка `security/t0017-plan` (только документы).
 3. 🔧 Phase 0: ADR на зависимости (`docs/adr/`), проверка лицензий и
-   пиннинг libsignal, ответы на оставшиеся вопросы.
+   пиннинг libsignal; Q-23..Q-28 утверждены (`D-0027`); черновик
+   `GRANT_PLAN.md` готов. Далее — fiscal sponsor, юрконсультация и
+   подвопросы ADR.
 4. Любая реализация — только после отдельной задачи Phase 1 и ADR на
    каждую зависимость.
