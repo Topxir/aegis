@@ -15,19 +15,19 @@ P2P после MVP; группы ≤ 20; OPAQUE opt-in; только явный 
 **Цель:** зафиксировать модель угроз, протокол, архитектуру и зависимости.
 Код не пишем.
 
-- [ ] Утвердить `THREAT_MODEL_V2.md`, `PROTOCOL_V2.md`,
-      `ARCHITECTURE_V2.md`, `ROADMAP_V2.md`.
-- [ ] ADR на каждую зависимость: libsignal, OpenMLS, rustls, arti,
+- [x] Утвердить `THREAT_MODEL_V2.md`, `PROTOCOL_V2.md`,
+      `ARCHITECTURE_V2.md`, `ROADMAP_V2.md` (2026-10-30).
+- [x] ADR на каждую зависимость: libsignal, OpenMLS, rustls, arti,
       opaque-ke, argon2, sqlcipher, ohttp, voprf, ed25519-dalek (инфра).
-- [ ] Проверить лицензии и совместимость с AGPL; зафиксировать commit/hash
-      libsignal.
+- [x] Проверить лицензии и совместимость с AGPL; зафиксировать commit/hash
+      libsignal (кандидат `v0.106.1`, `904c8dc...`).
 - [ ] Решить: libsignal vendored или git dependency.
-- [ ] Решить: ML-KEM параметр (libsignal vs 768).
+- [x] Решить: ML-KEM параметр — брать из libsignal, не подменять.
 - [ ] Решить: стабильный inbox ID или per-contact.
 - [ ] Решить: формат Android push (UnifiedPush/ntfy/WebSocket).
 - [ ] Решить: оператор account service и OHTTP gateway.
-- [ ] Создать ветку `security/t0017-plan` только с документами.
-- [ ] Обновить `STATE.md`, `DECISIONS.md`, `QUESTIONS.md`.
+- [x] Создать ветку `security/t0017-plan` только с документами.
+- [x] Обновить `STATE.md`, `DECISIONS.md`, `QUESTIONS.md`.
 - [ ] Начать заявки на грант (NLnet/OTF/Prototype Fund), не дожидаясь кода.
 
 **Выход:** владелец утвердил документы; нет открытых критических вопросов.
