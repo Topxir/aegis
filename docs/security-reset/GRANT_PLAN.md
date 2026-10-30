@@ -91,6 +91,11 @@ Fiscal sponsor позволяет получить грант и заключи�
 дешевле, чем регистрировать НКО/LLC, но не бесплатно и не без потери
 контроля.
 
+Shortlist кандидатов, fees, red flags и шаблон письма —
+[`FISCAL_SPONSOR_SHORTLIST.md`](FISCAL_SPONSOR_SHORTLIST.md). Приоритет:
+CCT, затем SPI, fallback — OSC; The Commons Conservancy — долгосрочный
+governance-вариант.
+
 ### Критерии выбора
 
 - опыт с open-source/privacy/security проектами;

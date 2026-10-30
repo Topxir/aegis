@@ -85,6 +85,7 @@
 | [`../adr/README.md`](../adr/README.md) | ADR на зависимости: версии, лицензии, аудит, альтернативы |
 | [`PHASE0_Q23_Q28.md`](PHASE0_Q23_Q28.md) | Разбор Q-23..Q-28: грант, аудитор, юрисдикция, mixnet, key transparency, push |
 | [`GRANT_PLAN.md`](GRANT_PLAN.md) | Черновик грантовой заявки: фонды, бюджет, milestones, fiscal sponsor |
+| [`FISCAL_SPONSOR_SHORTLIST.md`](FISCAL_SPONSOR_SHORTLIST.md) | Кандидаты fiscal sponsor, fees, вопросы и шаблон письма |
 | [`../tasks/T-0017.md`](../tasks/T-0017.md) | Задача на security reset |
 
 ## Честный статус
