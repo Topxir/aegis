@@ -263,6 +263,12 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
                     && bytes[j + 1].is_ascii_digit()
                 {
                     j += 1;
+                } else if b == 0xC2
+                    && j + 2 < bytes.len()
+                    && bytes[j + 1] == 0xA0
+                    && bytes[j + 2].is_ascii_digit()
+                {
+                    j += 2;
                 } else {
                     break;
                 }
@@ -455,16 +461,21 @@ pub fn scan_message_for_leaks(message: &str, own_login_nickname: Option<&str>) -
     }
 
     // 3b. Scan for PEM private key headers without embedding literal PEM header strings in source
-    if let (Some(begin_pos), Some(end_rel)) =
-        (message.find("-----BEGIN "), message.find("PRIVATE KEY"))
-    {
-        if begin_pos < end_rel {
-            let tail_end = (end_rel + "PRIVATE KEY-----".len()).min(message.len());
-            warnings.push(LeakWarning {
-                kind: LeakKind::CryptoSeedOrPrivateKey,
-                start_byte: begin_pos,
-                end_byte: tail_end,
-            });
+    if let Some(begin_pos) = message.find("-----BEGIN ") {
+        if let Some(rel_end) = message[begin_pos..].find("PRIVATE KEY") {
+            let end_pos = begin_pos + rel_end;
+            let mut tail_end = (end_pos + "PRIVATE KEY".len()).min(message.len());
+            let max_tail = (end_pos + "PRIVATE KEY-----".len()).min(message.len());
+            while tail_end < max_tail && message.as_bytes()[tail_end] == b'-' {
+                tail_end += 1;
+            }
+            if message.is_char_boundary(begin_pos) && message.is_char_boundary(tail_end) {
+                warnings.push(LeakWarning {
+                    kind: LeakKind::CryptoSeedOrPrivateKey,
+                    start_byte: begin_pos,
+                    end_byte: tail_end,
+                });
+            }
         }
     }
 
@@ -917,7 +928,10 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
         let mut stripped = 0usize;
         let mut i = 8usize;
         let mut chunk_index = 0usize;
+        let mut saw_plte = false;
+        let mut saw_trns = false;
         let mut saw_idat = false;
+        let mut idat_finished = false;
         let mut saw_iend = false;
 
         while i < media_bytes.len() {
@@ -954,11 +968,29 @@ pub fn strip_media_metadata(media_bytes: &[u8]) -> Result<CleanedMedia, Protocol
                 return Err(ProtocolError::MalformedPaddedFrame);
             }
 
-            if chunk_type == b"IDAT" {
-                if data_len == 0 {
+            if chunk_type == b"PLTE" {
+                if saw_idat
+                    || saw_plte
+                    || saw_trns
+                    || data_len == 0
+                    || !data_len.is_multiple_of(3)
+                    || data_len > 768
+                {
+                    return Err(ProtocolError::MalformedPaddedFrame);
+                }
+                saw_plte = true;
+            } else if chunk_type == b"tRNS" {
+                if saw_idat || saw_trns || data_len == 0 {
+                    return Err(ProtocolError::MalformedPaddedFrame);
+                }
+                saw_trns = true;
+            } else if chunk_type == b"IDAT" {
+                if data_len == 0 || idat_finished {
                     return Err(ProtocolError::MalformedPaddedFrame);
                 }
                 saw_idat = true;
+            } else if saw_idat {
+                idat_finished = true;
             }
 
             // Strict whitelist of safe rendering chunks; strip all ancillary metadata/fingerprinting chunks
@@ -1201,23 +1233,61 @@ pub fn hex_decode_bytes(hex_str: &str) -> Result<Vec<u8>, ProtocolError> {
     Ok(out)
 }
 
+/// Normalizes a shared channel code by trimming whitespace and stripping optional
+/// `"queue://"` or `"aegis://"` scheme prefixes so Desktop, Android, and CLI always derive identical keys.
+#[must_use]
+pub fn normalize_channel_code(shared_channel_code: &str) -> &str {
+    let trimmed = shared_channel_code.trim();
+    if let Some(rest) = trimmed.strip_prefix("queue://") {
+        rest.trim()
+    } else if let Some(rest) = trimmed.strip_prefix("aegis://") {
+        rest.trim()
+    } else {
+        trimmed
+    }
+}
+
+/// Number of iterative SHA-256 key-stretching rounds for cross-border channel codes (D-0023, B-0086).
+pub const CHANNEL_KDF_ROUNDS: u16 = 4096;
+
 /// Derives a deterministic 32-byte anonymous `queue_id`, 32-byte `channel_key`, and 64-char hex queue tag
-/// from a shared channel code or invite passphrase so two peers in any countries can communicate E2EE.
+/// from a shared channel code or invite passphrase using 4096 rounds of SHA-256 key stretching (D-0023, B-0086).
 #[must_use]
 pub fn derive_channel_key_and_queue(shared_channel_code: &str) -> ([u8; 32], [u8; 32], String) {
-    let clean = shared_channel_code.trim();
-    let mut q_preimage = Vec::with_capacity(22 + clean.len());
-    q_preimage.extend_from_slice(b"Aegis-ChannelQueue-v1:");
-    q_preimage.extend_from_slice(clean.as_bytes());
+    let clean = normalize_channel_code(shared_channel_code);
+    let mut code_digest = sha256(clean.as_bytes());
+
+    let mut seed_init = [0u8; 21 + 32];
+    seed_init[0..21].copy_from_slice(b"Aegis-ChannelSeed-v2:");
+    seed_init[21..53].copy_from_slice(&code_digest);
+    let mut acc = sha256(&seed_init);
+    zeroize_bytes(&mut seed_init);
+
+    let mut round_block = [0u8; 66];
+    round_block[32..64].copy_from_slice(&code_digest);
+    for round in 0..CHANNEL_KDF_ROUNDS {
+        round_block[0..32].copy_from_slice(&acc);
+        round_block[64..66].copy_from_slice(&round.to_be_bytes());
+        acc = sha256(&round_block);
+    }
+    zeroize_bytes(&mut round_block);
+    zeroize_bytes(&mut code_digest);
+
+    let mut q_preimage = [0u8; 22 + 32];
+    q_preimage[0..22].copy_from_slice(b"Aegis-ChannelQueue-v2:");
+    q_preimage[22..54].copy_from_slice(&acc);
     let mut queue_id = sha256(&q_preimage);
+    zeroize_bytes(&mut q_preimage);
     if queue_id == [0u8; 32] {
         queue_id[0] = 1;
     }
 
-    let mut k_preimage = Vec::with_capacity(24 + clean.len());
-    k_preimage.extend_from_slice(b"Aegis-ChannelAEADKey-v1:");
-    k_preimage.extend_from_slice(clean.as_bytes());
+    let mut k_preimage = [0u8; 24 + 32];
+    k_preimage[0..24].copy_from_slice(b"Aegis-ChannelAEADKey-v2:");
+    k_preimage[24..56].copy_from_slice(&acc);
     let mut channel_key = sha256(&k_preimage);
+    zeroize_bytes(&mut k_preimage);
+    zeroize_bytes(&mut acc);
     if channel_key == [0u8; 32] {
         channel_key[0] = 1;
     }
@@ -1225,8 +1295,37 @@ pub fn derive_channel_key_and_queue(shared_channel_code: &str) -> ([u8; 32], [u8
     (queue_id, channel_key, queue_hex)
 }
 
+/// Derives a secret 32-byte `read_token` for polling/draining `queue_id` that cannot be computed
+/// from `queue_id` alone (preventing unauthenticated queue draining by third parties who only know `queue_id`).
+#[must_use]
+pub fn derive_queue_read_token(queue_id: &[u8; 32], channel_key: &[u8; 32]) -> [u8; 32] {
+    let mut preimage = [0u8; 24 + 64];
+    preimage[0..24].copy_from_slice(b"Aegis-QueueReadToken-v2:");
+    preimage[24..56].copy_from_slice(queue_id);
+    preimage[56..88].copy_from_slice(channel_key);
+    let mut token = sha256(&preimage);
+    zeroize_bytes(&mut preimage);
+    if token == [0u8; 32] {
+        token[0] = 1;
+    }
+    token
+}
+
+/// Computes the public 32-byte authentication verifier `auth_hash = SHA-256("aegis-inbox-auth-v2:" || read_token)`
+/// stored by the server to authenticate `/api/v1/queue/poll` requests without storing `read_token` in cleartext.
+#[must_use]
+pub fn compute_inbox_auth_hash(read_token: &[u8; 32]) -> [u8; 32] {
+    let mut preimage = [0u8; 20 + 32];
+    preimage[0..20].copy_from_slice(b"aegis-inbox-auth-v2:");
+    preimage[20..52].copy_from_slice(read_token);
+    let out = sha256(&preimage);
+    zeroize_bytes(&mut preimage);
+    out
+}
+
 /// Seals a UTF-8 message into a fixed-bucket (`256`..`16384` B) RFC 8439 ChaCha20-Poly1305 encrypted capsule
-/// (`[u16 BE len]["AEGCAP1" || nonce (12B) || ciphertext_and_tag][0x00...]`), interoperable between Desktop and Android.
+/// using **Pad-Before-Encrypt** (`[12B nonce][AEAD_SEAL(key, nonce, AAD = queue_id || bucket_size_be32, "AEGCAP1" || u16_be_len || utf8 || 0x00...)]`),
+/// hiding message length, magic headers, and padding from DPI and server operators (D-0023, B-0086).
 ///
 /// # Errors
 /// Fail-closed: rejects empty channel codes, empty messages, all-zero nonces, or oversized payloads.
@@ -1235,49 +1334,91 @@ pub fn seal_cross_border_capsule(
     nonce: &[u8; 12],
     plaintext_utf8: &str,
 ) -> Result<Vec<u8>, ProtocolError> {
-    if shared_channel_code.trim().is_empty() || plaintext_utf8.is_empty() || *nonce == [0u8; 12] {
+    let clean = normalize_channel_code(shared_channel_code);
+    let pt_bytes = plaintext_utf8.as_bytes();
+    if clean.is_empty() || pt_bytes.is_empty() || *nonce == [0u8; 12] {
         return Err(ProtocolError::InvalidReplyQueueId);
     }
-    let (queue_id, mut channel_key, _) = derive_channel_key_and_queue(shared_channel_code);
-    let ct_res = aead_seal(&channel_key, nonce, &queue_id, plaintext_utf8.as_bytes());
+    // Outer wire frame = 12B nonce + inner_padded + 16B Poly1305 tag = bucket_size
+    // Inner plaintext = 7B CROSS_BORDER_CAPSULE_MAGIC + 2B u16 BE length + pt_bytes + 0x00 padding
+    let required_inner = 7usize + 2usize + pt_bytes.len();
+    let max_inner = 16_384usize - 12 - AEAD_TAG_LEN;
+    if required_inner > max_inner {
+        return Err(ProtocolError::PayloadTooLarge {
+            size: required_inner,
+            max_supported: max_inner,
+        });
+    }
+    let bucket_size = PADDING_BUCKETS
+        .iter()
+        .copied()
+        .find(|&b| b >= required_inner + 12 + AEAD_TAG_LEN)
+        .unwrap_or(16_384);
+    let inner_padded_len = bucket_size - 12 - AEAD_TAG_LEN;
+
+    let mut inner_padded = vec![0u8; inner_padded_len];
+    inner_padded[0..7].copy_from_slice(CROSS_BORDER_CAPSULE_MAGIC);
+    inner_padded[7..9].copy_from_slice(&(pt_bytes.len() as u16).to_be_bytes());
+    inner_padded[9..9 + pt_bytes.len()].copy_from_slice(pt_bytes);
+
+    let (queue_id, mut channel_key, _) = derive_channel_key_and_queue(clean);
+    let mut aad = [0u8; 36];
+    aad[0..32].copy_from_slice(&queue_id);
+    aad[32..36].copy_from_slice(&(bucket_size as u32).to_be_bytes());
+
+    let ct_res = aead_seal(&channel_key, nonce, &aad, &inner_padded);
     zeroize_bytes(&mut channel_key);
+    zeroize_bytes(&mut inner_padded);
     let ct = ct_res.map_err(|_| ProtocolError::MalformedPaddedFrame)?;
 
-    let mut inner = Vec::with_capacity(7 + 12 + ct.len());
-    inner.extend_from_slice(CROSS_BORDER_CAPSULE_MAGIC);
-    inner.extend_from_slice(nonce);
-    inner.extend_from_slice(&ct);
-    let res = pad_frame(&inner);
-    zeroize_bytes(&mut inner);
-    res
+    let mut wire_frame = Vec::with_capacity(bucket_size);
+    wire_frame.extend_from_slice(nonce);
+    wire_frame.extend_from_slice(&ct);
+    Ok(wire_frame)
 }
 
-/// Unpads, verifies, and decrypts a cross-border RFC 8439 ChaCha20-Poly1305 capsule using `shared_channel_code`.
+/// Verifies AEAD authenticity first (`Verify-Before-Unpad`), then unpads and decrypts a cross-border
+/// RFC 8439 ChaCha20-Poly1305 capsule using `shared_channel_code` (D-0023, B-0086).
 ///
 /// # Errors
-/// Fail-closed: rejects tampered tags, wrong channel keys, all-zero nonces, or invalid UTF-8.
+/// Fail-closed: rejects non-bucket sizes, tampered tags, wrong channel keys, all-zero nonces, non-zero padding, or invalid UTF-8.
 pub fn open_cross_border_capsule(
     shared_channel_code: &str,
     padded_frame: &[u8],
 ) -> Result<String, ProtocolError> {
-    if shared_channel_code.trim().is_empty() {
+    let clean = normalize_channel_code(shared_channel_code);
+    if clean.is_empty() {
         return Err(ProtocolError::InvalidReplyQueueId);
     }
-    let inner = unpad_frame(padded_frame)?;
-    if inner.len() < 7 + 12 + AEAD_TAG_LEN || &inner[0..7] != CROSS_BORDER_CAPSULE_MAGIC {
+    if !PADDING_BUCKETS.contains(&padded_frame.len()) {
         return Err(ProtocolError::MalformedPaddedFrame);
     }
     let mut nonce = [0u8; 12];
-    nonce.copy_from_slice(&inner[7..19]);
+    nonce.copy_from_slice(&padded_frame[0..12]);
     if nonce == [0u8; 12] {
         return Err(ProtocolError::MalformedPaddedFrame);
     }
-    let ct = &inner[19..];
-    let (queue_id, mut channel_key, _) = derive_channel_key_and_queue(shared_channel_code);
-    let pt_res = aead_open(&channel_key, &nonce, &queue_id, ct);
+    let ct = &padded_frame[12..];
+    let (queue_id, mut channel_key, _) = derive_channel_key_and_queue(clean);
+    let mut aad = [0u8; 36];
+    aad[0..32].copy_from_slice(&queue_id);
+    aad[32..36].copy_from_slice(&(padded_frame.len() as u32).to_be_bytes());
+
+    let pt_res = aead_open(&channel_key, &nonce, &aad, ct);
     zeroize_bytes(&mut channel_key);
     let pt = pt_res.map_err(|_| ProtocolError::MalformedPaddedFrame)?;
-    core::str::from_utf8(pt.as_slice())
+    let raw = pt.as_slice();
+    if raw.len() < 9 || &raw[0..7] != CROSS_BORDER_CAPSULE_MAGIC {
+        return Err(ProtocolError::MalformedPaddedFrame);
+    }
+    let pt_len = usize::from(u16::from_be_bytes([raw[7], raw[8]]));
+    if pt_len == 0 || 9 + pt_len > raw.len() {
+        return Err(ProtocolError::MalformedPaddedFrame);
+    }
+    if raw[9 + pt_len..].iter().any(|&b| b != 0) {
+        return Err(ProtocolError::MalformedPaddedFrame);
+    }
+    core::str::from_utf8(&raw[9..9 + pt_len])
         .map(str::to_owned)
         .map_err(|_| ProtocolError::MalformedPaddedFrame)
 }
@@ -1640,21 +1781,24 @@ pub fn compute_safety_number(our_ik: &[u8; 32], peer_ik: &[u8; 32]) -> String {
     combined[0..32].copy_from_slice(first);
     combined[32..64].copy_from_slice(second);
 
-    let d1 = sha256(&combined);
-    let d2 = sha256(&d1);
+    let mut d1 = sha256(&combined);
+    let mut d2 = sha256(&d1);
+    zeroize_bytes(&mut combined);
 
     let mut groups = Vec::with_capacity(12);
     for i in 0..12 {
         let src = if i < 6 { &d1 } else { &d2 };
         let offset = (i % 6) * 5;
-        let chunk = u32::from_be_bytes([
-            src[offset],
-            src[offset + 1],
-            src[offset + 2],
-            src[offset + 3],
-        ]) % 100_000;
+        let chunk = ((u64::from(src[offset]) << 32)
+            | (u64::from(src[offset + 1]) << 24)
+            | (u64::from(src[offset + 2]) << 16)
+            | (u64::from(src[offset + 3]) << 8)
+            | u64::from(src[offset + 4]))
+            % 100_000;
         groups.push(format!("{chunk:05}"));
     }
+    zeroize_bytes(&mut d1);
+    zeroize_bytes(&mut d2);
     groups.join(" ")
 }
 
@@ -1742,21 +1886,25 @@ impl GroupChatSession {
     }
 
     fn rotate_epoch_secret(&mut self, update_entropy: &[u8; 32]) -> Result<u64, ProtocolError> {
-        if update_entropy == &[0u8; 32] {
+        if constant_time_eq(update_entropy, &[0u8; 32]) {
             return Err(ProtocolError::InvalidReplyQueueId);
         }
         let next_epoch = self
             .epoch
             .checked_add(1)
             .ok_or(ProtocolError::MalformedPaddedFrame)?;
+        let mut info = [0u8; 40];
+        info[0..32].copy_from_slice(&self.group_id);
+        info[32..40].copy_from_slice(&next_epoch.to_be_bytes());
         let mut next_secret = [0u8; 32];
-        hkdf_sha256(
+        let res = hkdf_sha256(
             self.epoch_secret.as_slice(),
             update_entropy,
-            &next_epoch.to_be_bytes(),
+            &info,
             &mut next_secret,
-        )
-        .map_err(|_| ProtocolError::MalformedPaddedFrame)?;
+        );
+        zeroize_bytes(&mut info);
+        res.map_err(|_| ProtocolError::MalformedPaddedFrame)?;
         self.epoch = next_epoch;
         self.epoch_secret = ZeroizingBuffer::new(next_secret.to_vec());
         zeroize_bytes(&mut next_secret);
@@ -2486,5 +2634,27 @@ mod tests {
             offline_qr_only: false,
         };
         assert!(inv_hex_ssrf.to_uri().is_err());
+
+        // 6. B-0086: Cross-border capsule Pad-Before-Encrypt (no cleartext AEGCAP1 or zero tail) + prefix normalization
+        let (q1, k1, hex1) = derive_channel_key_and_queue("tokyo-77");
+        let (q2, k2, hex2) = derive_channel_key_and_queue("queue://tokyo-77");
+        assert_eq!(q1, q2);
+        assert_eq!(k1, k2);
+        assert_eq!(hex1, hex2);
+
+        let cap =
+            seal_cross_border_capsule("queue://tokyo-77", &[0x42; 12], "Секрет РФ-США").unwrap();
+        assert_eq!(cap.len(), 256);
+        assert!(!cap.windows(7).any(|w| w == CROSS_BORDER_CAPSULE_MAGIC));
+        assert_ne!(&cap[200..256], &[0u8; 56]);
+        let opened = open_cross_border_capsule("tokyo-77", &cap).unwrap();
+        assert_eq!(opened, "Секрет РФ-США");
+
+        // PEM scanner catches PEM header even when the phrase "PRIVATE KEY" appeared earlier in the text
+        let pem_reordered = format!("Never share a PRIVATE KEY: {pem_sample}");
+        let reordered_leaks = scan_message_for_leaks(&pem_reordered, None);
+        assert!(reordered_leaks
+            .iter()
+            .any(|w| w.kind == LeakKind::CryptoSeedOrPrivateKey));
     }
 }

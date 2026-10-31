@@ -197,11 +197,22 @@ fn is_valid_bridge_host(host: &str) -> bool {
         }
     }
     let last_label = labels[labels.len() - 1];
+    let lower_last = last_label.to_ascii_lowercase();
     if matches!(
-        last_label.to_ascii_lowercase().as_str(),
+        lower_last.as_str(),
         "localhost" | "local" | "internal" | "lan" | "home" | "localdomain" | "arpa" | "invalid"
     ) {
         return false;
+    }
+    if lower_last == "onion" {
+        let onion_name = labels[labels.len() - 2];
+        if onion_name.len() != 56
+            || !onion_name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || matches!(c, '2'..='7'))
+        {
+            return false;
+        }
     }
     if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit())) {
         if labels.len() != 4 {
@@ -270,10 +281,10 @@ impl ThemePack {
             BuiltInThemes::CalculatorStealth => Self {
                 theme_id: "calculator-stealth".to_owned(),
                 display_name: "SciCalc Pro (Stealth Disguise)".to_owned(),
-                bg_primary_hex: "#1C1C1E".to_owned(),
-                bg_surface_hex: "#2C2C2E".to_owned(),
-                accent_hex: "#FF9F0A".to_owned(),
-                text_primary_hex: "#FFFFFF".to_owned(),
+                bg_primary_hex: "#0B101B".to_owned(),
+                bg_surface_hex: "#0F172A".to_owned(),
+                accent_hex: "#10F5CC".to_owned(),
+                text_primary_hex: "#F1F5F9".to_owned(),
                 stealth_calculator_disguise: true,
             },
         }

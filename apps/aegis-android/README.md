@@ -3,7 +3,7 @@
 Нативный Android-клиент анонимного мессенджера **Aegis** (Jetpack Compose + Rust `aegis-ffi` + Android StrongBox Keystore).
 
 ## Архитектура безопасности (Zero-Telemetry / Zero-GMS)
-- **Никаких сервисов Google / Firebase / Analytics (`AGENTS.md §2.2`):** доставка сообщений и входящих звонков в фоне работает через `AegisBackgroundService` (мультиплексированный QUIC/WebSocket + UnifiedPush).
+- **Никаких сервисов Google / Firebase / Analytics (`AGENTS.md §2.2`):** доставка зашифрованных капсул в фоне работает через `AegisBackgroundService` (чистая чат-крепость без звонков и без доступа к микрофону/камере, `D-0021`).
 - **Блокировка скриншотов и записи экрана (`FLAG_SECURE`):** включена по умолчанию в `MainActivity.kt`, скрывает содержимое чатов в меню недавних приложений.
 - **Инкогнито-клавиатура (`IME_FLAG_NO_PERSONALIZED_LEARNING`):** запрещает клавиатуре сохранять вводимые слова и ники в пользовательский словарь.
 - **Запрет облачных бэкапов (`android:allowBackup="false"`):** ключи и база SQLCipher никогда не выгружаются в Google Drive или через `adb backup`.

@@ -2,13 +2,19 @@
 //! constant-shape OPAQUE record storage, anti-DDoS adaptive Proof-of-Work without IP logging (D-0007),
 //! and built-in Support & Donation Web Portal (D-0006, D-0010, PLAN.md §4.4, §6).
 
-use aegis_crypto::{hkdf_sha256, hmac_sha256};
+use aegis_crypto::{
+    aead_open, aead_seal, constant_time_eq, hkdf_sha256, hmac_sha256, x25519, x25519_basepoint,
+    DeterministicPowVerifier, PowChallenge, PowVerifier,
+};
 use aegis_protocol::{
-    hex_decode_bytes, hex_encode_bytes, pad_frame, SupportTicket, SupportTicketCategory,
-    PADDING_BUCKETS,
+    compute_inbox_auth_hash, hex_decode_bytes, hex_encode_bytes, pad_frame, SupportTicket,
+    SupportTicketCategory, PADDING_BUCKETS,
 };
 use core::fmt;
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Default message queue time-to-live on the server: 30 days in seconds (PLAN.md §5).
 pub const DEFAULT_QUEUE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
@@ -97,6 +103,8 @@ pub enum ServerError {
     RateLimited { required_pow_bits: u8 },
     /// Support ticket or donation voucher failed validation.
     InvalidSupportRequest,
+    /// Queue read/drain attempted without a valid `read_token` (`403 Forbidden`).
+    UnauthorizedRead,
 }
 
 impl fmt::Display for ServerError {
@@ -116,11 +124,18 @@ impl fmt::Display for ServerError {
                 "rate limit exceeded; solve {required_pow_bits}-bit PoW challenge"
             ),
             Self::InvalidSupportRequest => write!(f, "invalid support ticket or donation voucher"),
+            Self::UnauthorizedRead => write!(f, "missing or invalid queue read_token"),
         }
     }
 }
 
 impl std::error::Error for ServerError {}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(1_760_000_000, |d| d.as_secs())
+}
 
 /// Zero-knowledge Federation Server Engine (PLAN.md §6.1, §7.2, D-0002, D-0007).
 /// Stores only padded E2EE queue frames and blinded OPAQUE records in RAM/storage.
@@ -129,9 +144,13 @@ impl std::error::Error for ServerError {}
 pub struct FederationServerState {
     server_blinding_salt: [u8; 32],
     queues: BTreeMap<[u8; 32], Vec<Vec<u8>>>,
+    queue_timestamps: BTreeMap<[u8; 32], Vec<u64>>,
+    queue_auth_hashes: BTreeMap<[u8; 32], [u8; 32]>,
+    seen_tunnel_nonces: Vec<[u8; 44]>,
     opaque_records: BTreeMap<[u8; 32], Vec<u8>>,
     requests_in_window: u32,
     suspicious_burst: bool,
+    window_started_unix_secs: u64,
 }
 
 impl fmt::Debug for FederationServerState {
@@ -143,6 +162,27 @@ impl fmt::Debug for FederationServerState {
             .field("requests_in_window", &self.requests_in_window)
             .field("suspicious_burst", &self.suspicious_burst)
             .finish()
+    }
+}
+
+impl Drop for FederationServerState {
+    fn drop(&mut self) {
+        self.server_blinding_salt.fill(0);
+        for frames in self.queues.values_mut() {
+            for f in frames {
+                f.fill(0);
+            }
+        }
+        self.queues.clear();
+        self.queue_timestamps.clear();
+        for hash in self.queue_auth_hashes.values_mut() {
+            hash.fill(0);
+        }
+        self.queue_auth_hashes.clear();
+        for rec in self.opaque_records.values_mut() {
+            rec.fill(0);
+        }
+        self.opaque_records.clear();
     }
 }
 
@@ -164,10 +204,20 @@ impl FederationServerState {
         Self {
             server_blinding_salt: salt,
             queues: BTreeMap::new(),
+            queue_timestamps: BTreeMap::new(),
+            queue_auth_hashes: BTreeMap::new(),
+            seen_tunnel_nonces: Vec::new(),
             opaque_records: BTreeMap::new(),
             requests_in_window: 0,
             suspicious_burst: false,
+            window_started_unix_secs: current_unix_seconds(),
         }
+    }
+
+    /// Returns the server's deterministic X25519 public key for sealed tunnel requests.
+    #[must_use]
+    pub fn server_tunnel_public_key(&self) -> [u8; 32] {
+        x25519_basepoint(&self.server_blinding_salt)
     }
 
     /// Returns the current adaptive Proof-of-Work difficulty in bits (D-0007).
@@ -176,8 +226,15 @@ impl FederationServerState {
         compute_pow_difficulty(self.requests_in_window, self.suspicious_burst)
     }
 
-    /// Records an anonymous request in the in-memory sliding window (zero IP logs!).
+    /// Records an anonymous request in the in-memory sliding window (zero IP logs!),
+    /// automatically resetting the 60-second rate window when elapsed.
     pub fn record_request(&mut self, is_burst: bool) -> u8 {
+        let now = current_unix_seconds();
+        if now.saturating_sub(self.window_started_unix_secs) >= 60 {
+            self.requests_in_window = 0;
+            self.suspicious_burst = false;
+            self.window_started_unix_secs = now;
+        }
         self.requests_in_window = self.requests_in_window.saturating_add(1);
         if is_burst {
             self.suspicious_burst = true;
@@ -189,6 +246,108 @@ impl FederationServerState {
     pub fn reset_rate_window(&mut self) {
         self.requests_in_window = 0;
         self.suspicious_burst = false;
+        self.window_started_unix_secs = current_unix_seconds();
+    }
+
+    /// Verifies an incoming Proof-of-Work solution (`nonce`) against `challenge` at the current adaptive difficulty.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::RateLimited`] if the PoW solution fails verification.
+    pub fn verify_pow_solution(
+        &self,
+        challenge: [u8; 32],
+        nonce: u64,
+        now_unix_secs: u64,
+    ) -> Result<(), ServerError> {
+        let required_pow_bits = self.current_pow_difficulty();
+        let pow_challenge = PowChallenge {
+            challenge,
+            difficulty_bits: required_pow_bits,
+            expires_at_unix_secs: now_unix_secs.saturating_add(300),
+        };
+        DeterministicPowVerifier
+            .verify_pow(&pow_challenge, nonce, now_unix_secs)
+            .map_err(|_| ServerError::RateLimited { required_pow_bits })
+    }
+
+    /// Purges all queued frames older than `ttl_secs` (`DEFAULT_QUEUE_TTL_SECS`) and removes empty queues from RAM.
+    pub fn purge_expired_frames(&mut self, now_unix_secs: u64, ttl_secs: u64) -> usize {
+        let mut purged_count = 0usize;
+        let mut empty_queues = Vec::new();
+        for (q_id, frames) in &mut self.queues {
+            let timestamps = self.queue_timestamps.entry(*q_id).or_default();
+            let mut kept_frames = Vec::with_capacity(frames.len());
+            let mut kept_ts = Vec::with_capacity(frames.len());
+            for (idx, mut f) in core::mem::take(frames).into_iter().enumerate() {
+                let ts = timestamps.get(idx).copied().unwrap_or(now_unix_secs);
+                if now_unix_secs.saturating_sub(ts) < ttl_secs {
+                    kept_frames.push(f);
+                    kept_ts.push(ts);
+                } else {
+                    f.fill(0);
+                    purged_count = purged_count.saturating_add(1);
+                }
+            }
+            *frames = kept_frames;
+            *timestamps = kept_ts;
+            if frames.is_empty() {
+                empty_queues.push(*q_id);
+            }
+        }
+        for q_id in empty_queues {
+            self.queues.remove(&q_id);
+            self.queue_timestamps.remove(&q_id);
+            self.queue_auth_hashes.remove(&q_id);
+        }
+        purged_count
+    }
+
+    /// Registers a pre-hashed `auth_hash = SHA-256("aegis-inbox-auth-v2:" || read_token)` for `queue_id`
+    /// so senders and blind relays can bind a queue without ever transmitting the cleartext `read_token`.
+    ///
+    /// # Errors
+    /// Rejects all-zero identifiers or mismatched `auth_hash` on an already-bound queue.
+    pub fn register_queue_auth_hash(
+        &mut self,
+        queue_id: [u8; 32],
+        auth_hash: &[u8; 32],
+    ) -> Result<(), ServerError> {
+        if queue_id == [0u8; 32] || *auth_hash == [0u8; 32] {
+            return Err(ServerError::InvalidIdentifier);
+        }
+        let now = current_unix_seconds();
+        let _ = self.purge_expired_frames(now, DEFAULT_QUEUE_TTL_SECS);
+        if let Some(existing) = self.queue_auth_hashes.get(&queue_id) {
+            if !constant_time_eq(existing, auth_hash) {
+                return Err(ServerError::UnauthorizedRead);
+            }
+            return Ok(());
+        }
+        if self.queues.contains_key(&queue_id) {
+            return Err(ServerError::UnauthorizedRead);
+        }
+        if self.queue_auth_hashes.len() >= MAX_ACTIVE_QUEUES {
+            return Err(ServerError::QueueFull);
+        }
+        self.queue_auth_hashes.insert(queue_id, *auth_hash);
+        Ok(())
+    }
+
+    /// Registers a read-authentication verifier (`auth_hash = SHA-256("aegis-inbox-auth-v2:" || read_token)`)
+    /// for `queue_id` so only the holder of `read_token` can drain or delete messages from `queue_id`.
+    ///
+    /// # Errors
+    /// Rejects all-zero identifiers or attempts to overwrite an existing queue's `auth_hash`.
+    pub fn register_queue_read_token(
+        &mut self,
+        queue_id: [u8; 32],
+        read_token: &[u8; 32],
+    ) -> Result<(), ServerError> {
+        if queue_id == [0u8; 32] || *read_token == [0u8; 32] {
+            return Err(ServerError::InvalidIdentifier);
+        }
+        let auth_hash = compute_inbox_auth_hash(read_token);
+        self.register_queue_auth_hash(queue_id, &auth_hash)
     }
 
     /// Enqueues a padded ciphertext frame into an anonymous unidirectional queue.
@@ -200,6 +359,8 @@ impl FederationServerState {
         queue_id: [u8; 32],
         frame: Vec<u8>,
     ) -> Result<usize, ServerError> {
+        let now = current_unix_seconds();
+        let _ = self.purge_expired_frames(now, DEFAULT_QUEUE_TTL_SECS);
         let _ = self.record_request(false);
         let current_len = self.queues.get(&queue_id).map_or(0, Vec::len);
         let quota = QueueQuota {
@@ -223,17 +384,44 @@ impl FederationServerState {
 
         let entry = self.queues.entry(queue_id).or_default();
         entry.push(frame);
+        self.queue_timestamps.entry(queue_id).or_default().push(now);
         Ok(entry.len())
+    }
+
+    /// Drains and deletes all pending frames from `queue_id` after verifying `presented_read_token`
+    /// if the queue is protected by a registered `read_token` (`PROTOCOL_V2.md §5.3`).
+    ///
+    /// # Errors
+    /// Returns [`ServerError::UnauthorizedRead`] if `queue_id` requires a `read_token` and `presented_read_token` is missing or wrong.
+    pub fn drain_queue_authenticated(
+        &mut self,
+        queue_id: &[u8; 32],
+        presented_read_token: Option<&[u8; 32]>,
+    ) -> Result<Vec<Vec<u8>>, ServerError> {
+        if *queue_id == [0u8; 32] {
+            return Err(ServerError::InvalidIdentifier);
+        }
+        let now = current_unix_seconds();
+        let _ = self.purge_expired_frames(now, DEFAULT_QUEUE_TTL_SECS);
+        let _ = self.record_request(false);
+        if let Some(expected_hash) = self.queue_auth_hashes.get(queue_id) {
+            let Some(token) = presented_read_token else {
+                return Err(ServerError::UnauthorizedRead);
+            };
+            let candidate_hash = compute_inbox_auth_hash(token);
+            if !constant_time_eq(expected_hash, &candidate_hash) {
+                return Err(ServerError::UnauthorizedRead);
+            }
+        }
+        self.queue_timestamps.remove(queue_id);
+        Ok(self.queues.remove(queue_id).unwrap_or_default())
     }
 
     /// Drains and deletes all pending frames from `queue_id` (delete-on-delivery per PLAN.md §5).
     /// Always returns an empty `Vec` if the queue does not exist, without leaking metadata.
+    /// Fails closed with [`ServerError::UnauthorizedRead`] if the queue has a registered `read_token`.
     pub fn drain_queue(&mut self, queue_id: &[u8; 32]) -> Result<Vec<Vec<u8>>, ServerError> {
-        if *queue_id == [0u8; 32] {
-            return Err(ServerError::InvalidIdentifier);
-        }
-        let _ = self.record_request(false);
-        Ok(self.queues.remove(queue_id).unwrap_or_default())
+        self.drain_queue_authenticated(queue_id, None)
     }
 
     /// Atomically rotates `old_queue_id` to `new_queue_id`, moving any buffered frames.
@@ -255,6 +443,12 @@ impl FederationServerState {
         }
         let existing = self.queues.remove(old_queue_id).unwrap_or_default();
         self.queues.insert(new_queue_id, existing);
+        if let Some(ts) = self.queue_timestamps.remove(old_queue_id) {
+            self.queue_timestamps.insert(new_queue_id, ts);
+        }
+        if let Some(auth) = self.queue_auth_hashes.remove(old_queue_id) {
+            self.queue_auth_hashes.insert(new_queue_id, auth);
+        }
         Ok(())
     }
 
@@ -264,6 +458,8 @@ impl FederationServerState {
         if *queue_id == [0u8; 32] {
             return false;
         }
+        self.queue_timestamps.remove(queue_id);
+        self.queue_auth_hashes.remove(queue_id);
         self.queues.remove(queue_id).is_some()
     }
 
@@ -562,7 +758,376 @@ fn parse_queue_id_from_query(query: Option<&str>) -> Option<[u8; 32]> {
             }
         }
     }
-    Some([0x22; 32])
+    None
+}
+
+fn parse_hex32_param_from_query(query: Option<&str>, key_name: &str) -> Option<[u8; 32]> {
+    let q = query?;
+    for pair in q.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k.trim() == key_name {
+                let decoded = hex_decode_bytes(v.trim()).ok()?;
+                if decoded.len() != 32 {
+                    return None;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&decoded);
+                if arr == [0u8; 32] {
+                    return None;
+                }
+                return Some(arr);
+            }
+        }
+    }
+    None
+}
+
+fn parse_u64_param_from_query(query: Option<&str>, key_name: &str) -> Option<u64> {
+    let q = query?;
+    for pair in q.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k.trim() == key_name {
+                return v.trim().parse::<u64>().ok();
+            }
+        }
+    }
+    None
+}
+
+fn is_safe_relay_host_literal(host: &str) -> bool {
+    let lower = host.trim().to_ascii_lowercase();
+    if lower.is_empty()
+        || lower.len() > 253
+        || lower.starts_with('.')
+        || lower.ends_with('.')
+        || lower.starts_with('-')
+        || lower.ends_with('-')
+        || lower.contains("..")
+        || lower == "localhost"
+        || lower == "0.0.0.0"
+        || lower == "255.255.255.255"
+        || lower.ends_with(".onion")
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+        || lower.ends_with(".lan")
+        || lower.ends_with(".home")
+        || lower.ends_with(".arpa")
+        || lower.ends_with(".invalid")
+    {
+        return false;
+    }
+    let labels: Vec<&str> = lower.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    for l in &labels {
+        if l.is_empty()
+            || l.len() > 63
+            || l.starts_with('-')
+            || l.ends_with('-')
+            || l.starts_with("0x")
+        {
+            return false;
+        }
+    }
+    if labels.iter().all(|l| l.bytes().all(|b| b.is_ascii_digit())) {
+        if labels.len() != 4 {
+            return false;
+        }
+        let mut octs = [0u8; 4];
+        for (i, l) in labels.iter().enumerate() {
+            if l.len() > 1 && l.starts_with('0') {
+                return false;
+            }
+            let Ok(v) = l.parse::<u8>() else {
+                return false;
+            };
+            octs[i] = v;
+        }
+        let [a, b, c, _] = octs;
+        // Block RFC 1918 private LANs, cloud metadata 169.254/16, CGNAT 100.64/10, 0/8, multicast >=224
+        if a == 0
+            || a == 10
+            || (a == 100 && (64..=127).contains(&b))
+            || (a == 169 && b == 254)
+            || (a == 172 && (16..=31).contains(&b))
+            || (a == 192 && b == 0 && c == 0)
+            || (a == 192 && b == 168)
+            || (a == 198 && (b == 18 || b == 19))
+            || a >= 224
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_allowed_relay_socket_addr(addr: &SocketAddr) -> bool {
+    let port = addr.port();
+    // Never allow relaying to privileged system ports (< 1024) or local Desktop GUI port 7878
+    if port < 1024 || port == 7878 {
+        return false;
+    }
+    match addr {
+        SocketAddr::V4(v4) => {
+            let [a, b, c, _] = v4.ip().octets();
+            if a == 127 {
+                // Allow ephemeral local test ports (>= 1024, != 7878)
+                return true;
+            }
+            !(a == 0
+                || a == 10
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 168)
+                || (a == 198 && (b == 18 || b == 19))
+                || a >= 224)
+        }
+        SocketAddr::V6(v6) => {
+            let segs = v6.ip().segments();
+            let is_ula = (segs[0] & 0xfe00) == 0xfc00;
+            let is_link_local = (segs[0] & 0xffc0) == 0xfe80;
+            let bad_mapped = v6.ip().to_ipv4_mapped().is_some_and(|v4| {
+                !is_allowed_relay_socket_addr(&SocketAddr::V4(std::net::SocketAddrV4::new(
+                    v4, port,
+                )))
+            });
+            !v6.ip().is_loopback()
+                && !v6.ip().is_unspecified()
+                && !v6.ip().is_multicast()
+                && !is_ula
+                && !is_link_local
+                && !bad_mapped
+        }
+    }
+}
+
+fn parse_endpoint_param_from_query<'a>(query: Option<&'a str>, key_name: &str) -> Option<&'a str> {
+    let q = query?;
+    for pair in q.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k.trim() == key_name {
+                let without_scheme = v.trim().strip_prefix("aegis://").unwrap_or(v.trim());
+                let clean = without_scheme
+                    .strip_prefix("server/")
+                    .unwrap_or(without_scheme)
+                    .trim();
+                if clean.is_empty()
+                    || clean.len() > 253
+                    || clean.bytes().any(|b| {
+                        b.is_ascii_control()
+                            || b.is_ascii_whitespace()
+                            || b == b'?'
+                            || b == b'&'
+                            || b == b'/'
+                    })
+                {
+                    return None;
+                }
+                let (host, port_str) = clean.rsplit_once(':')?;
+                if !is_safe_relay_host_literal(host) {
+                    return None;
+                }
+                let port = port_str.parse::<u16>().ok()?;
+                if port < 1024 || port == 7878 {
+                    return None;
+                }
+                return Some(clean);
+            }
+        }
+    }
+    None
+}
+
+fn parse_target_from_query(query: Option<&str>) -> Option<&str> {
+    parse_endpoint_param_from_query(query, "target")
+}
+
+fn parse_hop_from_query(query: Option<&str>) -> Option<&str> {
+    parse_endpoint_param_from_query(query, "hop")
+}
+
+fn forward_blind_relay_send(
+    next_hop_opt: Option<&str>,
+    target_host_port: &str,
+    queue_id: &[u8; 32],
+    auth_param_opt: Option<(&str, &[u8; 32])>,
+    padded_frame: &[u8],
+) -> Result<(), ServerError> {
+    if *queue_id == [0u8; 32] || !PADDING_BUCKETS.contains(&padded_frame.len()) {
+        return Err(ServerError::InvalidIdentifier);
+    }
+    if let Some(hop) = next_hop_opt {
+        if hop.eq_ignore_ascii_case(target_host_port) {
+            return Err(ServerError::InvalidIdentifier);
+        }
+    }
+    let connect_ep = next_hop_opt.unwrap_or(target_host_port);
+    let dur = Duration::from_millis(2_500);
+    let resolved: Vec<SocketAddr> = connect_ep
+        .to_socket_addrs()
+        .map_err(|_| ServerError::InvalidIdentifier)?
+        .collect();
+    if resolved.is_empty() || !resolved.iter().all(is_allowed_relay_socket_addr) {
+        return Err(ServerError::InvalidIdentifier);
+    }
+    let addr = resolved[0];
+    let mut stream =
+        TcpStream::connect_timeout(&addr, dur).map_err(|_| ServerError::InvalidIdentifier)?;
+    let _ = stream.set_read_timeout(Some(dur));
+    let _ = stream.set_write_timeout(Some(dur));
+
+    let queue_hex = hex_encode_bytes(queue_id);
+    let tok_suffix = auth_param_opt.map_or_else(String::new, |(param_name, val)| {
+        format!("&{param_name}={}", hex_encode_bytes(val))
+    });
+    let body_hex = hex_encode_bytes(padded_frame);
+    let req = if next_hop_opt.is_some() {
+        format!(
+            "POST /api/v1/queue/relay?target={target_host_port}&queue={queue_hex}{tok_suffix} HTTP/1.1\r\nHost: {connect_ep}\r\nX-Aegis-Blind-Relay: 1\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
+            body_hex.len()
+        )
+    } else {
+        format!(
+            "POST /api/v1/queue/send?queue={queue_hex}{tok_suffix} HTTP/1.1\r\nHost: {target_host_port}\r\nX-Aegis-Blind-Relay: 1\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
+            body_hex.len()
+        )
+    };
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| ServerError::InvalidIdentifier)?;
+    let _ = stream.flush();
+
+    let mut resp = Vec::with_capacity(512);
+    stream
+        .take(65_536)
+        .read_to_end(&mut resp)
+        .map_err(|_| ServerError::InvalidIdentifier)?;
+    let text = core::str::from_utf8(&resp).map_err(|_| ServerError::InvalidIdentifier)?;
+    if text.starts_with("HTTP/1.1 200")
+        && (text.contains("\"queued\"") || text.contains("\"relayed\""))
+    {
+        Ok(())
+    } else {
+        Err(ServerError::InvalidIdentifier)
+    }
+}
+
+fn forward_blind_relay_poll(
+    next_hop_opt: Option<&str>,
+    target_host_port: &str,
+    queue_id: &[u8; 32],
+    read_token_opt: Option<&[u8; 32]>,
+) -> Result<String, ServerError> {
+    if *queue_id == [0u8; 32] {
+        return Err(ServerError::InvalidIdentifier);
+    }
+    if let Some(hop) = next_hop_opt {
+        if hop.eq_ignore_ascii_case(target_host_port) {
+            return Err(ServerError::InvalidIdentifier);
+        }
+    }
+    let connect_ep = next_hop_opt.unwrap_or(target_host_port);
+    let dur = Duration::from_millis(2_500);
+    let resolved: Vec<SocketAddr> = connect_ep
+        .to_socket_addrs()
+        .map_err(|_| ServerError::InvalidIdentifier)?
+        .collect();
+    if resolved.is_empty() || !resolved.iter().all(is_allowed_relay_socket_addr) {
+        return Err(ServerError::InvalidIdentifier);
+    }
+    let addr = resolved[0];
+    let mut stream =
+        TcpStream::connect_timeout(&addr, dur).map_err(|_| ServerError::InvalidIdentifier)?;
+    let _ = stream.set_read_timeout(Some(dur));
+    let _ = stream.set_write_timeout(Some(dur));
+
+    let queue_hex = hex_encode_bytes(queue_id);
+    let tok_suffix = read_token_opt.map_or_else(String::new, |tok| {
+        format!("&read_token={}", hex_encode_bytes(tok))
+    });
+    let req = if next_hop_opt.is_some() {
+        format!(
+            "POST /api/v1/queue/relay_poll?target={target_host_port}&queue={queue_hex}{tok_suffix} HTTP/1.1\r\nHost: {connect_ep}\r\nX-Aegis-Blind-Relay: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+    } else {
+        format!(
+            "POST /api/v1/queue/poll?queue={queue_hex}{tok_suffix} HTTP/1.1\r\nHost: {target_host_port}\r\nX-Aegis-Blind-Relay: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+    };
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| ServerError::InvalidIdentifier)?;
+    let _ = stream.flush();
+
+    let mut resp = Vec::with_capacity(4096);
+    stream
+        .take(65_536)
+        .read_to_end(&mut resp)
+        .map_err(|_| ServerError::InvalidIdentifier)?;
+    let text = core::str::from_utf8(&resp).map_err(|_| ServerError::InvalidIdentifier)?;
+    if !text.starts_with("HTTP/1.1 200") {
+        return Err(ServerError::InvalidIdentifier);
+    }
+    let Some((_, body)) = text.split_once("\r\n\r\n") else {
+        return Err(ServerError::InvalidIdentifier);
+    };
+    Ok(body.to_owned())
+}
+
+/// Seals an inner HTTP request (`method`, `path`, `body`) into an X25519 + ChaCha20-Poly1305 encrypted tunnel frame
+/// pinned to `server_tunnel_pubkey` so ISPs and active network observers see zero URL/queue metadata (`B-0095`).
+///
+/// # Errors
+/// Returns [`ServerError::InvalidIdentifier`] if any key/nonce is zero or encryption fails.
+pub fn seal_tunnel_request(
+    client_ephemeral_private: &[u8; 32],
+    server_tunnel_pubkey: &[u8; 32],
+    nonce: &[u8; 12],
+    inner_method: &str,
+    inner_path: &str,
+    inner_body: &str,
+) -> Result<String, ServerError> {
+    if *client_ephemeral_private == [0u8; 32]
+        || *server_tunnel_pubkey == [0u8; 32]
+        || *nonce == [0u8; 12]
+    {
+        return Err(ServerError::InvalidIdentifier);
+    }
+    let client_ephemeral_pub = x25519_basepoint(client_ephemeral_private);
+    let mut shared = x25519(client_ephemeral_private, server_tunnel_pubkey);
+    if constant_time_eq(&shared, &[0u8; 32]) {
+        return Err(ServerError::InvalidIdentifier);
+    }
+    let mut tunnel_key = [0u8; 32];
+    let kdf_res = hkdf_sha256(
+        &client_ephemeral_pub,
+        &shared,
+        b"Aegis-TransportTunnel-v1",
+        &mut tunnel_key,
+    );
+    shared.fill(0);
+    if kdf_res.is_err() {
+        tunnel_key.fill(0);
+        return Err(ServerError::InvalidIdentifier);
+    }
+    let mut serialized = format!("{inner_method}\n{inner_path}\n{inner_body}").into_bytes();
+    let ct_res = aead_seal(
+        &tunnel_key,
+        nonce,
+        server_tunnel_pubkey,
+        &serialized,
+    );
+    serialized.fill(0);
+    tunnel_key.fill(0);
+    let ct = ct_res.map_err(|_| ServerError::InvalidIdentifier)?;
+    let mut wire = Vec::with_capacity(32 + 12 + ct.len());
+    wire.extend_from_slice(&client_ephemeral_pub);
+    wire.extend_from_slice(nonce);
+    wire.extend_from_slice(&ct);
+    Ok(hex_encode_bytes(&wire))
 }
 
 /// Processes raw HTTP requests for both the Support/Donation Web Portal and the JSON federation API.
@@ -614,6 +1179,21 @@ pub fn handle_http_request(
                     r#"{"error":"invalid_queue_id"}"#.to_owned(),
                 );
             };
+            if let (Some(pow_ch), Some(pow_nonce)) = (
+                parse_hex32_param_from_query(query_opt, "pow_challenge"),
+                parse_u64_param_from_query(query_opt, "pow_nonce"),
+            ) {
+                if server
+                    .verify_pow_solution(pow_ch, pow_nonce, current_unix_seconds())
+                    .is_err()
+                {
+                    return (
+                        429,
+                        "application/json",
+                        r#"{"error":"invalid_pow_solution"}"#.to_owned(),
+                    );
+                }
+            }
             let trimmed_body = body.trim();
             let frame_to_enqueue = if let Ok(raw_frame) = hex_decode_bytes(trimmed_body) {
                 if PADDING_BUCKETS.contains(&raw_frame.len()) {
@@ -643,13 +1223,43 @@ pub fn handle_http_request(
                 };
                 padded
             };
+            let had_auth_before = server.queue_auth_hashes.contains_key(&queue_id);
+            if let Some(auth_hash) = parse_hex32_param_from_query(query_opt, "auth_hash") {
+                if server
+                    .register_queue_auth_hash(queue_id, &auth_hash)
+                    .is_err()
+                {
+                    return (
+                        403,
+                        "application/json",
+                        r#"{"error":"unauthorized_read_token"}"#.to_owned(),
+                    );
+                }
+            }
+            if let Some(read_token) = parse_hex32_param_from_query(query_opt, "read_token") {
+                if server
+                    .register_queue_read_token(queue_id, &read_token)
+                    .is_err()
+                {
+                    return (
+                        403,
+                        "application/json",
+                        r#"{"error":"unauthorized_read_token"}"#.to_owned(),
+                    );
+                }
+            }
             match server.enqueue_frame(queue_id, frame_to_enqueue) {
                 Ok(_) => (200, "application/json", r#"{"status":"queued"}"#.to_owned()),
-                Err(_) => (
-                    429,
-                    "application/json",
-                    r#"{"error":"queue_rejected"}"#.to_owned(),
-                ),
+                Err(_) => {
+                    if !had_auth_before && !server.queues.contains_key(&queue_id) {
+                        server.queue_auth_hashes.remove(&queue_id);
+                    }
+                    (
+                        429,
+                        "application/json",
+                        r#"{"error":"queue_rejected"}"#.to_owned(),
+                    )
+                }
             }
         }
         ("POST", "/api/v1/queue/poll") => {
@@ -660,13 +1270,17 @@ pub fn handle_http_request(
                     r#"{"error":"invalid_queue_id"}"#.to_owned(),
                 );
             };
-            match server.drain_queue(&queue_id) {
-                Ok(frames) => {
+            let read_token_opt = parse_hex32_param_from_query(query_opt, "read_token");
+            match server.drain_queue_authenticated(&queue_id, read_token_opt.as_ref()) {
+                Ok(mut frames) => {
                     let count = frames.len();
                     let hex_list: Vec<String> = frames
                         .iter()
                         .map(|f| format!("\"{}\"", hex_encode_bytes(f)))
                         .collect();
+                    for f in &mut frames {
+                        f.fill(0);
+                    }
                     (
                         200,
                         "application/json",
@@ -676,10 +1290,207 @@ pub fn handle_http_request(
                         ),
                     )
                 }
+                Err(ServerError::UnauthorizedRead) => (
+                    403,
+                    "application/json",
+                    r#"{"error":"unauthorized_read_token"}"#.to_owned(),
+                ),
                 Err(_) => (
                     400,
                     "application/json",
                     r#"{"error":"invalid_queue"}"#.to_owned(),
+                ),
+            }
+        }
+        ("POST", "/api/v1/tunnel/sealed") => {
+            let Ok(wire) = hex_decode_bytes(body.trim()) else {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"invalid_tunnel_hex"}"#.to_owned(),
+                );
+            };
+            if wire.len() < 32 + 12 + 16 {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"truncated_tunnel_frame"}"#.to_owned(),
+                );
+            }
+            let mut client_pub = [0u8; 32];
+            client_pub.copy_from_slice(&wire[0..32]);
+            let mut nonce = [0u8; 12];
+            nonce.copy_from_slice(&wire[32..44]);
+            let mut replay_tag = [0u8; 44];
+            replay_tag[0..32].copy_from_slice(&client_pub);
+            replay_tag[32..44].copy_from_slice(&nonce);
+            if server.seen_tunnel_nonces.contains(&replay_tag) {
+                return (
+                    403,
+                    "application/json",
+                    r#"{"error":"tunnel_replay_detected"}"#.to_owned(),
+                );
+            }
+            let ct = &wire[44..];
+            let server_pub = server.server_tunnel_public_key();
+            let mut shared = x25519(&server.server_blinding_salt, &client_pub);
+            if constant_time_eq(&shared, &[0u8; 32]) {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"tunnel_low_order_point"}"#.to_owned(),
+                );
+            }
+            let mut tunnel_key = [0u8; 32];
+            let kdf_ok = hkdf_sha256(
+                &client_pub,
+                &shared,
+                b"Aegis-TransportTunnel-v1",
+                &mut tunnel_key,
+            )
+            .is_ok();
+            shared.fill(0);
+            if !kdf_ok {
+                tunnel_key.fill(0);
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"tunnel_kdf_failed"}"#.to_owned(),
+                );
+            }
+            let pt_res = aead_open(&tunnel_key, &nonce, &server_pub, ct);
+            tunnel_key.fill(0);
+            let Ok(pt_buf) = pt_res else {
+                return (
+                    403,
+                    "application/json",
+                    r#"{"error":"tunnel_auth_failed"}"#.to_owned(),
+                );
+            };
+            if server.seen_tunnel_nonces.len() >= 4096 {
+                server.seen_tunnel_nonces.remove(0);
+            }
+            server.seen_tunnel_nonces.push(replay_tag);
+            let Ok(inner_str) = core::str::from_utf8(pt_buf.as_slice()) else {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"invalid_tunnel_utf8"}"#.to_owned(),
+                );
+            };
+            let mut lines = inner_str.splitn(3, '\n');
+            let Some(in_method) = lines.next().map(str::to_owned) else {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"malformed_tunnel_req"}"#.to_owned(),
+                );
+            };
+            let Some(in_path) = lines.next().map(str::to_owned) else {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"malformed_tunnel_req"}"#.to_owned(),
+                );
+            };
+            let in_body = lines.next().unwrap_or("").to_owned();
+            drop(pt_buf);
+            let clean_in_route = in_path
+                .trim()
+                .split_once('?')
+                .map_or(in_path.trim(), |(p, _)| p);
+            if clean_in_route.eq_ignore_ascii_case("/api/v1/tunnel/sealed")
+                || clean_in_route.eq_ignore_ascii_case("/api/v1/queue/relay")
+                || clean_in_route.eq_ignore_ascii_case("/api/v1/queue/relay_poll")
+            {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"recursive_tunnel_forbidden"}"#.to_owned(),
+                );
+            }
+            handle_http_request(server, portal, &in_method, &in_path, &in_body)
+        }
+        ("POST", "/api/v1/queue/relay") => {
+            let _ = server.record_request(false);
+            let Some(queue_id) = parse_queue_id_from_query(query_opt) else {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"invalid_queue_id"}"#.to_owned(),
+                );
+            };
+            let Some(target) = parse_target_from_query(query_opt) else {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"invalid_relay_target"}"#.to_owned(),
+                );
+            };
+            let Ok(raw_frame) = hex_decode_bytes(body.trim()) else {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"invalid_capsule_hex"}"#.to_owned(),
+                );
+            };
+            if !PADDING_BUCKETS.contains(&raw_frame.len()) {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"invalid_bucket_size"}"#.to_owned(),
+                );
+            }
+            let hop_opt = parse_hop_from_query(query_opt);
+            let auth_or_tok = parse_hex32_param_from_query(query_opt, "auth_hash")
+                .map(|h| ("auth_hash", h))
+                .or_else(|| {
+                    parse_hex32_param_from_query(query_opt, "read_token")
+                        .map(|t| ("read_token", t))
+                });
+            match forward_blind_relay_send(
+                hop_opt,
+                target,
+                &queue_id,
+                auth_or_tok.as_ref().map(|(k, v)| (*k, v)),
+                &raw_frame,
+            ) {
+                Ok(()) => (
+                    200,
+                    "application/json",
+                    r#"{"status":"relayed"}"#.to_owned(),
+                ),
+                Err(_) => (
+                    502,
+                    "application/json",
+                    r#"{"error":"relay_unreachable"}"#.to_owned(),
+                ),
+            }
+        }
+        ("POST", "/api/v1/queue/relay_poll") => {
+            let _ = server.record_request(false);
+            let Some(queue_id) = parse_queue_id_from_query(query_opt) else {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"invalid_queue_id"}"#.to_owned(),
+                );
+            };
+            let Some(target) = parse_target_from_query(query_opt) else {
+                return (
+                    400,
+                    "application/json",
+                    r#"{"error":"invalid_relay_target"}"#.to_owned(),
+                );
+            };
+            let hop_opt = parse_hop_from_query(query_opt);
+            let read_tok_opt = parse_hex32_param_from_query(query_opt, "read_token");
+            match forward_blind_relay_poll(hop_opt, target, &queue_id, read_tok_opt.as_ref()) {
+                Ok(json_body) => (200, "application/json", json_body),
+                Err(_) => (
+                    502,
+                    "application/json",
+                    r#"{"error":"relay_unreachable"}"#.to_owned(),
                 ),
             }
         }
@@ -921,5 +1732,85 @@ mod tests {
         let dbg = format!("{srv:?}");
         assert!(dbg.contains("[REDACTED]"));
         assert!(!dbg.contains("153")); // 0x99
+    }
+
+    #[test]
+    fn red_team_read_token_auth_ssrf_blocking_ttl_gc_and_x25519_sealed_tunnel() {
+        let mut srv = FederationServerState::new([0x33; 32]);
+        let mut portal = SupportPortalState::new();
+
+        // 1. Read-token protection prevents unauthenticated draining of a protected queue
+        let q_id = [0x77; 32];
+        let read_token = [0x88; 32];
+        let wrong_token = [0x99; 32];
+        srv.register_queue_read_token(q_id, &read_token).unwrap();
+        let frame = pad_frame(b"protected-inbox-message").unwrap();
+        srv.enqueue_frame(q_id, frame).unwrap();
+
+        assert_eq!(srv.drain_queue(&q_id), Err(ServerError::UnauthorizedRead));
+        assert_eq!(
+            srv.drain_queue_authenticated(&q_id, Some(&wrong_token)),
+            Err(ServerError::UnauthorizedRead)
+        );
+        // Messages remain intact until the genuine read_token is presented
+        let drained = srv
+            .drain_queue_authenticated(&q_id, Some(&read_token))
+            .unwrap();
+        assert_eq!(drained.len(), 1);
+
+        // 2. Blind Relay SSRF protection blocks metadata IPs, private LANs, localhost, and privileged ports
+        for forbidden_target in [
+            "169.254.169.254:80",
+            "192.168.1.1:8443",
+            "10.0.0.1:8443",
+            "172.16.0.1:8443",
+            "localhost:8443",
+            "127.0.0.1:22",
+            "127.0.0.1:7878",
+        ] {
+            let path = format!(
+                "/api/v1/queue/relay?target={forbidden_target}&queue=1111111111111111111111111111111111111111111111111111111111111111"
+            );
+            let (code, _, resp) = handle_http_request(&mut srv, &mut portal, "POST", &path, "00");
+            assert_eq!(code, 400, "must reject SSRF target {forbidden_target}");
+            assert!(resp.contains("invalid_relay_target"));
+        }
+
+        // 3. TTL queue garbage collection purges expired frames and frees memory
+        let q_ttl = [0x44; 32];
+        srv.enqueue_frame(q_ttl, pad_frame(b"ephemeral").unwrap())
+            .unwrap();
+        assert_eq!(srv.active_queue_count(), 1);
+        let future_now = current_unix_seconds() + DEFAULT_QUEUE_TTL_SECS + 10;
+        let purged = srv.purge_expired_frames(future_now, DEFAULT_QUEUE_TTL_SECS);
+        assert_eq!(purged, 1);
+        assert_eq!(srv.active_queue_count(), 0);
+
+        // 4. Sealed X25519 + ChaCha20-Poly1305 tunnel hides method/path/query/body and rejects tampering
+        let server_pub = srv.server_tunnel_public_key();
+        let sealed_hex =
+            seal_tunnel_request(&[0x21; 32], &server_pub, &[0x05; 12], "GET", "/health", "")
+                .unwrap();
+        let (t_code, _, t_body) = handle_http_request(
+            &mut srv,
+            &mut portal,
+            "POST",
+            "/api/v1/tunnel/sealed",
+            &sealed_hex,
+        );
+        assert_eq!(t_code, 200);
+        assert!(t_body.contains(r#""status":"ok""#));
+
+        // Tampering with the sealed tunnel frame fails closed with 403 Forbidden
+        let mut tampered_hex = sealed_hex;
+        tampered_hex.replace_range(0..2, "ff");
+        let (bad_code, _, _) = handle_http_request(
+            &mut srv,
+            &mut portal,
+            "POST",
+            "/api/v1/tunnel/sealed",
+            &tampered_hex,
+        );
+        assert_eq!(bad_code, 403);
     }
 }

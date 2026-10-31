@@ -1,20 +1,18 @@
-//! `aegis-desktop` — Runnable Desktop Client binary for Aegis.
+//! `aegis-desktop` — runnable desktop client for Aegis.
 //!
-//! Modes:
-//! - Default (double-click `aegis-desktop.exe` or `--gui [--port 7878]`):
-//!   starts the local interactive Aurora Glassmorphism Desktop GUI on `http://127.0.0.1:7878`
-//!   (starting with Step 1: Account Login -> Step 2: Server Selection -> Step 3: Messenger Chats)
-//!   and automatically opens the interface in the system browser.
-//! - `aegis-desktop --self-test` or `aegis-desktop --demo`:
-//!   runs a complete end-to-end verification of all 10 desktop subsystems and prints a detailed Russian report.
+//! Default mode opens a native Windows window (WebView2) around the local UI
+//! server. On other platforms it falls back to the system browser.
+//! `--self-test` runs the end-to-end desktop verification suite.
 
 use aegis_ffi::Locale;
 use aegis_ui_desktop::{
     run_automated_demo_walkthrough, DesktopAppState, DesktopGuiServer, DesktopUiError, Screen,
 };
 use std::env;
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::process::{Command, ExitCode};
+use std::thread;
+use std::time::Duration;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -56,7 +54,7 @@ fn main() -> ExitCode {
         idx += 1;
     }
 
-    // Double-clicking aegis-desktop.exe with no flags launches the interactive GUI immediately!
+    // Double-clicking aegis-desktop.exe with no flags launches the interactive UI.
     if !run_gui && !run_demo {
         run_gui = true;
     }
@@ -78,7 +76,7 @@ fn main() -> ExitCode {
 
     if run_gui {
         if let Err(err) = launch_gui_server(port, max_requests) {
-            eprintln!("❌ Ошибка локального GUI-сервера Aegis Desktop: {err}");
+            eprintln!("❌ Ошибка запуска Aegis Desktop: {err}");
             return ExitCode::FAILURE;
         }
     }
@@ -105,40 +103,129 @@ fn launch_gui_server(
         preferred_port
     };
     let mut state = DesktopAppState::new(Locale::Ru);
-    // Start on Step 1 (Account Login / Registration -> Step 2 Server Selection -> Step 3 Chats)
     state.current_screen = Screen::Onboarding;
     let url = format!("http://127.0.0.1:{port}");
     println!("============================================================");
-    println!("🛡 AEGIS AURORA GLASS DESKTOP ЗАПУЩЕН: {url}");
-    println!("   Шаг 1: Вход в аккаунт -> Шаг 2: Выбор сервера -> Шаг 3: Чаты");
-    println!("   Окно открывается автоматически. Нажмите Ctrl+C для выхода.");
+    println!("🛡 AEGIS DESKTOP: {url}");
+    println!("   Приватный мессенджер. Локальный интерфейс без телеметрии.");
     println!("============================================================");
 
-    if max_requests.is_none() {
-        #[cfg(target_os = "windows")]
-        {
-            let _ = Command::new("cmd").args(["/C", "start", "", &url]).spawn();
+    let mut server = DesktopGuiServer::new(port, state);
+    if max_requests.is_some() {
+        return server.serve_blocking(max_requests);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let server_thread = thread::spawn(move || server.serve_blocking(None));
+        if !wait_for_local_port(port, Duration::from_secs(5)) {
+            return Err(DesktopUiError::IoError(
+                "локальный UI-сервер не запустился за 5 секунд".to_owned(),
+            ));
         }
-        #[cfg(target_os = "linux")]
-        {
-            let _ = Command::new("xdg-open").arg(&url).spawn();
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = Command::new("open").arg(&url).spawn();
+        match run_native_window(port) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                eprintln!("⚠ Нативное окно недоступно ({err}). Открываю браузер.");
+                open_in_browser(&url);
+                let _ = server_thread.join();
+                Ok(())
+            }
         }
     }
 
-    let mut server = DesktopGuiServer::new(port, state);
-    server.serve_blocking(max_requests)
+    #[cfg(not(target_os = "windows"))]
+    {
+        open_in_browser(&url);
+        server.serve_blocking(None)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_local_port(port: u16, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn run_native_window(port: u16) -> Result<(), String> {
+    use tao::event::{Event, WindowEvent};
+    use tao::event_loop::{ControlFlow, EventLoop};
+    use tao::window::WindowBuilder;
+    use wry::{NewWindowResponse, PermissionResponse, WebViewBuilder};
+
+    const HARDEN_SCRIPT: &str = r#"
+document.addEventListener('contextmenu', function (event) { event.preventDefault(); });
+document.addEventListener('dragover', function (event) { event.preventDefault(); });
+document.addEventListener('drop', function (event) { event.preventDefault(); });
+document.addEventListener('keydown', function (event) {
+  if (event.key === 'F12' ||
+      (event.ctrlKey && event.shiftKey && (event.key === 'I' || event.key === 'J' || event.key === 'C'))) {
+    event.preventDefault();
+  }
+});
+"#;
+
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title("Aegis")
+        .with_inner_size(tao::dpi::LogicalSize::new(1180.0, 780.0))
+        .with_min_inner_size(tao::dpi::LogicalSize::new(900.0, 600.0))
+        .build(&event_loop)
+        .map_err(|e| e.to_string())?;
+
+    let root = format!("http://127.0.0.1:{port}");
+    let allowed_root = root.clone();
+    let allowed_path = format!("{root}/");
+    let url = format!("{root}/");
+    let _webview = WebViewBuilder::new()
+        .with_url(&url)
+        .with_devtools(false)
+        .with_navigation_handler(move |uri| uri == allowed_root || uri.starts_with(&allowed_path))
+        .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
+        .with_permission_handler(|_| PermissionResponse::Deny)
+        .with_initialization_script(HARDEN_SCRIPT)
+        .build(&window)
+        .map_err(|e| e.to_string())?;
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        if let Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } = event
+        {
+            *control_flow = ControlFlow::Exit;
+        }
+    });
+}
+
+fn open_in_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("xdg-open").arg(url).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(url).spawn();
+    }
 }
 
 fn print_help() {
-    println!("Aegis Desktop Client (Aurora Glass / E2EE / Zero-Knowledge)");
+    println!("Aegis Desktop — приватный мессенджер");
     println!("Использование:");
-    println!(
-        "  aegis-desktop                    Запуск интерактивного GUI (Вход -> Серверы -> Чаты)"
-    );
-    println!("  aegis-desktop --gui [--port N]   Запуск GUI на указанном локальном порту");
-    println!("  aegis-desktop --self-test        Полный автотест всех подсистем на ПК");
+    println!("  aegis-desktop                    Запуск приложения");
+    println!("  aegis-desktop --gui [--port N]   Запуск на указанном локальном порту");
+    println!("  aegis-desktop --once             Один запрос (диагностика)");
+    println!("  aegis-desktop --self-test        Полный автотест подсистем");
 }

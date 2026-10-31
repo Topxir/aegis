@@ -9,8 +9,14 @@ set -euo pipefail
 PORT="${AEGIS_BIND_PORT:-8443}"
 TTL_SECS="${AEGIS_QUEUE_TTL_SECS:-2592000}"
 STATIC_IP="${1:-$(hostname -I 2>/dev/null | awk '{print $1}' || echo '185.220.101.42')}"
-PUBKEY_FP="a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+PUBKEY_FP="${AEGIS_SERVER_PUBKEY_HEX:-a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1}"
+BLINDING_SALT="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+if [ "${#BLINDING_SALT}" -ne 64 ]; then
+  echo "[FAIL] Could not generate 32-byte CSPRNG blinding salt from /dev/urandom" >&2
+  exit 1
+fi
 
+umask 077
 mkdir -p /opt/aegis
 cat <<EOF > /opt/aegis/docker-compose.yml
 # Aegis 1-Click Self-Hosted Zero-Knowledge Server (Static IP / Direct & Optional Tor)
@@ -36,6 +42,7 @@ services:
       AEGIS_BIND_PORT: "${PORT}"
       AEGIS_QUEUE_TTL_SECS: "${TTL_SECS}"
       AEGIS_SERVER_PUBKEY_HEX: "${PUBKEY_FP}"
+      AEGIS_BLINDING_SALT_HEX: "${BLINDING_SALT}"
       AEGIS_IP_LOGGING: "false"
     volumes:
       - aegis_data:/var/lib/aegis

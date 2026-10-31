@@ -4,7 +4,8 @@
 
 use aegis_crypto::{hmac_sha256, sha256};
 use aegis_protocol::{
-    hex_decode_bytes, hex_encode_bytes, pad_frame, ProtocolError, PADDING_BUCKETS,
+    compute_inbox_auth_hash, derive_queue_read_token, hex_decode_bytes, hex_encode_bytes,
+    ProtocolError, PADDING_BUCKETS,
 };
 use core::fmt;
 use std::io::{Read, Write};
@@ -570,17 +571,21 @@ impl CoverTrafficScheduler {
         key[8..16].copy_from_slice(&self.emitted_count.to_be_bytes());
         key[16..32].copy_from_slice(b"AegisCoverChaff1");
 
-        let mut chaff = [0u8; COVER_TRAFFIC_FRAME_BYTES - 2];
+        let mut frame = vec![0u8; COVER_TRAFFIC_FRAME_BYTES];
         let mut offset = 0usize;
         let mut block_idx = 0u8;
-        while offset < chaff.len() {
+        while offset < frame.len() {
             let block = hmac_sha256(&key, &[block_idx]);
-            let take = (chaff.len() - offset).min(32);
-            chaff[offset..offset + take].copy_from_slice(&block[..take]);
+            let take = (frame.len() - offset).min(32);
+            frame[offset..offset + take].copy_from_slice(&block[..take]);
             offset += take;
             block_idx = block_idx.wrapping_add(1);
         }
-        pad_frame(&chaff).ok()
+        key.fill(0);
+        if frame[0] == 0x00 && frame[1] == 0xFE {
+            frame[0] = 0xA7;
+        }
+        Some(frame)
     }
 
     /// Returns the total number of dummy cover frames emitted by this scheduler.
@@ -677,18 +682,96 @@ impl ServerMigrationNotice {
     }
 }
 
-fn open_timed_tcp_stream(host_port: &str, timeout_ms: u64) -> Result<TcpStream, TransportError> {
+const MAX_TRANSPORT_HTTP_RESPONSE_BYTES: u64 = 65_536;
+
+fn sanitize_endpoint_host_port(host_port: &str) -> Result<&str, TransportError> {
     let clean = host_port
         .trim()
         .strip_prefix("aegis://")
         .unwrap_or(host_port.trim());
-    let clean = clean.strip_prefix("server/").unwrap_or(clean);
+    let clean = clean.strip_prefix("server/").unwrap_or(clean).trim();
+    if clean.is_empty()
+        || clean.len() > 260
+        || clean
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace() || b == b'?' || b == b'&')
+    {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let Some((host, port_str)) = clean.rsplit_once(':') else {
+        return Err(TransportError::InvalidEndpoint);
+    };
+    if host.is_empty()
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.starts_with('-')
+        || host.ends_with('-')
+        || host.contains("..")
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let Ok(port) = port_str.parse::<u16>() else {
+        return Err(TransportError::InvalidPort);
+    };
+    if port == 0 {
+        return Err(TransportError::InvalidPort);
+    }
+    Ok(clean)
+}
+
+fn open_timed_tcp_stream(host_port: &str, timeout_ms: u64) -> Result<TcpStream, TransportError> {
+    let clean = sanitize_endpoint_host_port(host_port)?;
+    let (host_only, _) = clean
+        .rsplit_once(':')
+        .ok_or(TransportError::InvalidEndpoint)?;
+    // Never resolve .onion addresses through the local OS DNS resolver (prevents ISP DNS leak)
+    let lower_host = host_only.trim_end_matches('.').to_ascii_lowercase();
+    if lower_host.ends_with(".onion") || lower_host.contains(".onion.") {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let is_explicit_loopback_test = host_only == "127.0.0.1";
     let dur = Duration::from_millis(timeout_ms.clamp(100, 30_000));
-    let addr: SocketAddr = clean
+    let resolved: Vec<SocketAddr> = clean
         .to_socket_addrs()
         .map_err(|_| TransportError::InvalidEndpoint)?
-        .next()
-        .ok_or(TransportError::InvalidEndpoint)?;
+        .collect();
+    if resolved.is_empty() {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    // Block DNS-Rebinding / SSRF across ALL resolved addresses
+    if !is_explicit_loopback_test {
+        for cand in &resolved {
+            match cand {
+                SocketAddr::V4(v4) => {
+                    if !is_public_routable_ipv4(v4.ip().octets()) {
+                        return Err(TransportError::InvalidEndpoint);
+                    }
+                }
+                SocketAddr::V6(v6) => {
+                    let segs = v6.ip().segments();
+                    let is_ula = (segs[0] & 0xfe00) == 0xfc00;
+                    let is_link_local = (segs[0] & 0xffc0) == 0xfe80;
+                    let bad_mapped = v6
+                        .ip()
+                        .to_ipv4_mapped()
+                        .is_some_and(|v4| !is_public_routable_ipv4(v4.octets()));
+                    if v6.ip().is_loopback()
+                        || v6.ip().is_unspecified()
+                        || v6.ip().is_multicast()
+                        || is_ula
+                        || is_link_local
+                        || bad_mapped
+                    {
+                        return Err(TransportError::InvalidEndpoint);
+                    }
+                }
+            }
+        }
+    }
+    let addr = resolved[0];
     let stream =
         TcpStream::connect_timeout(&addr, dur).map_err(|_| TransportError::InvalidEndpoint)?;
     let _ = stream.set_read_timeout(Some(dur));
@@ -699,6 +782,7 @@ fn open_timed_tcp_stream(host_port: &str, timeout_ms: u64) -> Result<TcpStream, 
 /// Establishes a TCP tunnel through an RFC 1928 SOCKS5h proxy (e.g., local Tor daemon `127.0.0.1:9050`
 /// or Orbot `127.0.0.1:9150`) using remote hostname resolution (`ATYP = 0x03`) so `.onion` addresses
 /// and cross-country endpoints resolve on the remote exit without local DNS leaks.
+/// Supports RFC 1929 (`0x02`) stream-isolation credentials when negotiated by the proxy.
 ///
 /// # Errors
 /// Returns [`TransportError`] if the proxy connection or SOCKS5 handshake fails.
@@ -708,23 +792,71 @@ pub fn connect_via_socks5h(
     target_port: u16,
     timeout_ms: u64,
 ) -> Result<TcpStream, TransportError> {
+    let tag = IsolatedCircuitTag::DirectWriteCircuit([0x5A; 16]);
+    connect_via_socks5h_isolated(proxy_host_port, target_host, target_port, &tag, timeout_ms)
+}
+
+/// Establishes a stream-isolated TCP tunnel through an RFC 1928 SOCKS5h proxy using an [`IsolatedCircuitTag`]
+/// so `OPAQUE AccountVault` sync and individual anonymous queues never share a Tor circuit (`D-0008`, `B-0087`).
+///
+/// # Errors
+/// Returns [`TransportError`] if the proxy connection or SOCKS5 handshake fails.
+pub fn connect_via_socks5h_isolated(
+    proxy_host_port: &str,
+    target_host: &str,
+    target_port: u16,
+    circuit_tag: &IsolatedCircuitTag,
+    timeout_ms: u64,
+) -> Result<TcpStream, TransportError> {
     if target_port == 0 {
         return Err(TransportError::InvalidPort);
     }
-    let host_bytes = target_host.trim().as_bytes();
-    if host_bytes.is_empty() || host_bytes.len() > 253 {
+    let trimmed_target = target_host.trim();
+    let host_bytes = trimmed_target.as_bytes();
+    if host_bytes.is_empty()
+        || host_bytes.len() > 253
+        || host_bytes
+            .iter()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
         return Err(TransportError::InvalidEndpoint);
     }
     let mut stream = open_timed_tcp_stream(proxy_host_port, timeout_ms)?;
-    // 1. Greeting: SOCKS v5, 1 auth method (0x00 = No Authentication)
+    // 1. Greeting: SOCKS v5, offer 0x02 (RFC 1929 Username/Password Stream Isolation) first, then 0x00
     stream
-        .write_all(&[0x05, 0x01, 0x00])
+        .write_all(&[0x05, 0x02, 0x02, 0x00])
         .map_err(|_| TransportError::InvalidEndpoint)?;
     let mut greeting_resp = [0u8; 2];
     stream
         .read_exact(&mut greeting_resp)
         .map_err(|_| TransportError::InvalidEndpoint)?;
-    if greeting_resp != [0x05, 0x00] {
+    if greeting_resp[0] != 0x05 {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    if greeting_resp[1] == 0x02 {
+        let mut token = derive_circuit_isolation_token(circuit_tag, &[0xA5; 32]);
+        let mut u_bytes = hex_encode_bytes(&token[0..12]).into_bytes();
+        let mut p_bytes = hex_encode_bytes(&token[12..24]).into_bytes();
+        token.fill(0);
+        let mut auth_req = Vec::with_capacity(3 + u_bytes.len() + p_bytes.len());
+        auth_req.push(0x01);
+        auth_req.push(u_bytes.len() as u8);
+        auth_req.extend_from_slice(&u_bytes);
+        auth_req.push(p_bytes.len() as u8);
+        auth_req.extend_from_slice(&p_bytes);
+        let write_res = stream.write_all(&auth_req);
+        auth_req.fill(0);
+        u_bytes.fill(0);
+        p_bytes.fill(0);
+        write_res.map_err(|_| TransportError::InvalidEndpoint)?;
+        let mut auth_resp = [0u8; 2];
+        stream
+            .read_exact(&mut auth_resp)
+            .map_err(|_| TransportError::InvalidEndpoint)?;
+        if auth_resp != [0x01, 0x00] {
+            return Err(TransportError::InvalidEndpoint);
+        }
+    } else if greeting_resp[1] != 0x00 {
         return Err(TransportError::InvalidEndpoint);
     }
 
@@ -763,74 +895,18 @@ pub fn connect_via_socks5h(
     Ok(stream)
 }
 
-/// Sends a fixed-size (`256`..`16384` B) encrypted capsule over TCP/HTTP to a remote `aegis-serverd` node
-/// anywhere in the world (`POST /api/v1/queue/send?queue=<hex>`).
-///
-/// # Errors
-/// Returns [`TransportError`] if `queue_id` is all-zero, `padded_frame` is not a valid bucket size,
-/// or the remote server rejects the request.
-pub fn send_capsule_over_tcp(
-    server_host_port: &str,
-    queue_id: &[u8; 32],
-    padded_frame: &[u8],
-    timeout_ms: u64,
-) -> Result<(), TransportError> {
-    if *queue_id == [0u8; 32] {
-        return Err(TransportError::InvalidEndpoint);
-    }
-    if !PADDING_BUCKETS.contains(&padded_frame.len()) {
-        return Err(TransportError::Protocol(
-            ProtocolError::MalformedPaddedFrame,
-        ));
-    }
-    let mut stream = open_timed_tcp_stream(server_host_port, timeout_ms)?;
-    let queue_hex = hex_encode_bytes(queue_id);
-    let body_hex = hex_encode_bytes(padded_frame);
-    let req = format!(
-        "POST /api/v1/queue/send?queue={queue_hex} HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
-        body_hex.len()
-    );
+fn read_bounded_http_response(stream: &mut TcpStream) -> Result<String, TransportError> {
+    let mut resp = Vec::with_capacity(1024);
     stream
-        .write_all(req.as_bytes())
+        .take(MAX_TRANSPORT_HTTP_RESPONSE_BYTES)
+        .read_to_end(&mut resp)
         .map_err(|_| TransportError::InvalidEndpoint)?;
-    let _ = stream.flush();
-
-    let mut resp = Vec::with_capacity(512);
-    let _ = stream.read_to_end(&mut resp);
-    let text = core::str::from_utf8(&resp).map_err(|_| TransportError::InvalidEndpoint)?;
-    if text.starts_with("HTTP/1.1 200") && text.contains("\"queued\"") {
-        Ok(())
-    } else {
-        Err(TransportError::InvalidEndpoint)
-    }
+    core::str::from_utf8(&resp)
+        .map(str::to_owned)
+        .map_err(|_| TransportError::InvalidEndpoint)
 }
 
-/// Polls and drains all pending encrypted capsules for `queue_id` over TCP/HTTP from a remote `aegis-serverd` node
-/// (`POST /api/v1/queue/poll?queue=<hex>`).
-///
-/// # Errors
-/// Returns [`TransportError`] if `queue_id` is all-zero, the connection fails, or any frame violates bucket padding.
-pub fn poll_capsules_over_tcp(
-    server_host_port: &str,
-    queue_id: &[u8; 32],
-    timeout_ms: u64,
-) -> Result<Vec<Vec<u8>>, TransportError> {
-    if *queue_id == [0u8; 32] {
-        return Err(TransportError::InvalidEndpoint);
-    }
-    let mut stream = open_timed_tcp_stream(server_host_port, timeout_ms)?;
-    let queue_hex = hex_encode_bytes(queue_id);
-    let req = format!(
-        "POST /api/v1/queue/poll?queue={queue_hex} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-    );
-    stream
-        .write_all(req.as_bytes())
-        .map_err(|_| TransportError::InvalidEndpoint)?;
-    let _ = stream.flush();
-
-    let mut resp = Vec::with_capacity(4096);
-    let _ = stream.read_to_end(&mut resp);
-    let text = core::str::from_utf8(&resp).map_err(|_| TransportError::InvalidEndpoint)?;
+fn parse_frames_hex_from_http_response(text: &str) -> Result<Vec<Vec<u8>>, TransportError> {
     if !text.starts_with("HTTP/1.1 200") {
         return Err(TransportError::InvalidEndpoint);
     }
@@ -863,6 +939,350 @@ pub fn poll_capsules_over_tcp(
         frames.push(raw);
     }
     Ok(frames)
+}
+
+/// Sends a fixed-size (`256`..`16384` B) encrypted capsule over TCP/HTTP to a remote `aegis-serverd` node
+/// anywhere in the world (`POST /api/v1/queue/send?queue=<hex>`).
+///
+/// # Errors
+/// Returns [`TransportError`] if `queue_id` is all-zero, `padded_frame` is not a valid bucket size,
+/// or the remote server rejects the request.
+pub fn send_capsule_over_tcp(
+    server_host_port: &str,
+    queue_id: &[u8; 32],
+    channel_key: &[u8; 32],
+    padded_frame: &[u8],
+    timeout_ms: u64,
+) -> Result<(), TransportError> {
+    if *queue_id == [0u8; 32] || *channel_key == [0u8; 32] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    if !PADDING_BUCKETS.contains(&padded_frame.len()) {
+        return Err(TransportError::Protocol(
+            ProtocolError::MalformedPaddedFrame,
+        ));
+    }
+    let clean_host = sanitize_endpoint_host_port(server_host_port)?;
+    let mut stream = open_timed_tcp_stream(clean_host, timeout_ms)?;
+    let queue_hex = hex_encode_bytes(queue_id);
+    let mut read_tok = derive_queue_read_token(queue_id, channel_key);
+    let auth_hash = compute_inbox_auth_hash(&read_tok);
+    read_tok.fill(0);
+    let auth_hex = hex_encode_bytes(&auth_hash);
+    let body_hex = hex_encode_bytes(padded_frame);
+    let req = format!(
+        "POST /api/v1/queue/send?queue={queue_hex}&auth_hash={auth_hex} HTTP/1.1\r\nHost: {clean_host}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
+        body_hex.len()
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.flush();
+
+    let text = read_bounded_http_response(&mut stream)?;
+    if text.starts_with("HTTP/1.1 200") && text.contains("\"queued\"") {
+        Ok(())
+    } else {
+        Err(TransportError::InvalidEndpoint)
+    }
+}
+
+/// Polls pending encrypted capsules for `queue_id` over TCP/HTTP from a remote `aegis-serverd` node
+/// (`POST /api/v1/queue/poll?queue=<hex>`).
+///
+/// # Errors
+/// Returns [`TransportError`] if `queue_id` is all-zero, the connection fails, or any frame violates bucket padding.
+pub fn poll_capsules_over_tcp(
+    server_host_port: &str,
+    queue_id: &[u8; 32],
+    channel_key: &[u8; 32],
+    timeout_ms: u64,
+) -> Result<Vec<Vec<u8>>, TransportError> {
+    if *queue_id == [0u8; 32] || *channel_key == [0u8; 32] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let clean_host = sanitize_endpoint_host_port(server_host_port)?;
+    let mut stream = open_timed_tcp_stream(clean_host, timeout_ms)?;
+    let queue_hex = hex_encode_bytes(queue_id);
+    let mut read_tok = derive_queue_read_token(queue_id, channel_key);
+    let tok_hex = hex_encode_bytes(&read_tok);
+    read_tok.fill(0);
+    let req = format!(
+        "POST /api/v1/queue/poll?queue={queue_hex}&read_token={tok_hex} HTTP/1.1\r\nHost: {clean_host}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.flush();
+
+    let text = read_bounded_http_response(&mut stream)?;
+    parse_frames_hex_from_http_response(&text)
+}
+
+/// Sends a fixed-size (`256`..`16384` B) encrypted capsule through an RFC 1928 SOCKS5h proxy / Tor
+/// without local DNS resolution (`D-0008`, `T-0014`, `B-0087`).
+///
+/// # Errors
+/// Returns [`TransportError`] if the proxy handshake or capsule delivery fails.
+pub fn send_capsule_via_socks5(
+    proxy_host_port: &str,
+    target_host_port: &str,
+    queue_id: &[u8; 32],
+    channel_key: &[u8; 32],
+    padded_frame: &[u8],
+    timeout_ms: u64,
+) -> Result<(), TransportError> {
+    if *queue_id == [0u8; 32] || *channel_key == [0u8; 32] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    if !PADDING_BUCKETS.contains(&padded_frame.len()) {
+        return Err(TransportError::Protocol(
+            ProtocolError::MalformedPaddedFrame,
+        ));
+    }
+    let clean_target = sanitize_endpoint_host_port(target_host_port)?;
+    let (target_host, port_str) = clean_target
+        .rsplit_once(':')
+        .ok_or(TransportError::InvalidEndpoint)?;
+    let target_port = port_str
+        .parse::<u16>()
+        .map_err(|_| TransportError::InvalidPort)?;
+    let mut q16 = [0u8; 16];
+    q16.copy_from_slice(&queue_id[0..16]);
+    let tag = IsolatedCircuitTag::DirectWriteCircuit(q16);
+    let mut stream =
+        connect_via_socks5h_isolated(proxy_host_port, target_host, target_port, &tag, timeout_ms)?;
+    let queue_hex = hex_encode_bytes(queue_id);
+    let mut read_tok = derive_queue_read_token(queue_id, channel_key);
+    let auth_hash = compute_inbox_auth_hash(&read_tok);
+    read_tok.fill(0);
+    let auth_hex = hex_encode_bytes(&auth_hash);
+    let body_hex = hex_encode_bytes(padded_frame);
+    let req = format!(
+        "POST /api/v1/queue/send?queue={queue_hex}&auth_hash={auth_hex} HTTP/1.1\r\nHost: {clean_target}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
+        body_hex.len()
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.flush();
+
+    let text = read_bounded_http_response(&mut stream)?;
+    if text.starts_with("HTTP/1.1 200") && text.contains("\"queued\"") {
+        Ok(())
+    } else {
+        Err(TransportError::InvalidEndpoint)
+    }
+}
+
+/// Polls pending encrypted capsules for `queue_id` through an RFC 1928 SOCKS5h proxy / Tor
+/// without local DNS resolution (`D-0008`, `T-0014`, `B-0087`).
+///
+/// # Errors
+/// Returns [`TransportError`] if the proxy handshake or queue poll fails.
+pub fn poll_capsules_via_socks5(
+    proxy_host_port: &str,
+    target_host_port: &str,
+    queue_id: &[u8; 32],
+    channel_key: &[u8; 32],
+    timeout_ms: u64,
+) -> Result<Vec<Vec<u8>>, TransportError> {
+    if *queue_id == [0u8; 32] || *channel_key == [0u8; 32] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let clean_target = sanitize_endpoint_host_port(target_host_port)?;
+    let (target_host, port_str) = clean_target
+        .rsplit_once(':')
+        .ok_or(TransportError::InvalidEndpoint)?;
+    let target_port = port_str
+        .parse::<u16>()
+        .map_err(|_| TransportError::InvalidPort)?;
+    let mut q16 = [0u8; 16];
+    q16.copy_from_slice(&queue_id[0..16]);
+    let tag = IsolatedCircuitTag::QueueReadCircuit(q16);
+    let mut stream =
+        connect_via_socks5h_isolated(proxy_host_port, target_host, target_port, &tag, timeout_ms)?;
+    let queue_hex = hex_encode_bytes(queue_id);
+    let mut read_tok = derive_queue_read_token(queue_id, channel_key);
+    let tok_hex = hex_encode_bytes(&read_tok);
+    read_tok.fill(0);
+    let req = format!(
+        "POST /api/v1/queue/poll?queue={queue_hex}&read_token={tok_hex} HTTP/1.1\r\nHost: {clean_target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.flush();
+
+    let text = read_bounded_http_response(&mut stream)?;
+    parse_frames_hex_from_http_response(&text)
+}
+
+/// Sends a fixed-size (`256`..`16384` B) encrypted capsule via a Zero-Metadata Blind Relay (`D-0023`).
+/// The client connects only to `relay_host_port` (Entry Node A), which blindly forwards the capsule
+/// to `target_host_port` (Exit Node B) so Exit Node B never observes the sender's IP address.
+///
+/// # Errors
+/// Returns [`TransportError`] if endpoints, `queue_id`, or `padded_frame` are invalid or forwarding fails.
+pub fn send_capsule_via_blind_relay(
+    relay_host_port: &str,
+    target_host_port: &str,
+    queue_id: &[u8; 32],
+    channel_key: &[u8; 32],
+    padded_frame: &[u8],
+    timeout_ms: u64,
+) -> Result<(), TransportError> {
+    if *queue_id == [0u8; 32] || *channel_key == [0u8; 32] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    if !PADDING_BUCKETS.contains(&padded_frame.len()) {
+        return Err(TransportError::Protocol(
+            ProtocolError::MalformedPaddedFrame,
+        ));
+    }
+    let clean_relay = sanitize_endpoint_host_port(relay_host_port)?;
+    let clean_target = sanitize_endpoint_host_port(target_host_port)?;
+    let mut stream = open_timed_tcp_stream(clean_relay, timeout_ms)?;
+    let queue_hex = hex_encode_bytes(queue_id);
+    let mut read_tok = derive_queue_read_token(queue_id, channel_key);
+    let auth_hash = compute_inbox_auth_hash(&read_tok);
+    read_tok.fill(0);
+    let auth_hex = hex_encode_bytes(&auth_hash);
+    let body_hex = hex_encode_bytes(padded_frame);
+    let req = format!(
+        "POST /api/v1/queue/relay?target={clean_target}&queue={queue_hex}&auth_hash={auth_hex} HTTP/1.1\r\nHost: {clean_relay}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
+        body_hex.len()
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.flush();
+
+    let text = read_bounded_http_response(&mut stream)?;
+    if text.starts_with("HTTP/1.1 200") && text.contains("\"relayed\"") {
+        Ok(())
+    } else {
+        Err(TransportError::InvalidEndpoint)
+    }
+}
+
+/// Polls pending encrypted capsules for `queue_id` from `target_host_port` (Exit Node B) through
+/// `relay_host_port` (Entry Node A) so Exit Node B never learns the recipient's IP address (`D-0023`).
+///
+/// # Errors
+/// Returns [`TransportError`] if endpoints or `queue_id` are invalid or the relay poll fails.
+pub fn poll_capsules_via_blind_relay(
+    relay_host_port: &str,
+    target_host_port: &str,
+    queue_id: &[u8; 32],
+    channel_key: &[u8; 32],
+    timeout_ms: u64,
+) -> Result<Vec<Vec<u8>>, TransportError> {
+    if *queue_id == [0u8; 32] || *channel_key == [0u8; 32] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let clean_relay = sanitize_endpoint_host_port(relay_host_port)?;
+    let clean_target = sanitize_endpoint_host_port(target_host_port)?;
+    let mut stream = open_timed_tcp_stream(clean_relay, timeout_ms)?;
+    let queue_hex = hex_encode_bytes(queue_id);
+    let mut read_tok = derive_queue_read_token(queue_id, channel_key);
+    let tok_hex = hex_encode_bytes(&read_tok);
+    read_tok.fill(0);
+    let req = format!(
+        "POST /api/v1/queue/relay_poll?target={clean_target}&queue={queue_hex}&read_token={tok_hex} HTTP/1.1\r\nHost: {clean_relay}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.flush();
+
+    let text = read_bounded_http_response(&mut stream)?;
+    parse_frames_hex_from_http_response(&text)
+}
+
+/// Sends a fixed-size (`256`..`16384` B) encrypted capsule via a 2-Hop + Exit (3-Node) Blind Relay Chain (`D-0023`).
+/// `Client -> entry_relay (Node 1) -> middle_hop (Node 2) -> target_host_port (Node 3)`.
+/// Even if Node 1 and Node 3 collude, Node 2 breaks the routing correlation between sender IP and destination queue.
+///
+/// # Errors
+/// Returns [`TransportError`] if any endpoint, `queue_id`, or `padded_frame` is invalid or forwarding fails.
+pub fn send_capsule_via_multihop_chain(
+    entry_relay_host_port: &str,
+    middle_hop_host_port: &str,
+    target_host_port: &str,
+    queue_id: &[u8; 32],
+    channel_key: &[u8; 32],
+    padded_frame: &[u8],
+    timeout_ms: u64,
+) -> Result<(), TransportError> {
+    if *queue_id == [0u8; 32] || *channel_key == [0u8; 32] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    if !PADDING_BUCKETS.contains(&padded_frame.len()) {
+        return Err(TransportError::Protocol(
+            ProtocolError::MalformedPaddedFrame,
+        ));
+    }
+    let clean_entry = sanitize_endpoint_host_port(entry_relay_host_port)?;
+    let clean_hop = sanitize_endpoint_host_port(middle_hop_host_port)?;
+    let clean_target = sanitize_endpoint_host_port(target_host_port)?;
+    let mut stream = open_timed_tcp_stream(clean_entry, timeout_ms)?;
+    let queue_hex = hex_encode_bytes(queue_id);
+    let mut read_tok = derive_queue_read_token(queue_id, channel_key);
+    let auth_hash = compute_inbox_auth_hash(&read_tok);
+    read_tok.fill(0);
+    let auth_hex = hex_encode_bytes(&auth_hash);
+    let body_hex = hex_encode_bytes(padded_frame);
+    let req = format!(
+        "POST /api/v1/queue/relay?hop={clean_hop}&target={clean_target}&queue={queue_hex}&auth_hash={auth_hex} HTTP/1.1\r\nHost: {clean_entry}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
+        body_hex.len()
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.flush();
+
+    let text = read_bounded_http_response(&mut stream)?;
+    if text.starts_with("HTTP/1.1 200") && text.contains("\"relayed\"") {
+        Ok(())
+    } else {
+        Err(TransportError::InvalidEndpoint)
+    }
+}
+
+/// Polls pending encrypted capsules for `queue_id` via a 2-Hop + Exit (3-Node) Blind Relay Chain (`D-0023`).
+///
+/// # Errors
+/// Returns [`TransportError`] if endpoints or `queue_id` are invalid or the multi-hop poll fails.
+pub fn poll_capsules_via_multihop_chain(
+    entry_relay_host_port: &str,
+    middle_hop_host_port: &str,
+    target_host_port: &str,
+    queue_id: &[u8; 32],
+    channel_key: &[u8; 32],
+    timeout_ms: u64,
+) -> Result<Vec<Vec<u8>>, TransportError> {
+    if *queue_id == [0u8; 32] || *channel_key == [0u8; 32] {
+        return Err(TransportError::InvalidEndpoint);
+    }
+    let clean_entry = sanitize_endpoint_host_port(entry_relay_host_port)?;
+    let clean_hop = sanitize_endpoint_host_port(middle_hop_host_port)?;
+    let clean_target = sanitize_endpoint_host_port(target_host_port)?;
+    let mut stream = open_timed_tcp_stream(clean_entry, timeout_ms)?;
+    let queue_hex = hex_encode_bytes(queue_id);
+    let mut read_tok = derive_queue_read_token(queue_id, channel_key);
+    let tok_hex = hex_encode_bytes(&read_tok);
+    read_tok.fill(0);
+    let req = format!(
+        "POST /api/v1/queue/relay_poll?hop={clean_hop}&target={clean_target}&queue={queue_hex}&read_token={tok_hex} HTTP/1.1\r\nHost: {clean_entry}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|_| TransportError::InvalidEndpoint)?;
+    let _ = stream.flush();
+
+    let text = read_bounded_http_response(&mut stream)?;
+    parse_frames_hex_from_http_response(&text)
 }
 
 #[cfg(test)]

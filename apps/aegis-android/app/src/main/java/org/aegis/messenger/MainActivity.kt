@@ -74,7 +74,7 @@ class MainActivity : ComponentActivity() {
      */
     private fun setCalculatorLauncherAlias(enableCalculatorDisguise: Boolean) {
         val pm = packageManager
-        val mainComp = ComponentName(this, MainActivity::class.java)
+        val defaultAlias = ComponentName(this, "org.aegis.messenger.DefaultLauncherAlias")
         val calcComp = ComponentName(this, "org.aegis.messenger.CalculatorDisguiseAlias")
 
         if (enableCalculatorDisguise) {
@@ -84,13 +84,13 @@ class MainActivity : ComponentActivity() {
                 PackageManager.DONT_KILL_APP
             )
             pm.setComponentEnabledSetting(
-                mainComp,
+                defaultAlias,
                 PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
                 PackageManager.DONT_KILL_APP
             )
         } else {
             pm.setComponentEnabledSetting(
-                mainComp,
+                defaultAlias,
                 PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
                 PackageManager.DONT_KILL_APP
             )

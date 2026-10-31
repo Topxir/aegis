@@ -46,10 +46,10 @@ class AegisBackgroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Aegis Зашифрованный Канал (Zero-GMS)",
+                "Системная фоновая синхронизация",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Фоновый приём зашифрованных капсул сообщений без утечки метаданных"
+                description = "Фоновая синхронизация данных без телеметрии"
                 setShowBadge(false)
                 lockscreenVisibility = Notification.VISIBILITY_SECRET
             }

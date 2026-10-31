@@ -44,4 +44,6 @@ Thumbs.db
 !builds/**
 !builds/android-apk/*.apk
 !builds/desktop/*.exe
+!builds/desktop/*.dll
 !builds/server/*.exe
+*.WebView2/

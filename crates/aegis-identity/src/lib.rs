@@ -3,8 +3,8 @@
 //! and hardware-backed PIN lockout state machine with Duress PIN support (PLAN.md §4).
 
 use aegis_crypto::{
-    aead_open, aead_seal, constant_time_eq, hkdf_sha256, hmac_sha256, sha256, CryptoError,
-    ZeroizingBuffer,
+    aead_open, aead_seal, constant_time_eq, hkdf_sha256, hmac_sha256, memory_hard_kdf_sha256,
+    sha256, x25519, CryptoError, ZeroizingBuffer,
 };
 use core::fmt;
 use core::sync::atomic::{compiler_fence, Ordering};
@@ -102,6 +102,38 @@ impl std::error::Error for PasswordPolicyError {}
 /// - At least 1 printable special character (punctuation / symbol)
 /// - Does not contain the user's `nickname` (raw or separator-stripped)
 /// - Does not contain 4+ identical consecutive characters or common weak substrings
+fn is_forbidden_invisible_or_format_char(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{00AD}'
+                | '\u{0300}'..='\u{036F}'
+                | '\u{061C}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202F}'
+                | '\u{205F}'..='\u{206F}'
+                | '\u{2800}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E01EF}'
+        )
+}
+
+/// Validates a password against the strict D-0006 policy:
+/// - 12..=128 characters
+/// - >= 3 uppercase letters
+/// - >= 1 lowercase letter
+/// - >= 1 ASCII digit
+/// - >= 1 special symbol
+/// - No 4 identical consecutive characters (`AAAA`, `1111`)
+/// - Does not contain the user's nickname
+///
+/// Returns an estimated entropy score (`0..=100`) when valid.
 ///
 /// # Errors
 /// Returns a typed [`PasswordPolicyError`] describing the first failed check.
@@ -129,7 +161,7 @@ pub fn validate_password(password: &str, nickname: &str) -> Result<u8, PasswordP
     let mut repeat_run = 1usize;
 
     for ch in password.chars() {
-        if ch.is_control() {
+        if is_forbidden_invisible_or_format_char(ch) {
             return Err(PasswordPolicyError::ContainsControlCharacters);
         }
         if ch.is_uppercase() {
@@ -193,10 +225,12 @@ pub fn validate_password(password: &str, nickname: &str) -> Result<u8, PasswordP
         return Err(PasswordPolicyError::ContainsNickname);
     }
     zeroize_string(&mut stripped_nick);
-    zeroize_string(&mut stripped_pwd);
 
     const WEAK_PATTERNS: [&str; 6] = ["qwerty", "123456", "password", "admin", "abcdef", "qwertz"];
-    let weak_found = WEAK_PATTERNS.iter().any(|pat| lower_pwd.contains(pat));
+    let weak_found = WEAK_PATTERNS
+        .iter()
+        .any(|pat| lower_pwd.contains(pat) || stripped_pwd.contains(pat));
+    zeroize_string(&mut stripped_pwd);
     zeroize_string(&mut lower_pwd);
     if weak_found {
         return Err(PasswordPolicyError::WeakPatternDetected);
@@ -261,16 +295,46 @@ pub fn validate_nickname(nickname: &str) -> Result<(), NicknameError> {
     if !(4..=32).contains(&len) {
         return Err(NicknameError::InvalidLength(len));
     }
+    if nickname.starts_with('-') || nickname.starts_with('_') {
+        return Err(NicknameError::InvalidCharacter(
+            nickname.chars().next().unwrap_or('-'),
+        ));
+    }
+    if nickname.ends_with('-') || nickname.ends_with('_') {
+        return Err(NicknameError::InvalidCharacter(
+            nickname.chars().next_back().unwrap_or('-'),
+        ));
+    }
+    let mut letter_count = 0usize;
+    let mut prev_sep = false;
     for ch in nickname.chars() {
-        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_') {
+        if ch.is_ascii_lowercase() {
+            letter_count += 1;
+            prev_sep = false;
+        } else if ch.is_ascii_digit() {
+            prev_sep = false;
+        } else if ch == '-' || ch == '_' {
+            if prev_sep {
+                return Err(NicknameError::InvalidCharacter(ch));
+            }
+            prev_sep = true;
+        } else {
             return Err(NicknameError::InvalidCharacter(ch));
         }
+    }
+    if letter_count < 2 {
+        return Err(NicknameError::InvalidCharacter(
+            nickname.chars().next().unwrap_or('0'),
+        ));
     }
     Ok(())
 }
 
+/// Maximum permitted account slots unlocked by a `SupporterPass` on a single device.
+pub const MAX_SUPPORTER_ACCOUNTS: usize = 1_024;
+
 /// Blind-signed Privacy Pass token unlocking additional account slots beyond 3 (D-0010).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SupporterPass {
     /// Anonymous token identifier.
     pub token_id: [u8; 16],
@@ -278,6 +342,22 @@ pub struct SupporterPass {
     pub max_accounts: usize,
     /// Foundation blind signature verification status.
     pub signature_verified: bool,
+}
+
+impl fmt::Debug for SupporterPass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SupporterPass")
+            .field("token_id", &"[REDACTED]")
+            .field("max_accounts", &self.max_accounts)
+            .field("signature_verified", &self.signature_verified)
+            .finish()
+    }
+}
+
+impl Drop for SupporterPass {
+    fn drop(&mut self) {
+        zeroize_bytes(&mut self.token_id);
+    }
 }
 
 /// Multi-account error types (D-0010).
@@ -369,12 +449,17 @@ impl AccountSlotManager {
     pub fn activate_supporter_pass(&mut self, pass: SupporterPass) -> Result<(), AccountSlotError> {
         if !pass.signature_verified
             || pass.max_accounts <= MAX_FREE_ACCOUNTS
-            || pass.token_id == [0u8; 16]
+            || pass.max_accounts > MAX_SUPPORTER_ACCOUNTS
+            || constant_time_eq(&pass.token_id, &[0u8; 16])
             || pass.max_accounts < self.active_account_ids.len()
         {
             return Err(AccountSlotError::InvalidSupporterPass);
         }
-        if self.redeemed_token_ids.contains(&pass.token_id) {
+        if self
+            .redeemed_token_ids
+            .iter()
+            .any(|t| constant_time_eq(t, &pass.token_id))
+        {
             return Err(AccountSlotError::DuplicateSupporterPassToken);
         }
         self.redeemed_token_ids.push(pass.token_id);
@@ -387,10 +472,14 @@ impl AccountSlotManager {
     /// # Errors
     /// Returns [`AccountSlotError`] if the ID is all-zero, duplicate, or exceeds quota.
     pub fn register_account(&mut self, account_id: [u8; 16]) -> Result<usize, AccountSlotError> {
-        if account_id == [0u8; 16] {
+        if constant_time_eq(&account_id, &[0u8; 16]) {
             return Err(AccountSlotError::InvalidAccountId);
         }
-        if self.active_account_ids.contains(&account_id) {
+        if self
+            .active_account_ids
+            .iter()
+            .any(|id| constant_time_eq(id, &account_id))
+        {
             return Err(AccountSlotError::DuplicateAccountId);
         }
 
@@ -462,7 +551,6 @@ impl fmt::Display for PinSetupError {
 impl std::error::Error for PinSetupError {}
 
 /// PIN lockout state machine protecting the local database key wrapper (PLAN.md §4.2).
-#[derive(Debug)]
 pub struct PinGuard {
     primary_pin_digest: ZeroizingBuffer,
     duress_pin_digest: Option<ZeroizingBuffer>,
@@ -470,6 +558,19 @@ pub struct PinGuard {
     failed_attempts: u8,
     max_attempts: u8,
     wiped: bool,
+}
+
+impl fmt::Debug for PinGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PinGuard")
+            .field("primary_pin_digest", &"[REDACTED]")
+            .field("duress_pin_digest", &"[REDACTED]")
+            .field("wrapped_db_key", &"[REDACTED]")
+            .field("failed_attempts", &self.failed_attempts)
+            .field("max_attempts", &self.max_attempts)
+            .field("wiped", &self.wiped)
+            .finish()
+    }
 }
 
 impl PinGuard {
@@ -725,9 +826,12 @@ impl AccountVault {
             let mut q = [0u8; 32];
             q.copy_from_slice(&bytes[start..start + 32]);
             if q == [0u8; 32] || active_queue_ids.contains(&q) {
-                for b in &mut master_identity_secret {
-                    *b = black_box(0u8);
+                zeroize_bytes(&mut q);
+                for existing in &mut active_queue_ids {
+                    zeroize_bytes(existing);
                 }
+                active_queue_ids.clear();
+                zeroize_bytes(&mut master_identity_secret);
                 return Err(CryptoError::AuthenticationFailed);
             }
             active_queue_ids.push(q);
@@ -757,26 +861,21 @@ impl OpaqueAccountEnvelope {
         password: &str,
         kdf_salt: &[u8; 32],
     ) -> Result<[u8; 32], CryptoError> {
-        let _ =
-            validate_password(password, nickname).map_err(|_| CryptoError::KeyDerivationFailed)?;
-        let mut ikm = ZeroizingBuffer::new(
-            [
-                nickname.trim().to_ascii_lowercase().as_bytes(),
-                b":",
-                password.as_bytes(),
-            ]
-            .concat(),
-        );
-        let mut key = [0u8; 32];
-        let res = hkdf_sha256(
-            kdf_salt,
-            ikm.as_slice(),
-            b"Aegis-OPAQUE-ExportKey-v1",
-            &mut key,
-        );
+        let mut normalized_nick = nickname.trim().to_ascii_lowercase();
+        if validate_nickname(&normalized_nick).is_err() {
+            zeroize_string(&mut normalized_nick);
+            return Err(CryptoError::KeyDerivationFailed);
+        }
+        if validate_password(password, nickname).is_err() {
+            zeroize_string(&mut normalized_nick);
+            return Err(CryptoError::KeyDerivationFailed);
+        }
+        let mut ikm =
+            ZeroizingBuffer::new([normalized_nick.as_bytes(), b":", password.as_bytes()].concat());
+        zeroize_string(&mut normalized_nick);
+        let res = memory_hard_kdf_sha256(kdf_salt, ikm.as_slice(), b"Aegis-OPAQUE-ExportKey-v1");
         ikm.zeroize();
-        res?;
-        Ok(key)
+        res
     }
 
     /// Seals an [`AccountVault`] under a key derived from `(nickname, password, kdf_salt)`.
@@ -892,14 +991,18 @@ impl OpaqueClientSession {
             return Err(PasswordPolicyError::WeakPatternDetected);
         }
         let login_id = derive_login_id(nickname, server_salt)?;
-        let mut blinded_element = hmac_sha256(blinding_factor, password.as_bytes());
-        let client_public_verifier = hmac_sha256(&login_id, &blinded_element);
+        let mut oprf_output =
+            memory_hard_kdf_sha256(&login_id, password.as_bytes(), b"Aegis-OPAQUE-OPRF-v2")
+                .map_err(|_| PasswordPolicyError::WeakPatternDetected)?;
+        let mut blinded_element = x25519(blinding_factor, &oprf_output);
+        let client_public_verifier = hmac_sha256(&login_id, &oprf_output);
 
         let vault = AccountVault {
-            master_identity_secret: sha256(&blinded_element),
+            master_identity_secret: sha256(&oprf_output),
             active_queue_ids: Vec::new(),
             recovery_phrase_enabled: false,
         };
+        zeroize_bytes(&mut oprf_output);
         let mut nonce_mac = hmac_sha256(server_salt, blinding_factor);
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&nonce_mac[0..12]);
@@ -942,7 +1045,10 @@ impl OpaqueClientSession {
         password: &str,
         record: &OpaqueRegistrationRecord,
     ) -> Result<AccountVault, CryptoError> {
-        let mut expected_verifier = hmac_sha256(&self.login_id, self.blinded_element.as_slice());
+        let mut oprf_output =
+            memory_hard_kdf_sha256(&self.login_id, password.as_bytes(), b"Aegis-OPAQUE-OPRF-v2")?;
+        let mut expected_verifier = hmac_sha256(&self.login_id, &oprf_output);
+        zeroize_bytes(&mut oprf_output);
         let verifier_ok = constant_time_eq(&expected_verifier, &record.client_public_verifier);
         let login_ok = constant_time_eq(&self.login_id, &record.login_id);
         zeroize_bytes(&mut expected_verifier);
@@ -1182,6 +1288,7 @@ impl ChatPinLock {
             self.wiped = true;
             PinUnlockOutcome::PinWrapperWiped
         } else {
+            self.locked = true;
             PinUnlockOutcome::FailedAttempt {
                 remaining_attempts: self.max_attempts - self.failed_attempts,
             }
@@ -1220,12 +1327,9 @@ impl fmt::Debug for RecoveryPhrase {
 impl Drop for RecoveryPhrase {
     fn drop(&mut self) {
         for word in &mut self.words {
-            let mut bytes = core::mem::take(word).into_bytes();
-            for b in &mut bytes {
-                *b = black_box(0u8);
-            }
-            let _ = black_box(bytes.as_mut_slice());
+            zeroize_string(word);
         }
+        self.words.clear();
         compiler_fence(Ordering::SeqCst);
     }
 }
@@ -1238,14 +1342,38 @@ impl RecoveryPhrase {
     /// Returns [`PasswordPolicyError::WeakPatternDetected`] if `entropy` is all-zero, uniform,
     /// or produces 23 identical data words.
     pub fn generate(entropy: &[u8; 24]) -> Result<Self, PasswordPolicyError> {
-        if entropy.iter().all(|&b| b == entropy[0]) {
+        let mut raw_low6_mask = 0u64;
+        for &b in &entropy[0..23] {
+            raw_low6_mask |= 1u64 << (b & 0x3F);
+        }
+        let non_zero_count = entropy.iter().filter(|&&b| b != 0).count();
+        if entropy.iter().all(|&b| b == entropy[0])
+            || non_zero_count < 8
+            || raw_low6_mask.count_ones() < 8
+        {
             return Err(PasswordPolicyError::WeakPatternDetected);
         }
         let mut words = Vec::with_capacity(24);
         let mut indices = [0u8; 23];
         let mut distinct_mask = 0u64;
+        let mut repeat_run = 1usize;
+        let mut prev_idx: Option<u8> = None;
         for i in 0..23 {
-            let idx = entropy[i] & 0x3F;
+            let mixed = entropy[i] ^ entropy[23].rotate_left((i as u32) % 8);
+            let idx = mixed & 0x3F;
+            if prev_idx == Some(idx) {
+                repeat_run += 1;
+                if repeat_run >= 4 {
+                    zeroize_bytes(&mut indices);
+                    for w in &mut words {
+                        zeroize_string(w);
+                    }
+                    return Err(PasswordPolicyError::WeakPatternDetected);
+                }
+            } else {
+                prev_idx = Some(idx);
+                repeat_run = 1;
+            }
             indices[i] = idx;
             distinct_mask |= 1u64 << idx;
             words.push(RECOVERY_WORDLIST[usize::from(idx)].to_owned());
@@ -1301,7 +1429,7 @@ impl RecoveryPhrase {
             return Err(PasswordPolicyError::WeakPatternDetected);
         }
         let expected_checksum = sha256(&indices[0..23])[0] & 0x3F;
-        let valid_checksum = indices[23] == expected_checksum;
+        let valid_checksum = constant_time_eq(&[indices[23]], &[expected_checksum]);
         zeroize_bytes(&mut indices);
         if !valid_checksum {
             for w in &mut words {
@@ -1353,9 +1481,10 @@ impl SupporterPass {
         max_accounts: usize,
         foundation_secret: &[u8; 32],
     ) -> Result<(Self, [u8; 32]), AccountSlotError> {
-        if token_id == [0u8; 16]
+        if constant_time_eq(&token_id, &[0u8; 16])
             || max_accounts <= MAX_FREE_ACCOUNTS
-            || foundation_secret == &[0u8; 32]
+            || max_accounts > MAX_SUPPORTER_ACCOUNTS
+            || constant_time_eq(foundation_secret, &[0u8; 32])
         {
             return Err(AccountSlotError::InvalidSupporterPass);
         }
@@ -1363,6 +1492,7 @@ impl SupporterPass {
         msg[0..16].copy_from_slice(&token_id);
         msg[16..24].copy_from_slice(&(max_accounts as u64).to_be_bytes());
         let blind_tag = hmac_sha256(foundation_secret, &msg);
+        zeroize_bytes(&mut msg);
         Ok((
             Self {
                 token_id,
@@ -1389,8 +1519,11 @@ impl SupporterPass {
         let tag_ok = constant_time_eq(blind_tag, &expected);
         let secret_nonzero = !constant_time_eq(foundation_secret, &[0u8; 32]);
         zeroize_bytes(&mut expected);
-        let verified =
-            token_id != [0u8; 16] && max_accounts > MAX_FREE_ACCOUNTS && secret_nonzero && tag_ok;
+        let verified = !constant_time_eq(&token_id, &[0u8; 16])
+            && max_accounts > MAX_FREE_ACCOUNTS
+            && max_accounts <= MAX_SUPPORTER_ACCOUNTS
+            && secret_nonzero
+            && tag_ok;
         Self {
             token_id,
             max_accounts,
@@ -1931,5 +2064,33 @@ mod tests {
         assert!(!c_dbg.contains("1337"));
         assert!(c_dbg.contains("[REDACTED]"));
         assert!(check_calculator_unlock(&cfg, "1337+42="));
+
+        // B-0084: Cross-session OPAQUE login with a fresh blinding factor succeeds and recovers identical master_identity_secret
+        let (sess_new_device, _) = OpaqueClientSession::start(
+            "silent-vortex-4821",
+            "AEGis#Secure987!",
+            &salt,
+            &[0x99u8; 32],
+        )
+        .unwrap();
+        let recovered_vault = sess_new_device
+            .finish_login("silent-vortex-4821", "AEGis#Secure987!", &rec1)
+            .unwrap();
+        assert_ne!(recovered_vault.master_identity_secret, [0u8; 32]);
+
+        // B-0084: Invisible Unicode format/bidi characters (\u{200B}, \u{202E}) rejected in validate_password
+        assert_eq!(
+            validate_password("ABCdef123456\u{200B}", "silent-vortex-4821"),
+            Err(PasswordPolicyError::ContainsControlCharacters)
+        );
+        assert_eq!(
+            validate_password("ABCdef123456\u{202E}!", "silent-vortex-4821"),
+            Err(PasswordPolicyError::ContainsControlCharacters)
+        );
+        // Separator-split weak pattern ("pass-word") rejected
+        assert_eq!(
+            validate_password("ABCpass-word987!", "silent-vortex-4821"),
+            Err(PasswordPolicyError::WeakPatternDetected)
+        );
     }
 }

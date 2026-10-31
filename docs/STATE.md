@@ -2,8 +2,8 @@
 
 Обновляется после каждой задачи. Легенда: ✅ готово · 🔧 в работе · ❌ не начато · ⚠ проблема
 
-Текущая фаза: **13. Security Reset (T-0017, rev.2) — документы утверждены; Phase 0 (ADR) в работе; код не меняется.**
-Обновлено: 2026-10-30
+Текущая фаза: **13. Native Desktop & Clean Messenger UI Hardening (T-0018 выполнена; параллельно ведётся архитектурный трек Security Reset T-0017).**
+Обновлено: 2026-10-31
 
 > ⚠ Статусы модулей ниже описывают старый прототип T-0016. Они **не**
 > являются доказательством безопасности: ядро самописное, TLS/Tor/MLS/PQXDH
@@ -21,8 +21,8 @@
 | aegis-launcher | ✅ | Мастер запуска своего сервера в 1 клик (`generate_static_ip_vps_script`, `generate_docker_compose` с закреплённым `@sha256:...` дайджестом, `AEGIS_BLINDING_SALT_HEX` и `logging: driver: "none"`, `generate_cloud_init_script`, `generate_torrc_hidden_service`); исправлены `B-0017`, `B-0027`, `B-0063`, `B-0075`, `B-0081`, `B-0089` |
 | aegis-plugins | ✅ | Магазин тем (`BuiltInThemes`, `ThemePack`) и песочница ботов/мостов (`BotBridgeDescriptor` с проверкой 56-символьных v3 `.onion` и защитой от SSRF); исправлены `B-0018`, `B-0028`, `B-0065`, `B-0076`, `B-0081`, `B-0089` |
 | aegis-ffi | ✅ | Единый фасад `AegisClientCore` (с очисткой всей ёмкости `0..capacity()` в `zeroize_string`, реэкспортом `send_capsule_via_blind_relay`, `poll_capsules_via_blind_relay`, `send_capsule_via_socks5`, `poll_capsules_via_socks5`) + `tests/red_team_anonymity_audit.rs`; исправлены `B-0019`, `B-0029`, `B-0076`, `B-0082`, `B-0089` |
-| aegis-ui-android | ✅ | Android-клиент «Aegis Quantum Aurora Vault» и релизный APK (`builds/android-apk/aegis-messenger-release.apk`, 100% Clean-Room дизайн без упоминаний сторонних брендов, капсулы Pad-Before-Encrypt + PBKDF-4096, поддержка Blind Relay, защита от повторов `seenCapsuleHexPrefixes`, затирание ключей в памяти JVM); исправлены `B-0031`, `B-0052`..`B-0055`, `B-0067`, `B-0078`, `B-0082`, `B-0090`, `B-0092` |
-| aegis-ui-desktop | ✅ | Desktop-клиент «Aegis Quantum Aurora Vault» (`builds/desktop/aegis-desktop.exe`, монотонные уникальные нонсы `outbound_capsule_seq`, фильтрация повторов и своих капсул `seen_capsule_digests`, настройка Blind Relay в 1 клик, изоляция локальных заметок «Избранное», строгая проверка `Origin`); исправлены `B-0030`, `B-0050`, `B-0051`, `B-0066`, `B-0077`, `B-0082`, `B-0090`, `B-0091` |
+| aegis-ui-android | ✅ | Android-клиент с чистым мессенджер-интерфейсом (`AegisComposeApp.kt`: список чатов, пузыри переписки, нижняя навигация `Чаты / Серверы / Профиль`, диалоги Safety Number и приглашений) и свежий релизный APK (`builds/android-apk/aegis-messenger-release.apk`, капсулы Pad-Before-Encrypt + PBKDF-4096, поддержка Blind Relay, защита от повторов `seenCapsuleHexPrefixes`, затирание ключей в памяти JVM); исправлены `B-0031`, `B-0052`..`B-0055`, `B-0067`, `B-0078`, `B-0082`, `B-0090`, `B-0092`, `T-0018` |
+| aegis-ui-desktop | ✅ | Нативный Windows-клиент (`builds/desktop/aegis-desktop.exe` + `WebView2Loader.dll` на базе `tao 0.37.2` + `wry 0.57.1`, `D-0028`) с чистым трёхколоночным мессенджер-интерфейсом, поддержкой `POST /action` для форм пароля, жёсткой изоляцией WebView2 (`with_devtools(false)`, запрет новых окон и внешних URL), монотонными уникальными нонсами `outbound_capsule_seq`, фильтрацией повторов `seen_capsule_digests` и настройкой Blind Relay; исправлены `B-0030`, `B-0050`, `B-0051`, `B-0066`, `B-0077`, `B-0082`, `B-0090`, `B-0091`, `T-0018` |
 
 ## Сделано
 - Утверждены архитектурные решения `D-0001`..`D-0023` в `docs/DECISIONS.md`
@@ -51,6 +51,9 @@
   ограничения.
 - ✅ Подготовлен `docs/security-reset/LEGAL_CONSULTATION_BRIEF.md`:
   вопросы юристу по юрформе, гранту, псевдонимности, liability и IP.
+- ✅ Выполнена задача **T-0018** (`D-0028`, 2026-10-31):
+  - Десктопный клиент `aegis-desktop.exe` переведён на нативное окно Windows WebView2 (`tao 0.37.2` + `wry 0.57.1`) с запретом внешних переходов, всплывающих окон, разрешений и DevTools, а также с поддержкой `POST /action` для отправки пароля.
+  - Интерфейсы Desktop и Android полностью обновлены до чистого и удобного мессенджер-дизайна; все 102 теста Rust workspace и `cargo clippy` проходят без ошибок; пересобраны все релизные артефакты в `builds/` и обновлён `builds/SHA256SUMS.txt`.
 
 ## В работе
 - **T-0017 (Phase 0, планирование)**: утвердить бюджет/подход к

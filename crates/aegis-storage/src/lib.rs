@@ -432,6 +432,17 @@ impl EncryptedVaultDb {
         Ok(&self.contacts)
     }
 
+    fn message_ct_key(message_id: &[u8; 32]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut s = String::with_capacity(4 + 64);
+        s.push_str("msg:");
+        for &b in message_id {
+            s.push(char::from(HEX[usize::from(b >> 4)]));
+            s.push(char::from(HEX[usize::from(b & 0x0F)]));
+        }
+        s
+    }
+
     /// Stores a chat message (with optional disappearing expiration timestamp).
     ///
     /// # Errors
@@ -443,6 +454,38 @@ impl EncryptedVaultDb {
             zeroize_string(&mut message.plaintext_body);
             return Err(StorageError::CorruptedRecord);
         }
+        if let Some(existing) = self
+            .messages
+            .iter()
+            .find(|m| m.message_id == message.message_id)
+        {
+            if existing.chat_id != message.chat_id {
+                zeroize_string(&mut message.plaintext_body);
+                return Err(StorageError::CorruptedRecord);
+            }
+        }
+        if message
+            .expires_at_unix_secs
+            .is_none_or(|exp| exp > message.created_at_unix_secs)
+        {
+            let ct_key = Self::message_ct_key(&message.message_id);
+            let mut sealed_body = ZeroizingBuffer::new(message.plaintext_body.as_bytes().to_vec());
+            let put_res = self.put_encrypted_record(&ct_key, sealed_body.as_slice());
+            sealed_body.zeroize();
+            if let Err(err) = put_res {
+                zeroize_string(&mut message.plaintext_body);
+                return Err(err);
+            }
+        } else {
+            let ct_key = Self::message_ct_key(&message.message_id);
+            if let Some(pos) = self.kv_ciphertext.iter().position(|(k, _, _)| k == &ct_key) {
+                let (mut k, mut nonce, mut ct_bytes) = self.kv_ciphertext.remove(pos);
+                zeroize_string(&mut k);
+                zeroize_bytes(&mut nonce);
+                zeroize_bytes(&mut ct_bytes);
+            }
+        }
+
         if let Some(existing) = self
             .messages
             .iter_mut()
@@ -494,6 +537,13 @@ impl EncryptedVaultDb {
             if active {
                 kept.push(m);
             } else {
+                let ct_key = Self::message_ct_key(&m.message_id);
+                if let Some(pos) = self.kv_ciphertext.iter().position(|(k, _, _)| k == &ct_key) {
+                    let (mut k, mut nonce, mut ct_bytes) = self.kv_ciphertext.remove(pos);
+                    zeroize_string(&mut k);
+                    zeroize_bytes(&mut nonce);
+                    zeroize_bytes(&mut ct_bytes);
+                }
                 zeroize_bytes(&mut m.message_id);
                 zeroize_bytes(&mut m.chat_id);
                 zeroize_string(&mut m.plaintext_body);
@@ -666,6 +716,8 @@ impl EncryptedVaultDb {
 
         let seal_res = aead_seal(&derived_key, nonce, &header_aad, &payload)
             .map_err(|_| StorageError::CorruptedRecord);
+        let cap = payload.capacity();
+        payload.resize(cap, 0u8);
         zeroize_bytes(&mut payload);
         zeroize_bytes(&mut derived_key);
         let ct = seal_res?;
@@ -733,17 +785,20 @@ impl EncryptedVaultDb {
         let bytes = decrypted.as_slice();
         let mut cursor = 0usize;
 
-        let read_slice =
-            |buf: &[u8], cur: &mut usize, len: usize| -> Result<Vec<u8>, StorageError> {
-                let end = cur.checked_add(len).ok_or(StorageError::CorruptedRecord)?;
-                let slice = buf.get(*cur..end).ok_or(StorageError::CorruptedRecord)?;
-                *cur = end;
-                Ok(slice.to_vec())
-            };
+        fn read_slice<'b>(
+            buf: &'b [u8],
+            cur: &mut usize,
+            len: usize,
+        ) -> Result<&'b [u8], StorageError> {
+            let end = cur.checked_add(len).ok_or(StorageError::CorruptedRecord)?;
+            let slice = buf.get(*cur..end).ok_or(StorageError::CorruptedRecord)?;
+            *cur = end;
+            Ok(slice)
+        }
         let read_32 = |buf: &[u8], cur: &mut usize| -> Result<[u8; 32], StorageError> {
             let v = read_slice(buf, cur, 32)?;
             let mut out = [0u8; 32];
-            out.copy_from_slice(&v);
+            out.copy_from_slice(v);
             Ok(out)
         };
         let read_u8 = |buf: &[u8], cur: &mut usize| -> Result<u8, StorageError> {
@@ -774,8 +829,9 @@ impl EncryptedVaultDb {
             let verified = verified_byte == 1;
             let name_len = read_u32(bytes, &mut cursor)? as usize;
             let name_bytes = read_slice(bytes, &mut cursor, name_len)?;
-            let display_name =
-                String::from_utf8(name_bytes).map_err(|_| StorageError::CorruptedRecord)?;
+            let display_name = core::str::from_utf8(name_bytes)
+                .map(str::to_owned)
+                .map_err(|_| StorageError::CorruptedRecord)?;
             if db.contacts.iter().any(|c| c.contact_id == contact_id) {
                 return Err(StorageError::CorruptedRecord);
             }
@@ -795,11 +851,14 @@ impl EncryptedVaultDb {
             let updated_at_unix_secs = read_u64(bytes, &mut cursor)?;
             let title_len = read_u32(bytes, &mut cursor)? as usize;
             let title_bytes = read_slice(bytes, &mut cursor, title_len)?;
-            let title =
-                String::from_utf8(title_bytes).map_err(|_| StorageError::CorruptedRecord)?;
+            let title = core::str::from_utf8(title_bytes)
+                .map(str::to_owned)
+                .map_err(|_| StorageError::CorruptedRecord)?;
             let body_len = read_u32(bytes, &mut cursor)? as usize;
             let body_bytes = read_slice(bytes, &mut cursor, body_len)?;
-            let body = String::from_utf8(body_bytes).map_err(|_| StorageError::CorruptedRecord)?;
+            let body = core::str::from_utf8(body_bytes)
+                .map(str::to_owned)
+                .map_err(|_| StorageError::CorruptedRecord)?;
             if db.notes.iter().any(|n| n.note_id == note_id) {
                 return Err(StorageError::CorruptedRecord);
             }
@@ -832,8 +891,9 @@ impl EncryptedVaultDb {
             };
             let body_len = read_u32(bytes, &mut cursor)? as usize;
             let body_bytes = read_slice(bytes, &mut cursor, body_len)?;
-            let plaintext_body =
-                String::from_utf8(body_bytes).map_err(|_| StorageError::CorruptedRecord)?;
+            let plaintext_body = core::str::from_utf8(body_bytes)
+                .map(str::to_owned)
+                .map_err(|_| StorageError::CorruptedRecord)?;
             if db.messages.iter().any(|m| m.message_id == message_id) {
                 return Err(StorageError::CorruptedRecord);
             }
@@ -851,7 +911,9 @@ impl EncryptedVaultDb {
             return Err(StorageError::CorruptedRecord);
         }
 
-        db.record_counter = (db.contacts.len() + db.notes.len() + db.messages.len()) as u64;
+        let nonce_epoch = u64::from(u32::from_be_bytes([nonce[0], nonce[1], nonce[2], nonce[3]]));
+        db.record_counter = (nonce_epoch << 16)
+            .saturating_add((db.contacts.len() + db.notes.len() + db.messages.len() + 1) as u64);
         Ok(db)
     }
 }
@@ -1179,5 +1241,27 @@ mod tests {
         let db_dbg = format!("{db:?}");
         assert!(!db_dbg.contains("super-secret"));
         assert_eq!(db.purge_expired_messages(250).unwrap(), 1);
+
+        // B-0085: Duplicate message_id attempting to move a message to a different chat_id must fail closed
+        db.insert_message(StoredMessage {
+            message_id: [0x21; 32],
+            chat_id: [0xAA; 32],
+            sender_is_self: true,
+            plaintext_body: "first-chat".to_owned(),
+            created_at_unix_secs: 100,
+            expires_at_unix_secs: None,
+        })
+        .unwrap();
+        assert_eq!(
+            db.insert_message(StoredMessage {
+                message_id: [0x21; 32],
+                chat_id: [0xBB; 32],
+                sender_is_self: true,
+                plaintext_body: "cross-chat-overwrite".to_owned(),
+                created_at_unix_secs: 101,
+                expires_at_unix_secs: None,
+            }),
+            Err(StorageError::CorruptedRecord)
+        );
     }
 }

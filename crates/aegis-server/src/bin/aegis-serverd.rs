@@ -6,23 +6,108 @@
 //! - `GET /api/v1/pow` — Adaptive Anti-DDoS Proof-of-Work challenge parameters
 //! - `POST /api/v1/queue/send` — Enqueue padded E2EE frame into anonymous unidirectional queue
 //! - `POST /api/v1/queue/poll` — Drain pending frames from anonymous unidirectional queue
+//! - `POST /api/v1/queue/relay` — Blindly forward a padded capsule to a remote federation node (`D-0023`)
+//! - `POST /api/v1/queue/relay_poll` — Blindly poll pending capsules from a remote federation node (`D-0023`)
 //! - `POST /api/v1/support/ticket` — Submit encrypted E2EE support ticket
 //! - `POST /api/v1/donate/claim-pass` — Issue blind-signed `SupporterPass` token
 //!
 //! Run with `--self-test` for CI verification without binding a persistent loop.
 
+use aegis_crypto::sha256;
+use aegis_protocol::hex_decode_bytes;
 use aegis_server::{handle_http_request, FederationServerState, SupportPortalState};
 use std::env;
 use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::time::Duration;
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-fn parse_http_request(raw: &[u8]) -> Option<(&str, &str, &str)> {
+const MAX_HTTP_REQ_BYTES: usize = 65_536;
+const MAX_CONCURRENT_CONNECTIONS: usize = 128;
+
+fn read_http_request_bytes(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 8192];
+    let mut expected_total: Option<usize> = None;
+
+    loop {
+        let n = match stream.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        if n == 0 {
+            break;
+        }
+        if buf.len().saturating_add(n) > MAX_HTTP_REQ_BYTES {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+
+        if expected_total.is_none() {
+            if let Some(hdr_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let body_start = hdr_end + 4;
+                let head_str = core::str::from_utf8(&buf[..hdr_end]).ok()?;
+                let mut content_len = 0usize;
+                let mut seen_content_len = false;
+                for line in head_str.lines().skip(1) {
+                    let (k, v) = line.split_once(':')?;
+                    if k.is_empty() || k.bytes().any(|b| b.is_ascii_whitespace()) {
+                        return None;
+                    }
+                    let k_trim = k.trim();
+                    if k_trim.eq_ignore_ascii_case("transfer-encoding") {
+                        return None;
+                    }
+                    if k_trim.eq_ignore_ascii_case("content-length") {
+                        if seen_content_len {
+                            return None;
+                        }
+                        seen_content_len = true;
+                        let v_trim = v.trim();
+                        if v_trim.is_empty() || !v_trim.bytes().all(|b| b.is_ascii_digit()) {
+                            return None;
+                        }
+                        content_len = v_trim.parse::<usize>().ok()?;
+                        if body_start.saturating_add(content_len) > MAX_HTTP_REQ_BYTES {
+                            return None;
+                        }
+                    }
+                }
+                expected_total = Some(body_start + content_len);
+            }
+        }
+        if let Some(total) = expected_total {
+            if buf.len() >= total {
+                buf.truncate(total);
+                break;
+            }
+        }
+    }
+    if buf.is_empty() {
+        None
+    } else if let Some(total) = expected_total {
+        if buf.len() == total {
+            Some(buf)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn parse_http_request(raw: &[u8]) -> Option<(&str, &str, &str, bool)> {
     let text = core::str::from_utf8(raw).ok()?;
     let (head, body) = text.split_once("\r\n\r\n")?;
     let mut lines = head.lines();
-    let first_line = lines.next()?.trim();
-    if first_line.is_empty() || first_line.chars().any(char::is_control) {
+    let first_line = lines.next()?.trim_end_matches('\r');
+    if first_line.is_empty()
+        || first_line.starts_with(char::is_whitespace)
+        || first_line.chars().any(char::is_control)
+    {
         return None;
     }
     let mut parts = first_line.split_whitespace();
@@ -30,13 +115,53 @@ fn parse_http_request(raw: &[u8]) -> Option<(&str, &str, &str)> {
     let path = parts.next()?;
     let version = parts.next()?;
     if parts.next().is_some()
+        || !method.bytes().all(|b| b.is_ascii_alphabetic())
         || !path.starts_with('/')
-        || path.len() > 256
+        || path.len() > 1024
         || !(version == "HTTP/1.1" || version == "HTTP/1.0")
     {
         return None;
     }
-    Some((method, path, body))
+    let mut is_relayed_hop = false;
+    for hdr_line in lines {
+        let clean_hdr = hdr_line.trim_end_matches('\r');
+        if clean_hdr.chars().any(char::is_control) {
+            return None;
+        }
+        let (k, _v) = clean_hdr.split_once(':')?;
+        if k.trim().eq_ignore_ascii_case("x-aegis-blind-relay") {
+            is_relayed_hop = true;
+        }
+    }
+    Some((method, path, body, is_relayed_hop))
+}
+
+fn init_server_blinding_salt() -> [u8; 32] {
+    if let Ok(hex_salt) = env::var("AEGIS_BLINDING_SALT_HEX") {
+        if let Ok(mut bytes) = hex_decode_bytes(&hex_salt) {
+            if bytes.len() == 32 && bytes.iter().any(|&b| b != 0) {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&bytes);
+                bytes.fill(0);
+                return out;
+            }
+            bytes.fill(0);
+        }
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0xA7A7_2026_u128, |d| d.as_nanos());
+    let pid = std::process::id();
+    let mut seed = [0u8; 28];
+    seed[0..8].copy_from_slice(b"AEG-SLT1");
+    seed[8..24].copy_from_slice(&nanos.to_le_bytes());
+    seed[24..28].copy_from_slice(&pid.to_le_bytes());
+    let mut salt = sha256(&seed);
+    seed.fill(0);
+    if salt == [0u8; 32] {
+        salt[0] = 0xA7;
+    }
+    salt
 }
 
 fn run_self_test() -> Result<(), String> {
@@ -149,46 +274,112 @@ fn main() {
         "aegis-serverd listening on http://{bind_addr} (Static-IP & Direct Ready, Zero IP Logs, OPAQUE + Queues + Support Portal)"
     );
 
-    let mut server_state = FederationServerState::default();
-    let mut portal_state = SupportPortalState::new();
+    let shared_state = Arc::new(Mutex::new((
+        FederationServerState::new(init_server_blinding_salt()),
+        SupportPortalState::new(),
+    )));
+    let active_conns = Arc::new(AtomicUsize::new(0));
 
     for stream_res in listener.incoming() {
         let Ok(mut stream) = stream_res else {
             continue;
         };
-        let io_timeout = Some(Duration::from_secs(2));
-        let _ = stream.set_read_timeout(io_timeout);
-        let _ = stream.set_write_timeout(io_timeout);
-        // Note: peer_addr() is intentionally NEVER inspected or logged (AGENTS.md §2.3, D-0007).
-        let mut buf = [0u8; 32_768];
-        let Ok(n) = stream.read(&mut buf) else {
-            continue;
-        };
-        if n == 0 {
+        let current = active_conns.fetch_add(1, Ordering::SeqCst);
+        if current >= MAX_CONCURRENT_CONNECTIONS {
+            active_conns.fetch_sub(1, Ordering::SeqCst);
             continue;
         }
-        let (status, content_type, response_body) =
-            if let Some((method, path, body)) = parse_http_request(&buf[..n]) {
-                handle_http_request(&mut server_state, &mut portal_state, method, path, body)
-            } else {
-                (
-                    400,
-                    "application/json",
-                    r#"{"error":"bad_request"}"#.to_owned(),
-                )
-            };
-        let status_text = match status {
-            200 => "OK",
-            400 => "Bad Request",
-            429 => "Too Many Requests",
-            _ => "Not Found",
-        };
-        let header = format!(
-            "HTTP/1.1 {status} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n",
-            response_body.len()
-        );
-        let _ = stream.write_all(header.as_bytes());
-        let _ = stream.write_all(response_body.as_bytes());
-        let _ = stream.flush();
+        let state_ref = Arc::clone(&shared_state);
+        let conns_ref = Arc::clone(&active_conns);
+
+        let _ = thread::spawn(move || {
+            struct ActiveConnGuard(Arc<AtomicUsize>);
+            impl Drop for ActiveConnGuard {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let _conn_guard = ActiveConnGuard(conns_ref);
+            let io_timeout = Some(Duration::from_secs(2));
+            let _ = stream.set_read_timeout(io_timeout);
+            let _ = stream.set_write_timeout(io_timeout);
+            // Note: peer_addr() is intentionally NEVER inspected or logged (AGENTS.md §2.3, D-0007).
+            if let Some(raw_req) = read_http_request_bytes(&mut stream) {
+                let (status, content_type, response_body) = if let Some((
+                    method,
+                    path,
+                    body,
+                    is_relayed_hop,
+                )) = parse_http_request(&raw_req)
+                {
+                    let (clean_path, query_opt) = path
+                        .trim()
+                        .split_once('?')
+                        .map_or((path.trim(), None), |(p, q)| (p, Some(q)));
+                    let has_hop_param = query_opt.is_some_and(|q| {
+                        q.split('&').any(|pair| {
+                            pair.split_once('=')
+                                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("hop"))
+                        })
+                    });
+                    let is_relay_route = clean_path.eq_ignore_ascii_case("/api/v1/queue/relay")
+                        || clean_path.eq_ignore_ascii_case("/api/v1/queue/relay_poll");
+                    if is_relayed_hop
+                        && (clean_path.eq_ignore_ascii_case("/api/v1/tunnel/sealed")
+                            || (is_relay_route && has_hop_param))
+                    {
+                        (
+                            400,
+                            "application/json",
+                            r#"{"error":"relay_loop_detected"}"#.to_owned(),
+                        )
+                    } else if method.eq_ignore_ascii_case("POST") && is_relay_route {
+                        {
+                            let mut guard = state_ref
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let _ = guard.0.record_request(false);
+                        }
+                        let mut stateless_srv = FederationServerState::default();
+                        let mut stateless_portal = SupportPortalState::new();
+                        handle_http_request(
+                            &mut stateless_srv,
+                            &mut stateless_portal,
+                            method,
+                            path,
+                            body,
+                        )
+                    } else {
+                        let mut guard = state_ref
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let (ref mut srv, ref mut portal) = *guard;
+                        handle_http_request(srv, portal, method, path, body)
+                    }
+                } else {
+                    (
+                        400,
+                        "application/json",
+                        r#"{"error":"bad_request"}"#.to_owned(),
+                    )
+                };
+                let status_text = match status {
+                    200 => "OK",
+                    400 => "Bad Request",
+                    403 => "Forbidden",
+                    429 => "Too Many Requests",
+                    500 => "Internal Server Error",
+                    502 => "Bad Gateway",
+                    _ => "Not Found",
+                };
+                let header = format!(
+                    "HTTP/1.1 {status} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(response_body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
     }
 }

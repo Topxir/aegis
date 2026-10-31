@@ -336,6 +336,7 @@ fn sha256_compress(state: &mut [u32; 8], block: &[u8; 64]) {
     for word in &mut w {
         *word = black_box(0);
     }
+    let _ = black_box((a, b, c, d, e, f, g, h));
     compiler_fence(Ordering::SeqCst);
 }
 
@@ -462,6 +463,386 @@ pub fn hkdf_sha256(
     Ok(())
 }
 
+/// Memory-hard password and channel-key stretching function (64 KiB pseudorandom mixing matrix + multi-pass indexing).
+/// Thwarts parallel GPU brute-force attacks against `OpaqueAccountEnvelope` and channel codes.
+///
+/// # Errors
+/// Returns [`CryptoError::KeyDerivationFailed`] if `ikm` or `salt` is empty.
+pub fn memory_hard_kdf_sha256(
+    salt: &[u8],
+    ikm: &[u8],
+    info: &[u8],
+) -> Result<[u8; 32], CryptoError> {
+    if salt.is_empty() || ikm.is_empty() {
+        return Err(CryptoError::KeyDerivationFailed);
+    }
+    const BLOCKS: usize = 2048; // 2048 * 32B = 64 KiB working state
+    let mut seed = [0u8; 32];
+    hkdf_sha256(salt, ikm, info, &mut seed)?;
+
+    let mut matrix = vec![[0u8; 32]; BLOCKS];
+    let mut prev = seed;
+    zeroize_slice(&mut seed);
+    for (idx, slot) in matrix.iter_mut().enumerate() {
+        let idx_bytes = (idx as u32).to_le_bytes();
+        prev = hmac_sha256(&prev, &idx_bytes);
+        *slot = prev;
+    }
+
+    // 2 passes of data-dependent / pseudorandom memory mixing across the matrix
+    for pass in 0..2u8 {
+        for i in 0..BLOCKS {
+            let j = (usize::from(prev[0]) | (usize::from(prev[1]) << 8)) & (BLOCKS - 1);
+            let mut block_in = [0u8; 65];
+            block_in[0..32].copy_from_slice(&matrix[i]);
+            block_in[32..64].copy_from_slice(&matrix[j]);
+            block_in[64] = pass;
+            prev = sha256(&block_in);
+            zeroize_slice(&mut block_in);
+            for (dst, &src) in matrix[i].iter_mut().zip(prev.iter()) {
+                *dst ^= src;
+            }
+        }
+    }
+
+    let mut final_key = hmac_sha256(&prev, &matrix[BLOCKS - 1]);
+    zeroize_slice(&mut prev);
+    for slot in &mut matrix {
+        zeroize_slice(slot);
+    }
+    if constant_time_eq(&final_key, &[0u8; 32]) {
+        final_key[0] = 1;
+    }
+    Ok(final_key)
+}
+
+// ============================================================================
+// Standard RFC 7748 X25519 Diffie-Hellman (Constant-Time Montgomery Ladder)
+// ============================================================================
+
+type Fe25519 = [u64; 5];
+
+const MASK51: u64 = (1u64 << 51) - 1;
+
+fn fe_from_bytes(bytes: &[u8; 32]) -> Fe25519 {
+    let mut b = *bytes;
+    b[31] &= 0x7F;
+    let load64 = |offset: usize| -> u64 {
+        u64::from_le_bytes([
+            b[offset],
+            b[offset + 1],
+            b[offset + 2],
+            b[offset + 3],
+            b[offset + 4],
+            b[offset + 5],
+            b[offset + 6],
+            b[offset + 7],
+        ])
+    };
+    let l0 = load64(0) & MASK51;
+    let l1 = (load64(6) >> 3) & MASK51;
+    let l2 = (load64(12) >> 6) & MASK51;
+    let l3 = (load64(19) >> 1) & MASK51;
+    let l4 = (load64(24) >> 12) & MASK51;
+    zeroize_slice(&mut b);
+    [l0, l1, l2, l3, l4]
+}
+
+fn fe_add(a: &Fe25519, b: &Fe25519) -> Fe25519 {
+    [
+        a[0] + b[0],
+        a[1] + b[1],
+        a[2] + b[2],
+        a[3] + b[3],
+        a[4] + b[4],
+    ]
+}
+
+fn fe_sub(a: &Fe25519, b: &Fe25519) -> Fe25519 {
+    // Add 2*p in 51-bit limbs to prevent underflow before subtracting b
+    const TWO_P0: u64 = 0x000f_ffff_ffff_ffda;
+    const TWO_PN: u64 = 0x000f_ffff_ffff_fffe;
+    [
+        (a[0] + TWO_P0) - b[0],
+        (a[1] + TWO_PN) - b[1],
+        (a[2] + TWO_PN) - b[2],
+        (a[3] + TWO_PN) - b[3],
+        (a[4] + TWO_PN) - b[4],
+    ]
+}
+
+fn fe_carry(t: [u128; 5]) -> Fe25519 {
+    let mut r0 = t[0];
+    let mut r1 = t[1];
+    let mut r2 = t[2];
+    let mut r3 = t[3];
+    let mut r4 = t[4];
+
+    r1 += r0 >> 51;
+    r0 &= u128::from(MASK51);
+    r2 += r1 >> 51;
+    r1 &= u128::from(MASK51);
+    r3 += r2 >> 51;
+    r2 &= u128::from(MASK51);
+    r4 += r3 >> 51;
+    r3 &= u128::from(MASK51);
+    r0 += (r4 >> 51) * 19;
+    r4 &= u128::from(MASK51);
+
+    r1 += r0 >> 51;
+    r0 &= u128::from(MASK51);
+    r2 += r1 >> 51;
+    r1 &= u128::from(MASK51);
+
+    [r0 as u64, r1 as u64, r2 as u64, r3 as u64, r4 as u64]
+}
+
+fn fe_mul(a: &Fe25519, b: &Fe25519) -> Fe25519 {
+    let a0 = u128::from(a[0]);
+    let a1 = u128::from(a[1]);
+    let a2 = u128::from(a[2]);
+    let a3 = u128::from(a[3]);
+    let a4 = u128::from(a[4]);
+
+    let b0 = u128::from(b[0]);
+    let b1 = u128::from(b[1]);
+    let b2 = u128::from(b[2]);
+    let b3 = u128::from(b[3]);
+    let b4 = u128::from(b[4]);
+
+    let b1_19 = b1 * 19;
+    let b2_19 = b2 * 19;
+    let b3_19 = b3 * 19;
+    let b4_19 = b4 * 19;
+
+    let t0 = a0 * b0 + a1 * b4_19 + a2 * b3_19 + a3 * b2_19 + a4 * b1_19;
+    let t1 = a0 * b1 + a1 * b0 + a2 * b4_19 + a3 * b3_19 + a4 * b2_19;
+    let t2 = a0 * b2 + a1 * b1 + a2 * b0 + a3 * b4_19 + a4 * b3_19;
+    let t3 = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0 + a4 * b4_19;
+    let t4 = a0 * b4 + a1 * b3 + a2 * b2 + a3 * b1 + a4 * b0;
+
+    fe_carry([t0, t1, t2, t3, t4])
+}
+
+fn fe_sq(a: &Fe25519) -> Fe25519 {
+    fe_mul(a, a)
+}
+
+fn fe_mul_a24(a: &Fe25519) -> Fe25519 {
+    const A24: u128 = 121_665;
+    fe_carry([
+        u128::from(a[0]) * A24,
+        u128::from(a[1]) * A24,
+        u128::from(a[2]) * A24,
+        u128::from(a[3]) * A24,
+        u128::from(a[4]) * A24,
+    ])
+}
+
+fn fe_cswap(swap: u64, a: &mut Fe25519, b: &mut Fe25519) {
+    let mask = 0u64.wrapping_sub(swap & 1);
+    for i in 0..5 {
+        let diff = mask & (a[i] ^ b[i]);
+        a[i] ^= diff;
+        b[i] ^= diff;
+    }
+}
+
+fn fe_invert(z: &Fe25519) -> Fe25519 {
+    // Constant-time Fermat inversion z^(2^255 - 21) mod p
+    let mut r = *z;
+    for _ in 0..249 {
+        r = fe_sq(&r);
+        r = fe_mul(&r, z);
+    }
+    // Remaining 5 bits of p - 2 = 2^255 - 21: binary 01011 (11)
+    r = fe_sq(&r); // 0
+    r = fe_sq(&r);
+    r = fe_mul(&r, z); // 1
+    r = fe_sq(&r); // 0
+    r = fe_sq(&r);
+    r = fe_mul(&r, z); // 1
+    r = fe_sq(&r);
+    fe_mul(&r, z) // 1
+}
+
+fn fe_to_bytes(h: &Fe25519) -> [u8; 32] {
+    let mut t = *h;
+    for _ in 0..2 {
+        let mut c = t[0] >> 51;
+        t[0] &= MASK51;
+        t[1] += c;
+        c = t[1] >> 51;
+        t[1] &= MASK51;
+        t[2] += c;
+        c = t[2] >> 51;
+        t[2] &= MASK51;
+        t[3] += c;
+        c = t[3] >> 51;
+        t[3] &= MASK51;
+        t[4] += c;
+        c = t[4] >> 51;
+        t[4] &= MASK51;
+        t[0] += c * 19;
+    }
+
+    // Constant-time conditional subtraction of p = 2^255 - 19
+    let mut g0 = t[0].wrapping_add(19);
+    let mut c = g0 >> 51;
+    g0 &= MASK51;
+    let mut g1 = t[1].wrapping_add(c);
+    c = g1 >> 51;
+    g1 &= MASK51;
+    let mut g2 = t[2].wrapping_add(c);
+    c = g2 >> 51;
+    g2 &= MASK51;
+    let mut g3 = t[3].wrapping_add(c);
+    c = g3 >> 51;
+    g3 &= MASK51;
+    let mut g4 = t[4].wrapping_add(c).wrapping_sub(1u64 << 51);
+
+    let mask = (g4 >> 63).wrapping_sub(1);
+    let inv = !mask;
+    g4 &= MASK51;
+    let f0 = (t[0] & inv) | (g0 & mask);
+    let f1 = (t[1] & inv) | (g1 & mask);
+    let f2 = (t[2] & inv) | (g2 & mask);
+    let f3 = (t[3] & inv) | (g3 & mask);
+    let f4 = (t[4] & inv) | (g4 & mask);
+
+    let w0 = f0 | (f1 << 51);
+    let w1 = (f1 >> 13) | (f2 << 38);
+    let w2 = (f2 >> 26) | (f3 << 25);
+    let w3 = (f3 >> 39) | (f4 << 12);
+
+    let mut out = [0u8; 32];
+    out[0..8].copy_from_slice(&w0.to_le_bytes());
+    out[8..16].copy_from_slice(&w1.to_le_bytes());
+    out[16..24].copy_from_slice(&w2.to_le_bytes());
+    out[24..32].copy_from_slice(&w3.to_le_bytes());
+    for limb in &mut t {
+        *limb = black_box(0);
+    }
+    compiler_fence(Ordering::SeqCst);
+    out
+}
+
+/// Computes the standard RFC 7748 X25519 Diffie-Hellman function `X25519(scalar, u_coordinate)`
+/// using a constant-time Montgomery ladder over $GF(2^{255}-19)$.
+#[must_use]
+pub fn x25519(scalar: &[u8; 32], u_coordinate: &[u8; 32]) -> [u8; 32] {
+    let mut k = *scalar;
+    k[0] &= 248;
+    k[31] &= 127;
+    k[31] |= 64;
+
+    let x_1 = fe_from_bytes(u_coordinate);
+    let mut x_2: Fe25519 = [1, 0, 0, 0, 0];
+    let mut z_2: Fe25519 = [0, 0, 0, 0, 0];
+    let mut x_3 = x_1;
+    let mut z_3: Fe25519 = [1, 0, 0, 0, 0];
+    let mut swap = 0u64;
+
+    for t in (0..255).rev() {
+        let k_t = u64::from((k[t >> 3] >> (t & 7)) & 1);
+        swap ^= k_t;
+        fe_cswap(swap, &mut x_2, &mut x_3);
+        fe_cswap(swap, &mut z_2, &mut z_3);
+        swap = k_t;
+
+        let a = fe_add(&x_2, &z_2);
+        let aa = fe_sq(&a);
+        let b = fe_sub(&x_2, &z_2);
+        let bb = fe_sq(&b);
+        let e = fe_sub(&aa, &bb);
+        let c = fe_add(&x_3, &z_3);
+        let d = fe_sub(&x_3, &z_3);
+        let da = fe_mul(&d, &a);
+        let cb = fe_mul(&c, &b);
+        let dacb_add = fe_add(&da, &cb);
+        x_3 = fe_sq(&dacb_add);
+        let dacb_sub = fe_sub(&da, &cb);
+        let dacb_sub_sq = fe_sq(&dacb_sub);
+        z_3 = fe_mul(&x_1, &dacb_sub_sq);
+        x_2 = fe_mul(&aa, &bb);
+        let a24_e = fe_mul_a24(&e);
+        let aa_plus_a24e = fe_add(&aa, &a24_e);
+        z_2 = fe_mul(&e, &aa_plus_a24e);
+    }
+
+    fe_cswap(swap, &mut x_2, &mut x_3);
+    fe_cswap(swap, &mut z_2, &mut z_3);
+    zeroize_slice(&mut k);
+
+    let mut z_inv = fe_invert(&z_2);
+    let mut shared = fe_mul(&x_2, &z_inv);
+    let out = fe_to_bytes(&shared);
+    for limb in &mut x_2 {
+        *limb = black_box(0);
+    }
+    for limb in &mut z_2 {
+        *limb = black_box(0);
+    }
+    for limb in &mut x_3 {
+        *limb = black_box(0);
+    }
+    for limb in &mut z_3 {
+        *limb = black_box(0);
+    }
+    for limb in &mut z_inv {
+        *limb = black_box(0);
+    }
+    for limb in &mut shared {
+        *limb = black_box(0);
+    }
+    compiler_fence(Ordering::SeqCst);
+    out
+}
+
+fn canonical_x25519_u(bytes: &[u8; 32]) -> [u8; 32] {
+    let fe = fe_from_bytes(bytes);
+    fe_to_bytes(&fe)
+}
+
+const LOW_ORDER_X25519_CANONICAL_POINTS: [[u8; 32]; 5] = [
+    [0u8; 32],
+    [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0,
+    ],
+    [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4,
+        0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49,
+        0xb8, 0x00,
+    ],
+    [
+        0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24, 0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef,
+        0x5b, 0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86, 0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f,
+        0x11, 0x57,
+    ],
+    [
+        0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x7f,
+    ],
+];
+
+fn is_low_order_x25519_u(canon_u: &[u8; 32]) -> bool {
+    let mut matched = 0u8;
+    for pt in &LOW_ORDER_X25519_CANONICAL_POINTS {
+        matched |= u8::from(constant_time_eq(canon_u, pt));
+    }
+    matched != 0
+}
+
+/// Computes the RFC 7748 X25519 public key `X25519(private_scalar, 9)` from a 32-byte private key.
+#[must_use]
+pub fn x25519_basepoint(private_scalar: &[u8; 32]) -> [u8; 32] {
+    let mut base = [0u8; 32];
+    base[0] = 9;
+    x25519(private_scalar, &base)
+}
+
 // ============================================================================
 // Standard RFC 8439 ChaCha20-Poly1305 AEAD
 // ============================================================================
@@ -554,7 +935,7 @@ fn chacha20_xor(key: &[u8; 32], initial_counter: u32, nonce: &[u8; 12], data: &m
             *dst ^= ks;
         }
         zeroize_slice(&mut block);
-        counter = counter.wrapping_add(1);
+        counter = counter.saturating_add(1);
     }
 }
 
@@ -741,7 +1122,9 @@ fn compute_rfc8439_tag(otk: &[u8; 32], aad: &[u8], ciphertext: &[u8]) -> [u8; 16
     mac_data.resize(aad.len() + aad_pad + ciphertext.len() + ct_pad, 0u8);
     mac_data.extend_from_slice(&(aad.len() as u64).to_le_bytes());
     mac_data.extend_from_slice(&(ciphertext.len() as u64).to_le_bytes());
-    poly1305_mac(&mac_data, otk)
+    let tag = poly1305_mac(&mac_data, otk);
+    zeroize_slice(&mut mac_data);
+    tag
 }
 
 /// Encrypts and authenticates `plaintext` with associated data `aad` using RFC 8439 ChaCha20-Poly1305.
@@ -846,7 +1229,11 @@ pub fn combine_pqxdh_secrets(
     ml_kem_ss: &[u8; 32],
     context: &[u8],
 ) -> Result<ZeroizingBuffer, CryptoError> {
-    if constant_time_eq(x25519_dh, &[0u8; 32]) || constant_time_eq(ml_kem_ss, &[0u8; 32]) {
+    let canon_dh = canonical_x25519_u(x25519_dh);
+    if constant_time_eq(x25519_dh, &[0u8; 32])
+        || is_low_order_x25519_u(&canon_dh)
+        || constant_time_eq(ml_kem_ss, &[0u8; 32])
+    {
         return Err(CryptoError::KeyDerivationFailed);
     }
     let mut ikm = ZeroizingBuffer::zeroed(64);
@@ -960,11 +1347,16 @@ impl RatchetSession {
         peer_dh_public: [u8; 32],
         is_initiator: bool,
     ) -> Result<Self, CryptoError> {
+        let canon_our = canonical_x25519_u(&our_dh_public);
+        let canon_peer = canonical_x25519_u(&peer_dh_public);
         if initial_root_secret.len() != 32
-            || initial_root_secret.iter().all(|&b| b == 0)
-            || our_dh_public == [0u8; 32]
-            || peer_dh_public == [0u8; 32]
-            || our_dh_public == peer_dh_public
+            || constant_time_eq(initial_root_secret, &[0u8; 32])
+            || constant_time_eq(&our_dh_public, &[0u8; 32])
+            || constant_time_eq(&peer_dh_public, &[0u8; 32])
+            || is_low_order_x25519_u(&canon_our)
+            || is_low_order_x25519_u(&canon_peer)
+            || constant_time_eq(&our_dh_public, &peer_dh_public)
+            || constant_time_eq(&canon_our, &canon_peer)
         {
             return Err(CryptoError::KeyDerivationFailed);
         }
@@ -1006,14 +1398,25 @@ impl RatchetSession {
         new_peer_dh_public: [u8; 32],
         dh_shared_secret: &[u8; 32],
     ) -> Result<(), CryptoError> {
+        let canon_new_our = canonical_x25519_u(&new_our_dh_public);
+        let canon_new_peer = canonical_x25519_u(&new_peer_dh_public);
+        let canon_old_our = canonical_x25519_u(&self.our_dh_public);
+        let canon_old_peer = canonical_x25519_u(&self.peer_dh_public);
         if constant_time_eq(dh_shared_secret, &[0u8; 32])
-            || new_our_dh_public == [0u8; 32]
-            || new_peer_dh_public == [0u8; 32]
-            || new_our_dh_public == new_peer_dh_public
-            || new_our_dh_public == self.peer_dh_public
-            || new_peer_dh_public == self.our_dh_public
-            || (new_our_dh_public == self.our_dh_public
-                && new_peer_dh_public == self.peer_dh_public)
+            || constant_time_eq(&new_our_dh_public, &[0u8; 32])
+            || constant_time_eq(&new_peer_dh_public, &[0u8; 32])
+            || is_low_order_x25519_u(&canon_new_our)
+            || is_low_order_x25519_u(&canon_new_peer)
+            || constant_time_eq(&canon_new_our, &canon_new_peer)
+            || constant_time_eq(&canon_new_our, &canon_old_peer)
+            || constant_time_eq(&canon_new_peer, &canon_old_our)
+            || constant_time_eq(&canon_new_our, &canon_old_our)
+            || constant_time_eq(&canon_new_peer, &canon_old_peer)
+            || self.skipped_keys.iter().any(|(dh, _, _)| {
+                let canon_dh = canonical_x25519_u(dh);
+                constant_time_eq(&canon_dh, &canon_new_peer)
+                    || constant_time_eq(&canon_dh, &canon_new_our)
+            })
         {
             return Err(CryptoError::KeyDerivationFailed);
         }
@@ -1039,6 +1442,35 @@ impl RatchetSession {
         self.our_dh_public = new_our_dh_public;
         self.peer_dh_public = new_peer_dh_public;
         Ok(())
+    }
+
+    /// Performs an asymmetric RFC 7748 X25519 Diffie-Hellman ratchet step (`X25519(new_our_private_scalar, new_peer_dh_public)`),
+    /// deriving `new_our_dh_public = X25519(new_our_private_scalar, 9)` and rejecting low-order/all-zero shared secrets.
+    ///
+    /// # Errors
+    /// Returns [`CryptoError::KeyDerivationFailed`] if the scalar, peer public key, or computed shared secret is invalid.
+    pub fn dh_ratchet_step_x25519(
+        &mut self,
+        new_our_private_scalar: &[u8; 32],
+        new_peer_dh_public: [u8; 32],
+    ) -> Result<[u8; 32], CryptoError> {
+        let mut clamped_check = *new_our_private_scalar;
+        clamped_check[0] &= 248;
+        clamped_check[31] &= 63;
+        let degenerate_scalar = constant_time_eq(&clamped_check, &[0u8; 32]);
+        zeroize_slice(&mut clamped_check);
+        if degenerate_scalar
+            || constant_time_eq(new_our_private_scalar, &[0u8; 32])
+            || constant_time_eq(&new_peer_dh_public, &[0u8; 32])
+        {
+            return Err(CryptoError::KeyDerivationFailed);
+        }
+        let new_our_dh_public = x25519_basepoint(new_our_private_scalar);
+        let mut dh_shared = x25519(new_our_private_scalar, &new_peer_dh_public);
+        let res = self.dh_ratchet_step(new_our_dh_public, new_peer_dh_public, &dh_shared);
+        zeroize_slice(&mut dh_shared);
+        res?;
+        Ok(new_our_dh_public)
     }
 
     /// Advances the sending symmetric ratchet by one step, zeroizing the previous chain key
@@ -1091,11 +1523,12 @@ impl RatchetSession {
         let full_aad = build_ratchet_aad(header, aad);
 
         // 1. Check if this is an out-of-order message whose key was previously skipped
-        if let Some(pos) = self
-            .skipped_keys
-            .iter()
-            .position(|(dh, num, _)| *dh == header.dh_public && *num == header.msg_num)
-        {
+        let canon_hdr_dh = canonical_x25519_u(&header.dh_public);
+        let canon_peer_dh = canonical_x25519_u(&self.peer_dh_public);
+        if let Some(pos) = self.skipped_keys.iter().position(|(dh, num, _)| {
+            let canon_dh = canonical_x25519_u(dh);
+            constant_time_eq(&canon_dh, &canon_hdr_dh) && *num == header.msg_num
+        }) {
             let mut mk = [0u8; 32];
             mk.copy_from_slice(self.skipped_keys[pos].2.as_slice());
             let nonce = message_nonce(&header.dh_public, header.msg_num);
@@ -1106,7 +1539,9 @@ impl RatchetSession {
             return Ok(pt);
         }
 
-        if header.dh_public != self.peer_dh_public || header.msg_num < self.recv_msg_num {
+        if !constant_time_eq(&canon_hdr_dh, &canon_peer_dh)
+            || header.msg_num < self.recv_msg_num
+        {
             return Err(CryptoError::AuthenticationFailed);
         }
 
@@ -1546,5 +1981,77 @@ mod tests {
         let dbg = format!("{alice:?}");
         assert!(dbg.contains("[REDACTED]"));
         assert!(!dbg.contains("161")); // 0xA1
+
+        // 4. B-0083: Partial DH ratchet rotation (where either our_dh_public or peer_dh_public stays unchanged) must fail closed
+        assert_eq!(
+            alice.dh_ratchet_step(alice_dh, [0xC9; 32], &[0x88; 32]),
+            Err(CryptoError::KeyDerivationFailed)
+        );
+        assert_eq!(
+            alice.dh_ratchet_step([0xC8; 32], bob_dh, &[0x88; 32]),
+            Err(CryptoError::KeyDerivationFailed)
+        );
+    }
+
+    #[test]
+    fn rfc7748_x25519_test_vectors_and_asymmetric_dh_ratchet_step() {
+        // Official RFC 7748 §6.1 Alice-Bob Diffie-Hellman test vector
+        let alice_priv: [u8; 32] = [
+            0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2,
+            0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5,
+            0x1d, 0xb9, 0x2c, 0x2a,
+        ];
+        let expected_alice_pub: [u8; 32] = [
+            0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e,
+            0xf7, 0x5a, 0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e,
+            0xaa, 0x9b, 0x4e, 0x6a,
+        ];
+        let bob_priv: [u8; 32] = [
+            0x5d, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b, 0x79, 0xe1, 0x7f, 0x8b, 0x83, 0x80,
+            0x0e, 0xe6, 0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18, 0xb6, 0xfd, 0x1c, 0x2f, 0x8b, 0x27,
+            0xff, 0x88, 0xe0, 0xeb,
+        ];
+        let expected_bob_pub: [u8; 32] = [
+            0xde, 0x9e, 0xdb, 0x7d, 0x7b, 0x7d, 0xc1, 0xb4, 0xd3, 0x5b, 0x61, 0xc2, 0xec, 0xe4,
+            0x35, 0x37, 0x3f, 0x83, 0x43, 0xc8, 0x5b, 0x78, 0x67, 0x4d, 0xad, 0xfc, 0x7e, 0x14,
+            0x6f, 0x88, 0x2b, 0x4f,
+        ];
+        let expected_shared: [u8; 32] = [
+            0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1, 0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35,
+            0x0f, 0x25, 0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33, 0x76, 0xf0, 0x9b, 0x3c,
+            0x1e, 0x16, 0x17, 0x42,
+        ];
+
+        let alice_pub = x25519_basepoint(&alice_priv);
+        let bob_pub = x25519_basepoint(&bob_priv);
+        assert_eq!(alice_pub, expected_alice_pub);
+        assert_eq!(bob_pub, expected_bob_pub);
+
+        let shared_ab = x25519(&alice_priv, &bob_pub);
+        let shared_ba = x25519(&bob_priv, &alice_pub);
+        assert_eq!(shared_ab, expected_shared);
+        assert_eq!(shared_ba, expected_shared);
+
+        // Verify RatchetSession::dh_ratchet_step_x25519 derives identical chains from private scalars
+        let root = combine_pqxdh_secrets(&shared_ab, &[0x42; 32], b"x25519-pqxdh").unwrap();
+        let mut alice_dr = RatchetSession::new(root.as_slice(), alice_pub, bob_pub, true).unwrap();
+        let mut bob_dr = RatchetSession::new(root.as_slice(), bob_pub, alice_pub, false).unwrap();
+
+        let alice_next_priv = [0x31u8; 32];
+        let bob_next_priv = [0x62u8; 32];
+        let bob_next_pub = x25519_basepoint(&bob_next_priv);
+        let alice_next_pub = alice_dr
+            .dh_ratchet_step_x25519(&alice_next_priv, bob_next_pub)
+            .unwrap();
+        let computed_bob_pub = bob_dr
+            .dh_ratchet_step_x25519(&bob_next_priv, alice_next_pub)
+            .unwrap();
+        assert_eq!(computed_bob_pub, bob_next_pub);
+
+        let (hdr, ct) = alice_dr
+            .send_ratchet_step(b"x25519-ratchet-msg", b"aad")
+            .unwrap();
+        let pt = bob_dr.recv_ratchet_step(&hdr, &ct, b"aad").unwrap();
+        assert_eq!(pt.as_slice(), b"x25519-ratchet-msg");
     }
 }

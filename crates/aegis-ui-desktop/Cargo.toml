@@ -16,5 +16,9 @@ path = "src/main.rs"
 [dependencies]
 aegis-ffi = { path = "../aegis-ffi" }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+tao = "0.37.2"
+wry = "0.57.1"
+
 [lints]
 workspace = true

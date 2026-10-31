@@ -363,7 +363,7 @@ impl BuiltInDirectory {
             DirectoryServerEntry {
                 name: "Aegis Official Onion Relay (Опциональный Tor .onion) ✓✓".to_owned(),
                 endpoint_uri:
-                    "aegis://aegis7x9q2v4k8m3n5p7r9t2w4y6z8a1b3c5d7e9f1g3h5j7k9l2m4n.onion:8443"
+                    "aegis://aegis7xq2v4k3m3n5p7r2t2w4y6z2a3b3c5d7e2f3g3h5j7k2l2m4n2d.onion:8443"
                         .to_owned(),
                 static_ipv4: None,
                 server_public_key: [0xA2; 32],
@@ -409,13 +409,33 @@ impl BuiltInDirectory {
                 }
                 (false, None) => true,
             };
+            let check_count = entry
+                .name
+                .chars()
+                .filter(|&c| matches!(c, '✓' | '✔' | '☑' | '✅'))
+                .count();
+            let has_invisible_format = entry.name.chars().any(|c| {
+                matches!(
+                    c,
+                    '\u{00AD}'
+                        | '\u{034F}'
+                        | '\u{061C}'
+                        | '\u{180E}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{2028}'..='\u{202F}'
+                        | '\u{205F}'..='\u{206F}'
+                        | '\u{FE00}'..='\u{FE0F}'
+                        | '\u{FEFF}'
+                )
+            });
             let badge_name_consistent = match entry.badge {
                 ServerBadge::OfficialDoubleCheck => true,
-                ServerBadge::VerifiedSingleCheck => !entry.name.contains("✓✓"),
+                ServerBadge::VerifiedSingleCheck => !entry.name.contains("✓✓") && check_count <= 1,
                 ServerBadge::CommunityUnverified => false,
             };
             let is_valid = !entry.name.trim().is_empty()
                 && !entry.name.chars().any(char::is_control)
+                && !has_invisible_format
                 && badge_name_consistent
                 && entry.endpoint_uri == entry.endpoint_uri.trim()
                 && !entry

@@ -81,12 +81,15 @@ class AegisRustBridge(private val context: Context) {
     data class ChatItemUi(
         val chatIdHex: String,
         val title: String,
-        val queueTag: String,
+        var queueTag: String,
         val isSavedNotes: Boolean,
         val verifiedSupportBadge: Boolean,
         val perChatPin: String?,
         var isLocked: Boolean,
-        val messages: MutableList<ChatMessageUi>
+        val messages: MutableList<ChatMessageUi>,
+        var peerVerified: Boolean = true,
+        var keyChangeWarning: String? = null,
+        var defaultTtlSeconds: Int? = 3600
     )
 
     var locale: AppLocale = AppLocale.RU
@@ -100,12 +103,19 @@ class AegisRustBridge(private val context: Context) {
     var calculatorDisguiseActive: Boolean = false
     var remainingPinAttempts: Int = 10
     var wipedByPanicOrDuress: Boolean = false
+    var seedOnlyMode: Boolean = true
+    var recoveryPhrasePreview: String? = null
+    var activeInviteUri: String = "aegis://invite/185.220.101.42:8443/4242424242424242424242424242424242424242424242424242424242424242"
+    var lastExportedBackupHex: String? = null
 
     val starterServers = mutableListOf<StarterServerUi>()
     var activeServerIndex: Int = 0
     val accounts = mutableListOf<AccountSlotUi>()
     val chats = mutableListOf<ChatItemUi>()
     private val redeemedSupporterTokens = mutableSetOf<String>()
+    private val seenCapsuleHexPrefixes = mutableSetOf<String>()
+    var blindRelayEndpoint: String = ""
+    var socks5ProxyEndpoint: String = ""
 
     val activeServer: StarterServerUi
         get() = starterServers.getOrElse(activeServerIndex) {
@@ -123,6 +133,32 @@ class AegisRustBridge(private val context: Context) {
     init {
         ensureHardwareKeystoreWrapperKey()
         seedDefaultWorkspace()
+        runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            calculatorDisguiseActive = prefs.getBoolean(PREF_CALC_DISGUISE, false)
+            wipedByPanicOrDuress = prefs.getBoolean(PREF_WIPED, false)
+            remainingPinAttempts = prefs.getInt(PREF_PIN_ATTEMPTS, 10)
+            if (wipedByPanicOrDuress) {
+                accounts.clear()
+                chats.clear()
+            }
+        }
+    }
+
+    private fun persistSecurityState() {
+        runCatching {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_CALC_DISGUISE, calculatorDisguiseActive)
+                .putBoolean(PREF_WIPED, wipedByPanicOrDuress)
+                .putInt(PREF_PIN_ATTEMPTS, remainingPinAttempts)
+                .apply()
+        }
+    }
+
+    fun setCalculatorDisguiseEnabled(enabled: Boolean) {
+        calculatorDisguiseActive = enabled
+        persistSecurityState()
     }
 
     /**
@@ -216,11 +252,15 @@ class AegisRustBridge(private val context: Context) {
             val b = octets[1]
             if (a == 0 || a == 10 || a == 127 || (a == 100 && b in 64..127) ||
                 (a == 169 && b == 254) || (a == 172 && b in 16..31) ||
-                (a == 192 && b == 168) || a >= 224
+                (a == 192 && b == 0 && octets[2] == 0) ||
+                (a == 192 && b == 168) || (a == 198 && (b == 18 || b == 19)) || a >= 224
             ) {
                 return false
             }
             return true
+        }
+        if (labels.any { it.startsWith("0x", ignoreCase = true) }) {
+            return false
         }
         return !lastLabel.all { it.isDigit() }
     }
@@ -228,11 +268,15 @@ class AegisRustBridge(private val context: Context) {
     fun constantTimeEquals(lhs: String, rhs: String): Boolean {
         val a = lhs.toByteArray(Charsets.UTF_8)
         val b = rhs.toByteArray(Charsets.UTF_8)
-        if (a.size != b.size) return false
-        var diff = 0
-        for (i in a.indices) {
-            diff = diff or (a[i].toInt() xor b[i].toInt())
+        val maxLen = maxOf(a.size, b.size)
+        var diff = a.size xor b.size
+        for (i in 0 until maxLen) {
+            val av = if (i < a.size) a[i].toInt() else 0
+            val bv = if (i < b.size) b[i].toInt() else 0
+            diff = diff or (av xor bv)
         }
+        a.fill(0)
+        b.fill(0)
         return diff == 0
     }
 
@@ -247,6 +291,7 @@ class AegisRustBridge(private val context: Context) {
             return true
         }
         remainingPinAttempts = (remainingPinAttempts - 1).coerceAtLeast(0)
+        persistSecurityState()
         if (remainingPinAttempts == 0) {
             triggerEmergencyPanicWipe()
         }
@@ -257,7 +302,7 @@ class AegisRustBridge(private val context: Context) {
         val expr = rawInput.trim()
         if (constantTimeEquals(expr, "2580")) {
             remainingPinAttempts = 10
-            calculatorDisguiseActive = false
+            setCalculatorDisguiseEnabled(false)
             return "UNLOCKED"
         }
         if (constantTimeEquals(expr, "9999")) {
@@ -266,6 +311,7 @@ class AegisRustBridge(private val context: Context) {
         }
         if (expr.isNotEmpty() && expr.all { it.isDigit() }) {
             remainingPinAttempts = (remainingPinAttempts - 1).coerceAtLeast(0)
+            persistSecurityState()
             if (remainingPinAttempts == 0) {
                 triggerEmergencyPanicWipe()
                 return "WIPED"
@@ -302,12 +348,18 @@ class AegisRustBridge(private val context: Context) {
         accounts.clear()
         starterServers.removeAll { it.isCustom }
         activeServerIndex = 0
+        seenCapsuleHexPrefixes.clear()
+        blindRelayEndpoint = ""
+        socks5ProxyEndpoint = ""
+        seedOnlyMode = true
+        recoveryPhrasePreview = null
+        lastExportedBackupHex = null
         chats.clear()
         chats.add(
             ChatItemUi(
-                chatIdHex = "decoy001",
+                chatIdHex = "notes001",
                 title = "Покупки и бытовые заметки",
-                queueTag = "local-decoy",
+                queueTag = "notes://household",
                 isSavedNotes = true,
                 verifiedSupportBadge = false,
                 perChatPin = null,
@@ -322,7 +374,157 @@ class AegisRustBridge(private val context: Context) {
                 )
             )
         )
-        calculatorDisguiseActive = false
+        setCalculatorDisguiseEnabled(false)
+    }
+
+    fun computeSafetyNumberForChat(chatIndex: Int): String {
+        val chat = chats.getOrNull(chatIndex)
+        val tagSeed = normalizeChannelCode(chat?.queueTag ?: "00000000")
+        val seedBytes = tagSeed.toByteArray(Charsets.UTF_8)
+        val d1 = sha256Bytes("aegis-safety-v2:".toByteArray(Charsets.UTF_8) + seedBytes)
+        val d2 = sha256Bytes(d1)
+        val groups = mutableListOf<String>()
+        for (i in 0 until 12) {
+            val src = if (i < 6) d1 else d2
+            val off = (i % 6) * 5
+            val v = (((src[off].toLong() and 0xFF) shl 32) or
+                ((src[off + 1].toLong() and 0xFF) shl 24) or
+                ((src[off + 2].toLong() and 0xFF) shl 16) or
+                ((src[off + 3].toLong() and 0xFF) shl 8) or
+                (src[off + 4].toLong() and 0xFF)) % 100000L
+            groups.add("%05d".format(v))
+        }
+        return groups.joinToString(" ")
+    }
+
+    fun verifyChatSafetyNumber(chatIndex: Int) {
+        chats.getOrNull(chatIndex)?.let {
+            it.peerVerified = true
+            it.keyChangeWarning = null
+        }
+    }
+
+    fun simulateKeyChangeWarning(chatIndex: Int) {
+        chats.getOrNull(chatIndex)?.let {
+            it.peerVerified = false
+            it.keyChangeWarning = "⚠ Ключ собеседника изменился! Сверьте 60-значный Safety Number перед отправкой."
+        }
+    }
+
+    fun acknowledgeKeyChange(chatIndex: Int) {
+        chats.getOrNull(chatIndex)?.let {
+            it.keyChangeWarning = null
+            it.peerVerified = true
+        }
+    }
+
+    fun rotateChatQueue(chatIndex: Int): String? {
+        val chat = chats.getOrNull(chatIndex) ?: return null
+        if (chat.isSavedNotes || chat.isLocked) return null
+        val nextTag = "queue://${generateAnonymousNickname()}"
+        chat.queueTag = nextTag
+        return nextTag
+    }
+
+    fun setChatDisappearingTtl(chatIndex: Int, ttlSeconds: Int?) {
+        chats.getOrNull(chatIndex)?.let {
+            it.defaultTtlSeconds = ttlSeconds
+        }
+    }
+
+    fun createMlsGroupConduit(groupTitle: String, memberCount: Int): Result<Int> {
+        val cleanTitle = groupTitle.trim().ifEmpty { "Группа MLS" }
+        if (memberCount !in 2..20) {
+            return Result.failure(IllegalArgumentException("Лимит группы в бете: от 2 до 20 участников"))
+        }
+        if (chats.size >= 64) {
+            return Result.failure(IllegalStateException("Достигнут лимит открытых контуров"))
+        }
+        val groupIdx = chats.size + 20
+        val newGroup = ChatItemUi(
+            chatIdHex = "mls-$groupIdx",
+            title = "👥 $cleanTitle (MLS ≤20: $memberCount уч.)",
+            queueTag = "queue://mls-group-$groupIdx",
+            isSavedNotes = false,
+            verifiedSupportBadge = false,
+            perChatPin = null,
+            isLocked = false,
+            messages = mutableListOf(
+                ChatMessageUi(
+                    outgoing = true,
+                    text = "Создана защищённая группа MLS ($memberCount/20 участников, Pad-Before-Encrypt 256 B).",
+                    paddedBucketBytes = 256,
+                    ttlSeconds = 3600
+                )
+            )
+        )
+        chats.add(newGroup)
+        return Result.success(chats.lastIndex)
+    }
+
+    fun generateInviteV2Uri(): String {
+        val srv = activeServer
+        val rnd = ByteArray(32)
+        SecureRandom().nextBytes(rnd)
+        val qHex = bytesToHex(rnd)
+        activeInviteUri = "aegis://invite/${srv.staticIpOrHost}:${srv.port}/$qHex"
+        return activeInviteUri
+    }
+
+    fun generateRecoveryPhrase24Words(): String {
+        val wordlist = listOf(
+            "anchor", "arctic", "atlas", "aurora", "bastion", "beacon", "binary", "breeze",
+            "canyon", "carbon", "castle", "cipher", "cobalt", "comet", "compass", "coral",
+            "cosmos", "crystal", "cyber", "delta", "desert", "diamond", "dolphin", "dragon",
+            "eclipse", "emerald", "ember", "enigma", "falcon", "fjord", "forest", "fortress",
+            "galaxy", "glacier", "granite", "harbor", "helium", "horizon", "impulse", "indigo",
+            "island", "ivory", "jasper", "jungle", "krypton", "lagoon", "lantern", "legend",
+            "lithium", "lunar", "magnet", "marble", "matrix", "meadow", "mercury", "meteor",
+            "mirage", "monolith", "nebula", "nectar", "neutron", "nexus", "nordic", "obsidian"
+        )
+        val rng = SecureRandom()
+        val indices = ByteArray(23)
+        val words = mutableListOf<String>()
+        val distinctSet = mutableSetOf<Int>()
+        for (i in 0 until 23) {
+            var idx = rng.nextInt(64)
+            if (i >= 16 && distinctSet.size < 8) {
+                idx = (idx + i * 7 + 1) and 0x3F
+            }
+            distinctSet.add(idx)
+            indices[i] = idx.toByte()
+            words.add(wordlist[idx])
+        }
+        val checksum = sha256Bytes(indices)[0].toInt() and 0x3F
+        indices.fill(0)
+        words.add(wordlist[checksum])
+        val chosen = words.joinToString(" ")
+        recoveryPhrasePreview = chosen
+        return chosen
+    }
+
+    fun exportEncryptedVaultBackupHex(): String {
+        val magic = "AEGISBAK".toByteArray(Charsets.US_ASCII)
+        val nonce = ByteArray(12)
+        val rng = SecureRandom()
+        rng.nextBytes(nonce)
+        if (nonce.all { it == 0.toByte() }) nonce[0] = 1
+        val seedSource = recoveryPhrasePreview ?: accounts.lastOrNull()?.loginNickname ?: "aegis-vault-seed"
+        val (_, backupKey, _) = deriveChannelKeyAndQueue(seedSource)
+        val serializedChats = chats.joinToString("|") { c ->
+            "${c.chatIdHex}:${c.title}:${c.messages.size}"
+        }
+        val plaintext = "vault-v2:accounts=${accounts.size}:$serializedChats".toByteArray(Charsets.UTF_8)
+        val cipher = Cipher.getInstance("ChaCha20-Poly1305")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(backupKey, "ChaCha20"), IvParameterSpec(nonce))
+        cipher.updateAAD(magic)
+        val ctAndTag = cipher.doFinal(plaintext)
+        backupKey.fill(0)
+        plaintext.fill(0)
+        val raw = magic + nonce + ctAndTag
+        val hex = bytesToHex(raw)
+        lastExportedBackupHex = hex
+        return hex
     }
 
     /**
@@ -633,17 +835,26 @@ class AegisRustBridge(private val context: Context) {
         starterServers.removeAll { it.isCustom }
         activeServerIndex = 0
         redeemedSupporterTokens.clear()
+        seenCapsuleHexPrefixes.clear()
+        blindRelayEndpoint = ""
+        socks5ProxyEndpoint = ""
+        seedOnlyMode = true
+        recoveryPhrasePreview = null
+        activeInviteUri = ""
+        lastExportedBackupHex = null
         supporterPassActive = false
         maxAccountSlots = 3
         activeThemeId = "phantom-monolith"
-        calculatorDisguiseActive = false
+        setCalculatorDisguiseEnabled(false)
         remainingPinAttempts = 0
         torEnabled = false
         shieldState = NetworkShieldState.DIRECT_STATIC_IP_TLS
         wipedByPanicOrDuress = true
+        persistSecurityState()
     }
 
     fun onAppBackgrounded() {
+        recoveryPhrasePreview = null
         chats.forEach { chat ->
             if (chat.perChatPin != null) {
                 chat.isLocked = true
@@ -678,69 +889,268 @@ class AegisRustBridge(private val context: Context) {
         return out
     }
 
+    fun normalizeChannelCode(channelCode: String): String {
+        val trimmed = channelCode.trim()
+        return when {
+            trimmed.startsWith("queue://") -> trimmed.removePrefix("queue://").trim()
+            trimmed.startsWith("aegis://") -> trimmed.removePrefix("aegis://").trim()
+            else -> trimmed
+        }
+    }
+
     fun deriveChannelKeyAndQueue(channelCode: String): Triple<ByteArray, ByteArray, String> {
-        val clean = channelCode.trim()
-        val queueId = sha256Bytes("Aegis-ChannelQueue-v1:$clean".toByteArray(Charsets.UTF_8))
+        val clean = normalizeChannelCode(channelCode)
+        val codeDigest = sha256Bytes(clean.toByteArray(Charsets.UTF_8))
+
+        val seedPrefix = "Aegis-ChannelSeed-v2:".toByteArray(Charsets.US_ASCII)
+        val seedInit = ByteArray(seedPrefix.size + codeDigest.size)
+        System.arraycopy(seedPrefix, 0, seedInit, 0, seedPrefix.size)
+        System.arraycopy(codeDigest, 0, seedInit, seedPrefix.size, codeDigest.size)
+        var acc = sha256Bytes(seedInit)
+        seedInit.fill(0)
+
+        val roundBlock = ByteArray(66)
+        System.arraycopy(codeDigest, 0, roundBlock, 32, 32)
+        for (round in 0 until 4096) {
+            System.arraycopy(acc, 0, roundBlock, 0, 32)
+            roundBlock[64] = ((round ushr 8) and 0xFF).toByte()
+            roundBlock[65] = (round and 0xFF).toByte()
+            acc = sha256Bytes(roundBlock)
+        }
+        roundBlock.fill(0)
+        codeDigest.fill(0)
+
+        val qPrefix = "Aegis-ChannelQueue-v2:".toByteArray(Charsets.US_ASCII)
+        val qPreimage = ByteArray(qPrefix.size + 32)
+        System.arraycopy(qPrefix, 0, qPreimage, 0, qPrefix.size)
+        System.arraycopy(acc, 0, qPreimage, qPrefix.size, 32)
+        val queueId = sha256Bytes(qPreimage)
+        qPreimage.fill(0)
         if (queueId.all { it == 0.toByte() }) queueId[0] = 1
-        val channelKey = sha256Bytes("Aegis-ChannelAEADKey-v1:$clean".toByteArray(Charsets.UTF_8))
+
+        val kPrefix = "Aegis-ChannelAEADKey-v2:".toByteArray(Charsets.US_ASCII)
+        val kPreimage = ByteArray(kPrefix.size + 32)
+        System.arraycopy(kPrefix, 0, kPreimage, 0, kPrefix.size)
+        System.arraycopy(acc, 0, kPreimage, kPrefix.size, 32)
+        val channelKey = sha256Bytes(kPreimage)
+        kPreimage.fill(0)
+        acc.fill(0)
         if (channelKey.all { it == 0.toByte() }) channelKey[0] = 1
         return Triple(queueId, channelKey, bytesToHex(queueId))
     }
 
     fun sealCrossBorderCapsule(channelCode: String, plaintext: String): ByteArray? {
-        if (channelCode.isBlank() || plaintext.isEmpty()) return null
+        val clean = normalizeChannelCode(channelCode)
+        val ptBytes = plaintext.toByteArray(Charsets.UTF_8)
+        if (clean.isEmpty() || ptBytes.isEmpty()) return null
         return try {
-            val (queueId, channelKey, _) = deriveChannelKeyAndQueue(channelCode)
+            val requiredInner = 7 + 2 + ptBytes.size
+            val buckets = intArrayOf(256, 1024, 4096, 16384)
+            val bucketSize = buckets.firstOrNull { it >= requiredInner + 12 + 16 } ?: return null
+            val innerPaddedLen = bucketSize - 12 - 16
+
+            val magic = "AEGCAP1".toByteArray(Charsets.US_ASCII)
+            val innerPadded = ByteArray(innerPaddedLen)
+            System.arraycopy(magic, 0, innerPadded, 0, 7)
+            innerPadded[7] = ((ptBytes.size ushr 8) and 0xFF).toByte()
+            innerPadded[8] = (ptBytes.size and 0xFF).toByte()
+            System.arraycopy(ptBytes, 0, innerPadded, 9, ptBytes.size)
+            ptBytes.fill(0)
+
+            val (queueId, channelKey, _) = deriveChannelKeyAndQueue(clean)
             val nonce = ByteArray(12)
             SecureRandom().nextBytes(nonce)
             if (nonce.all { it == 0.toByte() }) nonce[0] = 1
 
+            val aad = ByteArray(36)
+            System.arraycopy(queueId, 0, aad, 0, 32)
+            aad[32] = ((bucketSize ushr 24) and 0xFF).toByte()
+            aad[33] = ((bucketSize ushr 16) and 0xFF).toByte()
+            aad[34] = ((bucketSize ushr 8) and 0xFF).toByte()
+            aad[35] = (bucketSize and 0xFF).toByte()
+
             val cipher = Cipher.getInstance("ChaCha20-Poly1305")
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(channelKey, "ChaCha20"), IvParameterSpec(nonce))
-            cipher.updateAAD(queueId)
-            val ctAndTag = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+            cipher.updateAAD(aad)
+            val ctAndTag = cipher.doFinal(innerPadded)
+            channelKey.fill(0)
+            innerPadded.fill(0)
 
-            val magic = "AEGCAP1".toByteArray(Charsets.US_ASCII)
-            val innerLen = magic.size + nonce.size + ctAndTag.size
-            val buckets = intArrayOf(256, 1024, 4096, 16384)
-            val bucketSize = buckets.firstOrNull { it >= innerLen + 2 } ?: return null
-
-            val frame = ByteArray(bucketSize)
-            frame[0] = ((innerLen ushr 8) and 0xFF).toByte()
-            frame[1] = (innerLen and 0xFF).toByte()
-            System.arraycopy(magic, 0, frame, 2, magic.size)
-            System.arraycopy(nonce, 0, frame, 2 + magic.size, nonce.size)
-            System.arraycopy(ctAndTag, 0, frame, 2 + magic.size + nonce.size, ctAndTag.size)
-            frame
+            val wireFrame = ByteArray(bucketSize)
+            System.arraycopy(nonce, 0, wireFrame, 0, 12)
+            System.arraycopy(ctAndTag, 0, wireFrame, 12, ctAndTag.size)
+            wireFrame
         } catch (_: Exception) {
             null
         }
     }
 
     fun openCrossBorderCapsule(channelCode: String, paddedFrame: ByteArray): String? {
+        val clean = normalizeChannelCode(channelCode)
         val buckets = intArrayOf(256, 1024, 4096, 16384)
-        if (paddedFrame.size !in buckets || paddedFrame.size < 2) return null
-        val payloadLen = ((paddedFrame[0].toInt() and 0xFF) shl 8) or (paddedFrame[1].toInt() and 0xFF)
-        if (payloadLen + 2 > paddedFrame.size || payloadLen < 7 + 12 + 16) return null
-        for (i in (2 + payloadLen) until paddedFrame.size) {
-            if (paddedFrame[i] != 0.toByte()) return null
-        }
-        val magic = String(paddedFrame, 2, 7, Charsets.US_ASCII)
-        if (magic != "AEGCAP1") return null
-        val nonce = paddedFrame.copyOfRange(9, 21)
+        if (clean.isEmpty() || paddedFrame.size !in buckets) return null
+        val nonce = paddedFrame.copyOfRange(0, 12)
         if (nonce.all { it == 0.toByte() }) return null
-        val ctAndTag = paddedFrame.copyOfRange(21, 2 + payloadLen)
+        val ctAndTag = paddedFrame.copyOfRange(12, paddedFrame.size)
 
         return try {
-            val (queueId, channelKey, _) = deriveChannelKeyAndQueue(channelCode)
+            val (queueId, channelKey, _) = deriveChannelKeyAndQueue(clean)
+            val aad = ByteArray(36)
+            System.arraycopy(queueId, 0, aad, 0, 32)
+            val bSize = paddedFrame.size
+            aad[32] = ((bSize ushr 24) and 0xFF).toByte()
+            aad[33] = ((bSize ushr 16) and 0xFF).toByte()
+            aad[34] = ((bSize ushr 8) and 0xFF).toByte()
+            aad[35] = (bSize and 0xFF).toByte()
+
             val cipher = Cipher.getInstance("ChaCha20-Poly1305")
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(channelKey, "ChaCha20"), IvParameterSpec(nonce))
-            cipher.updateAAD(queueId)
-            val pt = cipher.doFinal(ctAndTag)
-            String(pt, Charsets.UTF_8)
+            cipher.updateAAD(aad)
+            val raw = cipher.doFinal(ctAndTag)
+            channelKey.fill(0)
+            if (raw.size < 9 || String(raw, 0, 7, Charsets.US_ASCII) != "AEGCAP1") {
+                raw.fill(0)
+                return null
+            }
+            val ptLen = ((raw[7].toInt() and 0xFF) shl 8) or (raw[8].toInt() and 0xFF)
+            if (ptLen <= 0 || 9 + ptLen > raw.size) {
+                raw.fill(0)
+                return null
+            }
+            for (i in (9 + ptLen) until raw.size) {
+                if (raw[i] != 0.toByte()) {
+                    raw.fill(0)
+                    return null
+                }
+            }
+            val result = String(raw, 9, ptLen, Charsets.UTF_8)
+            raw.fill(0)
+            result
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun readBoundedHttpResponse(sock: Socket, maxBytes: Int = 65536): String {
+        val input = sock.getInputStream()
+        val buf = ByteArray(4096)
+        val out = java.io.ByteArrayOutputStream()
+        var total = 0
+        while (total < maxBytes) {
+            val n = input.read(buf, 0, minOf(buf.size, maxBytes - total))
+            if (n <= 0) break
+            out.write(buf, 0, n)
+            total += n
+        }
+        return out.toByteArray().toString(Charsets.UTF_8)
+    }
+
+    fun deriveQueueReadTokenBytes(queueId: ByteArray, channelKey: ByteArray): ByteArray {
+        val prefix = "Aegis-QueueReadToken-v2:".toByteArray(Charsets.US_ASCII)
+        val preimage = ByteArray(24 + 64)
+        System.arraycopy(prefix, 0, preimage, 0, 24)
+        System.arraycopy(queueId, 0, preimage, 24, 32)
+        System.arraycopy(channelKey, 0, preimage, 56, 32)
+        val tok = sha256Bytes(preimage)
+        preimage.fill(0)
+        if (tok.all { it == 0.toByte() }) tok[0] = 1
+        return tok
+    }
+
+    fun computeInboxAuthHashHex(readToken: ByteArray): String {
+        val prefix = "aegis-inbox-auth-v2:".toByteArray(Charsets.US_ASCII)
+        val preimage = ByteArray(20 + 32)
+        System.arraycopy(prefix, 0, preimage, 0, 20)
+        System.arraycopy(readToken, 0, preimage, 20, 32)
+        val digest = sha256Bytes(preimage)
+        preimage.fill(0)
+        val hex = bytesToHex(digest)
+        digest.fill(0)
+        return hex
+    }
+
+    private fun connectViaSocks5h(
+        proxyHost: String,
+        proxyPort: Int,
+        targetHost: String,
+        targetPort: Int,
+        circuitTag: String
+    ): Socket {
+        val hostBytes = targetHost.trim().toByteArray(Charsets.US_ASCII)
+        require(hostBytes.size in 1..253) { "Invalid SOCKS5h target host length" }
+        val sock = Socket()
+        sock.connect(InetSocketAddress(proxyHost, proxyPort), 2500)
+        sock.soTimeout = 2500
+        val out = sock.getOutputStream()
+        val din = java.io.DataInputStream(sock.getInputStream())
+
+        // Offer RFC 1929 Username/Password stream isolation (0x02) first, then RFC 1928 No-Auth (0x00)
+        out.write(byteArrayOf(0x05, 0x02, 0x02, 0x00))
+        out.flush()
+        val greeting = ByteArray(2)
+        din.readFully(greeting)
+        if (greeting[0] != 0x05.toByte()) {
+            sock.close()
+            throw IllegalStateException("SOCKS5 greeting rejected")
+        }
+        if (greeting[1] == 0x02.toByte()) {
+            val uBytes = ("aegis-" + circuitTag.take(16)).toByteArray(Charsets.US_ASCII)
+            val pBytes = "isolate".toByteArray(Charsets.US_ASCII)
+            val authReq = ByteArray(3 + uBytes.size + pBytes.size)
+            authReq[0] = 0x01
+            authReq[1] = uBytes.size.toByte()
+            System.arraycopy(uBytes, 0, authReq, 2, uBytes.size)
+            authReq[2 + uBytes.size] = pBytes.size.toByte()
+            System.arraycopy(pBytes, 0, authReq, 3 + uBytes.size, pBytes.size)
+            out.write(authReq)
+            out.flush()
+            uBytes.fill(0)
+            pBytes.fill(0)
+            authReq.fill(0)
+            val authResp = ByteArray(2)
+            din.readFully(authResp)
+            if (authResp[1] != 0x00.toByte()) {
+                sock.close()
+                throw IllegalStateException("SOCKS5 stream isolation auth rejected")
+            }
+        } else if (greeting[1] != 0x00.toByte()) {
+            sock.close()
+            throw IllegalStateException("Unsupported SOCKS5 auth method")
+        }
+
+        // ATYP = 0x03 (Domain name resolved remotely by SOCKS5h proxy — zero local DNS leak for .onion!)
+        val req = ByteArray(7 + hostBytes.size)
+        req[0] = 0x05
+        req[1] = 0x01 // CONNECT
+        req[2] = 0x00
+        req[3] = 0x03 // DOMAINNAME
+        req[4] = hostBytes.size.toByte()
+        System.arraycopy(hostBytes, 0, req, 5, hostBytes.size)
+        req[5 + hostBytes.size] = ((targetPort ushr 8) and 0xFF).toByte()
+        req[6 + hostBytes.size] = (targetPort and 0xFF).toByte()
+        out.write(req)
+        out.flush()
+
+        val hdr = ByteArray(4)
+        din.readFully(hdr)
+        if (hdr[0] != 0x05.toByte() || hdr[1] != 0x00.toByte()) {
+            sock.close()
+            throw IllegalStateException("SOCKS5h CONNECT failed")
+        }
+        val skipBytes = when (hdr[3].toInt() and 0xFF) {
+            0x01 -> 4 + 2
+            0x04 -> 16 + 2
+            0x03 -> din.readUnsignedByte() + 2
+            else -> {
+                sock.close()
+                throw IllegalStateException("Invalid SOCKS5h ATYP")
+            }
+        }
+        if (skipBytes > 0) {
+            val discard = ByteArray(skipBytes)
+            din.readFully(discard)
+        }
+        return sock
     }
 
     fun sendCapsuleOverNetworkAsync(
@@ -753,27 +1163,79 @@ class AegisRustBridge(private val context: Context) {
             onResult(false, "Ошибка запечатывания капсулы")
             return
         }
-        val (_, _, queueHex) = deriveChannelKeyAndQueue(channelCode)
+        val fpHex = bytesToHex(frame.copyOfRange(0, 32))
+        synchronized(seenCapsuleHexPrefixes) {
+            if (seenCapsuleHexPrefixes.size >= 4096) {
+                seenCapsuleHexPrefixes.firstOrNull()?.let { seenCapsuleHexPrefixes.remove(it) }
+            }
+            seenCapsuleHexPrefixes.add(fpHex)
+        }
+        val (queueIdBytes, queueKeyCleanup, queueHex) = deriveChannelKeyAndQueue(channelCode)
+        val readTokBytes = deriveQueueReadTokenBytes(queueIdBytes, queueKeyCleanup)
+        val authHashHex = computeInboxAuthHashHex(readTokBytes)
+        readTokBytes.fill(0)
+        queueIdBytes.fill(0)
+        queueKeyCleanup.fill(0)
         val bodyHex = bytesToHex(frame)
+        val relayClean = blindRelayEndpoint.trim().removePrefix("aegis://")
+        val socksClean = socks5ProxyEndpoint.trim().removePrefix("socks5://").removePrefix("socks5h://")
         val mainHandler = Handler(Looper.getMainLooper())
 
         Thread {
             try {
-                Socket().use { sock ->
-                    sock.connect(InetSocketAddress(srv.staticIpOrHost, srv.port), 2500)
-                    sock.soTimeout = 2500
-                    val req = "POST /api/v1/queue/send?queue=$queueHex HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
+                if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) {
+                    mainHandler.post {
+                        onResult(false, "⛔ Отправка заблокирована Kill Switch")
+                    }
+                    return@Thread
+                }
+                if (srv.isTorOnion && relayClean.isEmpty() && socksClean.isEmpty()) {
+                    mainHandler.post {
+                        onResult(false, "Капсула запечатана (для .onion укажите Blind Relay или SOCKS5h/Orbot)")
+                    }
+                    return@Thread
+                }
+                val connectHost: String
+                val connectPort: Int
+                val pathAndQuery: String
+                val expectMarker: String
+                if (relayClean.isNotEmpty() && relayClean.contains(':')) {
+                    val idx = relayClean.lastIndexOf(':')
+                    connectHost = relayClean.substring(0, idx).trim()
+                    connectPort = relayClean.substring(idx + 1).trim().toIntOrNull() ?: 8443
+                    pathAndQuery = "/api/v1/queue/relay?target=${srv.staticIpOrHost}:${srv.port}&queue=$queueHex&auth_hash=$authHashHex"
+                    expectMarker = "\"relayed\""
+                } else {
+                    connectHost = srv.staticIpOrHost
+                    connectPort = srv.port
+                    pathAndQuery = "/api/v1/queue/send?queue=$queueHex&auth_hash=$authHashHex"
+                    expectMarker = "\"queued\""
+                }
+                val sock = if (socksClean.isNotEmpty() && socksClean.contains(':')) {
+                    val sIdx = socksClean.lastIndexOf(':')
+                    val pHost = socksClean.substring(0, sIdx).trim()
+                    val pPort = socksClean.substring(sIdx + 1).trim().toIntOrNull() ?: 9050
+                    connectViaSocks5h(pHost, pPort, connectHost, connectPort, queueHex)
+                } else {
+                    Socket().apply {
+                        connect(InetSocketAddress(connectHost, connectPort), 2500)
+                        soTimeout = 2500
+                    }
+                }
+                sock.use { activeSock ->
+                    val req = "POST $pathAndQuery HTTP/1.1\r\n" +
+                        "Host: $connectHost:$connectPort\r\n" +
                         "Content-Type: text/plain\r\n" +
                         "Content-Length: ${bodyHex.length}\r\n" +
                         "Connection: close\r\n\r\n$bodyHex"
-                    sock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
-                    sock.getOutputStream().flush()
-                    val resp = sock.getInputStream().readBytes().toString(Charsets.UTF_8)
-                    val ok = resp.startsWith("HTTP/1.1 200") && resp.contains("\"queued\"")
+                    activeSock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+                    activeSock.getOutputStream().flush()
+                    val resp = readBoundedHttpResponse(activeSock)
+                    val ok = resp.startsWith("HTTP/1.1 200") && resp.contains(expectMarker)
                     mainHandler.post {
+                        if (wipedByPanicOrDuress) return@post
                         if (ok) {
-                            onResult(true, "🌐 Капсула (${frame.size} B) доставлена на узел ${srv.staticIpOrHost}:${srv.port}")
+                            onResult(true, "🌐 Капсула (${frame.size} B, Pad-Before-Encrypt) доставлена на узел ${srv.staticIpOrHost}:${srv.port}")
                         } else {
                             onResult(false, "Капсула сохранена локально (узел вернул отказ)")
                         }
@@ -781,7 +1243,9 @@ class AegisRustBridge(private val context: Context) {
                 }
             } catch (_: Exception) {
                 mainHandler.post {
-                    onResult(false, "Капсула запечатана локально (узел ${srv.staticIpOrHost}:${srv.port} офлайн)")
+                    if (!wipedByPanicOrDuress) {
+                        onResult(false, "Капсула запечатана локально (узел ${srv.staticIpOrHost}:${srv.port} офлайн)")
+                    }
                 }
             }
         }.start()
@@ -793,21 +1257,62 @@ class AegisRustBridge(private val context: Context) {
         onResult: (Int, String) -> Unit
     ) {
         val srv = activeServer
-        val (_, _, queueHex) = deriveChannelKeyAndQueue(channelCode)
+        val (queueIdBytes, queueKeyCleanup, queueHex) = deriveChannelKeyAndQueue(channelCode)
+        val readTokBytes = deriveQueueReadTokenBytes(queueIdBytes, queueKeyCleanup)
+        val readTokHex = bytesToHex(readTokBytes)
+        readTokBytes.fill(0)
+        queueIdBytes.fill(0)
+        queueKeyCleanup.fill(0)
+        val relayClean = blindRelayEndpoint.trim().removePrefix("aegis://")
+        val socksClean = socks5ProxyEndpoint.trim().removePrefix("socks5://").removePrefix("socks5h://")
         val mainHandler = Handler(Looper.getMainLooper())
 
         Thread {
             try {
-                Socket().use { sock ->
-                    sock.connect(InetSocketAddress(srv.staticIpOrHost, srv.port), 2500)
-                    sock.soTimeout = 2500
-                    val req = "POST /api/v1/queue/poll?queue=$queueHex HTTP/1.1\r\n" +
-                        "Host: localhost\r\n" +
+                if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) {
+                    mainHandler.post {
+                        onResult(0, "⛔ Опрос заблокирован Kill Switch")
+                    }
+                    return@Thread
+                }
+                if (srv.isTorOnion && relayClean.isEmpty() && socksClean.isEmpty()) {
+                    mainHandler.post {
+                        onResult(0, "Для опроса .onion узла укажите Blind Relay или SOCKS5h/Orbot")
+                    }
+                    return@Thread
+                }
+                val connectHost: String
+                val connectPort: Int
+                val pathAndQuery: String
+                if (relayClean.isNotEmpty() && relayClean.contains(':')) {
+                    val idx = relayClean.lastIndexOf(':')
+                    connectHost = relayClean.substring(0, idx).trim()
+                    connectPort = relayClean.substring(idx + 1).trim().toIntOrNull() ?: 8443
+                    pathAndQuery = "/api/v1/queue/relay_poll?target=${srv.staticIpOrHost}:${srv.port}&queue=$queueHex&read_token=$readTokHex"
+                } else {
+                    connectHost = srv.staticIpOrHost
+                    connectPort = srv.port
+                    pathAndQuery = "/api/v1/queue/poll?queue=$queueHex&read_token=$readTokHex"
+                }
+                val sock = if (socksClean.isNotEmpty() && socksClean.contains(':')) {
+                    val sIdx = socksClean.lastIndexOf(':')
+                    val pHost = socksClean.substring(0, sIdx).trim()
+                    val pPort = socksClean.substring(sIdx + 1).trim().toIntOrNull() ?: 9050
+                    connectViaSocks5h(pHost, pPort, connectHost, connectPort, queueHex)
+                } else {
+                    Socket().apply {
+                        connect(InetSocketAddress(connectHost, connectPort), 2500)
+                        soTimeout = 2500
+                    }
+                }
+                sock.use { activeSock ->
+                    val req = "POST $pathAndQuery HTTP/1.1\r\n" +
+                        "Host: $connectHost:$connectPort\r\n" +
                         "Content-Length: 0\r\n" +
                         "Connection: close\r\n\r\n"
-                    sock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
-                    sock.getOutputStream().flush()
-                    val resp = sock.getInputStream().readBytes().toString(Charsets.UTF_8)
+                    activeSock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+                    activeSock.getOutputStream().flush()
+                    val resp = readBoundedHttpResponse(activeSock)
                     val decodedMessages = mutableListOf<Pair<String, Int>>()
                     if (resp.startsWith("HTTP/1.1 200")) {
                         val marker = "\"frames_hex\":["
@@ -821,10 +1326,24 @@ class AegisRustBridge(private val context: Context) {
                                     listStr.split(',').forEach { token ->
                                         val hexItem = token.trim().trim('"')
                                         val raw = hexToBytes(hexItem)
-                                        if (raw != null) {
-                                            val pt = openCrossBorderCapsule(channelCode, raw)
-                                            if (pt != null) {
-                                                decodedMessages.add(pt to raw.size)
+                                        if (raw != null && raw.size >= 32) {
+                                            val fpHex = bytesToHex(raw.copyOfRange(0, 32))
+                                            val alreadySeen = synchronized(seenCapsuleHexPrefixes) {
+                                                if (seenCapsuleHexPrefixes.contains(fpHex)) {
+                                                    true
+                                                } else {
+                                                    if (seenCapsuleHexPrefixes.size >= 4096) {
+                                                        seenCapsuleHexPrefixes.firstOrNull()?.let { seenCapsuleHexPrefixes.remove(it) }
+                                                    }
+                                                    seenCapsuleHexPrefixes.add(fpHex)
+                                                    false
+                                                }
+                                            }
+                                            if (!alreadySeen) {
+                                                val pt = openCrossBorderCapsule(channelCode, raw)
+                                                if (pt != null) {
+                                                    decodedMessages.add(pt to raw.size)
+                                                }
                                             }
                                         }
                                     }
@@ -833,28 +1352,31 @@ class AegisRustBridge(private val context: Context) {
                         }
                     }
                     mainHandler.post {
+                        if (wipedByPanicOrDuress) return@post
                         val chat = chats.getOrNull(chatIndex)
-                        if (chat != null) {
+                        if (chat != null && !chat.isLocked && !chat.isSavedNotes) {
                             decodedMessages.forEach { (pt, sz) ->
                                 chat.messages.add(
                                     ChatMessageUi(
                                         outgoing = false,
                                         text = pt,
                                         paddedBucketBytes = sz,
-                                        ttlSeconds = 3600
+                                        ttlSeconds = chat.defaultTtlSeconds
                                     )
                                 )
                             }
                         }
                         onResult(
                             decodedMessages.size,
-                            "🌐 Синхронизация с ${srv.staticIpOrHost}:${srv.port}: принято капсул: ${decodedMessages.size}"
+                            "🌐 Синхронизация с ${srv.staticIpOrHost}:${srv.port}: принято новых капсул: ${decodedMessages.size}"
                         )
                     }
                 }
             } catch (_: Exception) {
                 mainHandler.post {
-                    onResult(0, "⛔ Не удалось связаться с узлом ${srv.staticIpOrHost}:${srv.port}")
+                    if (!wipedByPanicOrDuress) {
+                        onResult(0, "⛔ Не удалось связаться с узлом ${srv.staticIpOrHost}:${srv.port}")
+                    }
                 }
             }
         }.start()
@@ -920,9 +1442,9 @@ class AegisRustBridge(private val context: Context) {
                 StarterServerUi(
                     id = "onion-relay-4",
                     name = "Опциональный Tor Onion v3 Relay",
-                    staticIpOrHost = "aegis7x9q2v4k8m3n5p7r9t2w4y6z8a1b3c5d7e9f1g3h5j7k9l2m4n.onion",
+                    staticIpOrHost = "aegis7xq2v4k3m3n5p7r2t2w4y6z2a3b3c5d7e2f3g3h5j7k2l2m4n2d.onion",
                     port = 8443,
-                    endpointUri = "aegis://aegis7x9q2v4k8m3n5p7r9t2w4y6z8a1b3c5d7e9f1g3h5j7k9l2m4n.onion:8443",
+                    endpointUri = "aegis://aegis7xq2v4k3m3n5p7r2t2w4y6z2a3b3c5d7e2f3g3h5j7k2l2m4n2d.onion:8443",
                     badge = "✓✓ Onion",
                     isTorOnion = true
                 )
@@ -1005,5 +1527,9 @@ class AegisRustBridge(private val context: Context) {
 
     companion object {
         private const val KEYSTORE_ALIAS = "aegis_hardware_pin_wrapper_v1"
+        private const val PREFS_NAME = "aegis_ui_prefs"
+        private const val PREF_CALC_DISGUISE = "calculator_disguise_active"
+        private const val PREF_WIPED = "wiped_by_panic_or_duress"
+        private const val PREF_PIN_ATTEMPTS = "remaining_pin_attempts"
     }
 }

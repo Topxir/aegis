@@ -3,8 +3,9 @@
 //! through this crate and never touch cryptographic internals or keys directly (`AGENTS.md §2.6`).
 
 pub use aegis_crypto::{
-    combine_pqxdh_secrets, constant_time_eq, solve_pow, CryptoError, DeterministicPowVerifier,
-    PowChallenge, PowSolution, PowVerifier, RatchetHeader, RatchetSession, CRYPTO_SUITE_VERSION,
+    combine_pqxdh_secrets, constant_time_eq, memory_hard_kdf_sha256, solve_pow, x25519,
+    x25519_basepoint, CryptoError, DeterministicPowVerifier, PowChallenge, PowSolution,
+    PowVerifier, RatchetHeader, RatchetSession, CRYPTO_SUITE_VERSION,
 };
 pub use aegis_directory::{
     verify_server_badge, verify_support_certificate, verify_threshold_attestations,
@@ -28,17 +29,18 @@ pub use aegis_plugins::{
     PluginManifest, ThemePack,
 };
 pub use aegis_protocol::{
-    compute_safety_number, derive_channel_key_and_queue, detect_identity_key_change,
-    hex_decode_bytes, hex_encode_bytes, open_cross_border_capsule, open_view_once_payload,
-    pad_frame, passes_luhn, redact_leaks, scan_message_for_leaks, seal_cross_border_capsule,
+    compute_inbox_auth_hash, compute_safety_number, derive_channel_key_and_queue,
+    derive_queue_read_token, detect_identity_key_change, hex_decode_bytes, hex_encode_bytes,
+    normalize_channel_code, open_cross_border_capsule, open_view_once_payload, pad_frame,
+    passes_luhn, redact_leaks, scan_message_for_leaks, seal_cross_border_capsule,
     strip_media_metadata, unpad_frame, ChatMessageEnvelope, CleanedMedia, ContactInvite,
     GroupChatSession, KeyChangeWarning, LeakKind, LeakWarning, MessageContent,
     MessageExpirationPolicy, ProtocolError, SealedSenderEnvelope, SupportTicket,
-    SupportTicketCategory, UnsealedSenderMessage, ViewOncePayload, CROSS_BORDER_CAPSULE_MAGIC,
-    PADDING_BUCKETS, PROTOCOL_VERSION,
+    SupportTicketCategory, UnsealedSenderMessage, ViewOncePayload, CHANNEL_KDF_ROUNDS,
+    CROSS_BORDER_CAPSULE_MAGIC, PADDING_BUCKETS, PROTOCOL_VERSION,
 };
 pub use aegis_server::{
-    compute_pow_difficulty, handle_http_request, render_support_portal_html,
+    compute_pow_difficulty, handle_http_request, render_support_portal_html, seal_tunnel_request,
     BlindSupporterPassGrant, FederationServerState, QueueQuota, ServerError, SupportPortalState,
 };
 pub use aegis_storage::{
@@ -47,9 +49,11 @@ pub use aegis_storage::{
 };
 pub use aegis_transport::{
     connect_via_socks5h, derive_circuit_isolation_token, evaluate_network_shield,
-    format_static_ipv4_endpoint, poll_capsules_over_tcp, send_capsule_over_tcp, CoverTrafficConfig,
-    CoverTrafficScheduler, IsolatedCircuitTag, NetworkRouteStatus, ProxyConfig, RouteProbe,
-    ServerMigrationNotice, ShieldEvaluation, TransportError, TransportProfile,
+    format_static_ipv4_endpoint, poll_capsules_over_tcp, poll_capsules_via_blind_relay,
+    poll_capsules_via_multihop_chain, poll_capsules_via_socks5, send_capsule_over_tcp,
+    send_capsule_via_blind_relay, send_capsule_via_multihop_chain, send_capsule_via_socks5,
+    CoverTrafficConfig, CoverTrafficScheduler, IsolatedCircuitTag, NetworkRouteStatus, ProxyConfig,
+    RouteProbe, ServerMigrationNotice, ShieldEvaluation, TransportError, TransportProfile,
 };
 
 use core::fmt;
@@ -58,6 +62,8 @@ use core::sync::atomic::{compiler_fence, Ordering};
 
 fn zeroize_string(s: &mut String) {
     let mut bytes = core::mem::take(s).into_bytes();
+    let cap = bytes.capacity();
+    bytes.resize(cap, 0u8);
     for b in &mut bytes {
         *b = black_box(0u8);
     }
@@ -181,12 +187,25 @@ impl AegisClientCore {
         account_id: [u8; 16],
         login_nickname: &str,
     ) -> Result<usize, AccountSlotError> {
-        let normalized = login_nickname.trim().to_ascii_lowercase();
-        validate_nickname(&normalized).map_err(|_| AccountSlotError::InvalidAccountId)?;
+        let mut normalized = login_nickname.trim().to_ascii_lowercase();
+        if validate_nickname(&normalized).is_err() {
+            zeroize_string(&mut normalized);
+            return Err(AccountSlotError::InvalidAccountId);
+        }
         if self.registered_nicknames.contains(&normalized) {
+            zeroize_string(&mut normalized);
             return Err(AccountSlotError::DuplicateAccountId);
         }
-        let count = self.account_slots.register_account(account_id)?;
+        let count = match self.account_slots.register_account(account_id) {
+            Ok(c) => c,
+            Err(err) => {
+                zeroize_string(&mut normalized);
+                return Err(err);
+            }
+        };
+        if let Some(prev) = &mut self.active_nickname {
+            zeroize_string(prev);
+        }
         self.registered_nicknames.push(normalized.clone());
         self.active_nickname = Some(normalized);
         Ok(count)
