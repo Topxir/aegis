@@ -904,9 +904,53 @@ impl DesktopAppState {
     /// Switches UI language between Russian (`Locale::Ru`) and English (`Locale::En`).
     pub fn set_locale(&mut self, locale: Locale) {
         self.locale = locale;
+        for chat in &mut self.chats {
+            if chat.is_local_saved_notes {
+                chat.title = match locale {
+                    Locale::Ru => "📌 Избранное".to_owned(),
+                    Locale::En => "📌 Saved Messages".to_owned(),
+                };
+                if let Some(first) = chat.messages.first_mut() {
+                    if first.text.starts_with("Заметки сохраняются")
+                        || first.text.starts_with("Notes are saved")
+                    {
+                        first.text = match locale {
+                            Locale::Ru => "Заметки сохраняются только на этом устройстве.".to_owned(),
+                            Locale::En => "Notes are saved only on this device.".to_owned(),
+                        };
+                    }
+                }
+            } else if chat.verified_support_badge {
+                chat.title = match locale {
+                    Locale::Ru => "Поддержка Aegis ✓".to_owned(),
+                    Locale::En => "Aegis Support ✓".to_owned(),
+                };
+                if let Some(first) = chat.messages.first_mut() {
+                    if first.text.starts_with("Здравствуй!")
+                        || first.text.starts_with("Welcome!")
+                    {
+                        first.text = match locale {
+                            Locale::Ru => "Здравствуй! Здесь можно написать в поддержку.".to_owned(),
+                            Locale::En => "Welcome! You can message support here.".to_owned(),
+                        };
+                    }
+                }
+            } else if chat.title == "nordic-falcon" {
+                if let Some(first) = chat.messages.first_mut() {
+                    if first.text.starts_with("Привет! Напиши")
+                        || first.text.starts_with("Hey! Message me")
+                    {
+                        first.text = match locale {
+                            Locale::Ru => "Привет! Напиши, когда будешь на связи.".to_owned(),
+                            Locale::En => "Hey! Message me when you're online.".to_owned(),
+                        };
+                    }
+                }
+            }
+        }
         self.status_banner = match locale {
-            Locale::Ru => "Язык интерфейса переключён на Русский (RU).".to_owned(),
-            Locale::En => "Interface language switched to English (EN).".to_owned(),
+            Locale::Ru => "Язык интерфейса: Русский (RU).".to_owned(),
+            Locale::En => "Interface language: English (EN).".to_owned(),
         };
     }
 
@@ -1650,10 +1694,16 @@ impl DesktopGuiServer {
     #[must_use]
     fn render_html_legacy(&self) -> String {
         let s = self.state.strings();
+        let is_en = self.state.locale == Locale::En;
         if self.state.current_screen == Screen::PanicWiped {
+            let wipe_heading = if is_en {
+                "🚨 CRYPTOGRAPHIC WIPE COMPLETED"
+            } else {
+                "🚨 КРИПТОГРАФИЧЕСКОЕ СТИРАНИЕ ВЫПОЛНЕНО"
+            };
             return format!(
                 "<!DOCTYPE html>
-<html lang='ru'>
+<html lang='{lang}'>
 <head>
 <meta charset='utf-8'>
 <title>Crypto-Wipe Completed</title>
@@ -1664,19 +1714,22 @@ impl DesktopGuiServer {
 </head>
 <body>
   <div class='card'>
-    <h1>🚨 КРИПТОГРАФИЧЕСКОЕ СТИРАНИЕ ВЫПОЛНЕНО</h1>
+    <h1>{wipe_heading}</h1>
     <p style='color:#e6edf3;'>{status}</p>
   </div>
 </body>
 </html>",
+                lang = if is_en { "en" } else { "ru" },
+                wipe_heading = wipe_heading,
                 status = html_escape(&self.state.status_banner)
             );
         }
 
         if self.state.current_screen == Screen::CalculatorDisguise {
+            let res_lbl = if is_en { "Result" } else { "Результат" };
             return format!(
                 "<!DOCTYPE html>
-<html lang='ru'>
+<html lang='{lang}'>
 <head>
 <meta charset='utf-8'>
 <title>{calc_title}</title>
@@ -1693,7 +1746,7 @@ impl DesktopGuiServer {
 <body>
   <div class='calc'>
     <h2 style='margin-top:0;color:#10F5CC;'>🧮 {calc_title} // Precision Titanium</h2>
-    <div style='margin-bottom:10px;color:#94A3B8;'>Результат: <b style='color:#10F5CC;'>{res}</b></div>
+    <div style='margin-bottom:10px;color:#94A3B8;'>{res_lbl}: <b style='color:#10F5CC;'>{res}</b></div>
     <form action='/action' method='get'>
       <input type='hidden' name='cmd' value='calc_eval'>
       <input type='text' name='expr' value='{buf}' placeholder='0' autocomplete='off'>
@@ -1720,7 +1773,9 @@ impl DesktopGuiServer {
   </div>
 </body>
 </html>",
+                lang = if is_en { "en" } else { "ru" },
                 calc_title = html_escape(s.disguise_calculator_title),
+                res_lbl = res_lbl,
                 res = html_escape(&self.state.calculator_disguise.last_result),
                 buf = html_escape(&self.state.calculator_disguise.display_buffer),
                 buf_url = url_encode(&self.state.calculator_disguise.display_buffer)
@@ -2468,9 +2523,10 @@ impl DesktopGuiServer {
             _ => self.render_workspace_page(),
         };
         let s = self.state.strings();
+        let lang = if self.state.locale == Locale::En { "en" } else { "ru" };
         format!(
             "<!DOCTYPE html>
-<html lang='ru'>
+<html lang='{lang}'>
 <head>
 <meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
@@ -2483,6 +2539,14 @@ impl DesktopGuiServer {
 </html>",
             title = html_escape(s.app_title),
         )
+    }
+
+    fn tr<'a>(&self, ru: &'a str, en: &'a str) -> &'a str {
+        if self.state.locale == Locale::En {
+            en
+        } else {
+            ru
+        }
     }
 
     fn render_top_actions(&self) -> String {
@@ -2529,6 +2593,8 @@ impl DesktopGuiServer {
     fn render_onboarding_page(&self) -> String {
         let s = self.state.strings();
         let seed_on = if self.state.seed_only_mode { "on" } else { "" };
+        let rec_title = self.tr("Фраза восстановления", "Recovery Phrase");
+        let rec_desc = self.tr("Сохраните её в надёжном месте.", "Store it in a safe offline place.");
         let recovery_html = self
             .state
             .recovery_phrase_preview
@@ -2536,8 +2602,8 @@ impl DesktopGuiServer {
             .map_or(String::new(), |phrase| {
                 format!(
                     "<div class='notice'>
-  <div class='notice-title'>Фраза восстановления</div>
-  <p>Сохраните её в надёжном месте.</p>
+  <div class='notice-title'>{rec_title}</div>
+  <p>{rec_desc}</p>
   <code class='secret'>{}</code>
 </div>",
                     html_escape(phrase)
@@ -2548,11 +2614,11 @@ impl DesktopGuiServer {
   <section class='auth-brand'>
     <div class='brand-mark large'>A</div>
     <h1>Aegis</h1>
-    <p class='brand-lead'>Приватный мессенджер без номера телефона и почты.</p>
+    <p class='brand-lead'>{brand_lead}</p>
     <ul class='brand-points'>
-      <li>Сообщения и контакты хранятся на устройстве</li>
-      <li>Сквозное шифрование по умолчанию</li>
-      <li>Без рекламы и отслеживания</li>
+      <li>{pt1}</li>
+      <li>{pt2}</li>
+      <li>{pt3}</li>
     </ul>
   </section>
   <section class='auth-side'>
@@ -2561,44 +2627,63 @@ impl DesktopGuiServer {
       {actions}
     </div>
     <div class='auth-card'>
-      <div class='eyebrow'>Шаг 1 из 3</div>
-      <h2>① Сейф Аккаунта</h2>
-      <p class='lead'>Создайте профиль для входа.</p>
+      <div class='eyebrow'>{step_label}</div>
+      <h2>{heading}</h2>
+      <p class='lead'>{lead}</p>
       {status}
       <a class='toggle-row' href='/action?cmd=toggle_seed_only'>
-        <span>Только на этом устройстве</span>
+        <span>{device_only}</span>
         <span class='switch {seed_on}'></span>
       </a>
-      <a class='btn ghost small' href='/action?cmd=gen_recovery_phrase'>Фраза восстановления</a>
+      <a class='btn ghost small' href='/action?cmd=gen_recovery_phrase'>{rec_btn}</a>
       {recovery}
       <form class='form-stack' action='/action' method='post'>
         <input type='hidden' name='cmd' value='login_account'>
-        <label for='nick'>Логин</label>
+        <label for='nick'>{login_lbl}</label>
         <div class='input-row'>
           <input id='nick' type='text' name='nick' value='{nick}' autocomplete='off' spellcheck='false'>
           <a class='btn ghost' href='/action?cmd=gen_nick'>{gen_nick}</a>
         </div>
-        <label for='alias'>Имя</label>
-        <input id='alias' type='text' name='alias' value='Призрак Сети' autocomplete='off'>
-        <label for='pwd'>Пароль</label>
-        <input id='pwd' type='password' name='pwd' value='' placeholder='Введите пароль' autocomplete='new-password'>
+        <label for='alias'>{name_lbl}</label>
+        <input id='alias' type='text' name='alias' value='{default_alias}' autocomplete='off'>
+        <label for='pwd'>{pwd_lbl}</label>
+        <input id='pwd' type='password' name='pwd' value='' placeholder='{pwd_ph}' autocomplete='new-password'>
         <div class='hint'>{password_hint}</div>
-        <button class='btn primary wide' type='submit'>Продолжить</button>
+        <button class='btn primary wide' type='submit'>{continue_btn}</button>
       </form>
       <div class='auth-links'>
-        <a href='/action?cmd=step_servers'>Выбрать сервер →</a>
+        <a href='/action?cmd=step_servers'>{choose_srv}</a>
       </div>
     </div>
   </section>
 </div>",
+            brand_lead = self.tr(
+                "Приватный мессенджер без номера телефона и почты.",
+                "Private messenger with no phone number or email required."
+            ),
+            pt1 = self.tr("Сообщения и контакты хранятся на устройстве", "Messages and contacts stay on your device"),
+            pt2 = self.tr("Сквозное шифрование по умолчанию", "End-to-end encryption by default"),
+            pt3 = self.tr("Без рекламы и отслеживания", "No ads and no tracking"),
             steps = Self::render_step_dots(1),
             actions = self.render_top_actions(),
+            step_label = self.tr("Шаг 1 из 3", "Step 1 of 3"),
+            heading = self.tr("① Сейф Аккаунта", "① Account Vault"),
+            lead = self.tr("Создайте профиль для входа.", "Create a local profile to sign in."),
             status = self.render_status_banner(),
+            device_only = self.tr("Только на этом устройстве", "This device only"),
             seed_on = seed_on,
+            rec_btn = self.tr("Фраза восстановления", "Recovery phrase"),
             recovery = recovery_html,
+            login_lbl = self.tr("Логин", "Username"),
             nick = html_escape(&self.state.onboarding_nickname),
             gen_nick = html_escape(s.nickname_generate_btn),
+            name_lbl = self.tr("Имя", "Display name"),
+            default_alias = self.tr("Призрак Сети", "Network Ghost"),
+            pwd_lbl = self.tr("Пароль", "Password"),
+            pwd_ph = self.tr("Введите пароль", "Enter password"),
             password_hint = html_escape(s.password_policy_hint),
+            continue_btn = self.tr("Продолжить", "Continue"),
+            choose_srv = self.tr("Выбрать сервер →", "Choose server →"),
         )
     }
 
@@ -2607,9 +2692,9 @@ impl DesktopGuiServer {
         for (idx, srv) in self.state.directory_servers.iter().enumerate() {
             let active = idx == self.state.selected_server_index;
             let badge = match srv.badge {
-                ServerBadge::OfficialDoubleCheck => "✓✓ Официальный",
-                ServerBadge::VerifiedSingleCheck => "✓ Проверенный",
-                ServerBadge::CommunityUnverified => "Пользовательский",
+                ServerBadge::OfficialDoubleCheck => self.tr("✓✓ Официальный", "✓✓ Official"),
+                ServerBadge::VerifiedSingleCheck => self.tr("✓ Проверенный", "✓ Verified"),
+                ServerBadge::CommunityUnverified => self.tr("Пользовательский", "Custom"),
             };
             let switch_cls = if active { "on" } else { "" };
             servers_html.push_str(&format!(
@@ -2637,11 +2722,11 @@ impl DesktopGuiServer {
   <section class='auth-brand'>
     <div class='brand-mark large'>A</div>
     <h1>Aegis</h1>
-    <p class='brand-lead'>Выберите сервер и при необходимости включите нужные переключатели защиты.</p>
+    <p class='brand-lead'>{brand_lead}</p>
     <ul class='brand-points'>
-      <li>Быстрое переключение узлов</li>
-      <li>Поддержка Tor, VPN и релея</li>
-      <li>Блокировка сети в один клик</li>
+      <li>{pt1}</li>
+      <li>{pt2}</li>
+      <li>{pt3}</li>
     </ul>
   </section>
   <section class='auth-side'>
@@ -2650,58 +2735,81 @@ impl DesktopGuiServer {
       {actions}
     </div>
     <div class='auth-card wide'>
-      <div class='eyebrow'>Шаг 2 из 3</div>
-      <h2>② Матрица Серверов и Релеев</h2>
-      <p class='lead'>Выберите сервер для подключения.</p>
+      <div class='eyebrow'>{step_label}</div>
+      <h2>{heading}</h2>
+      <p class='lead'>{lead}</p>
       {status}
       <div class='server-list'>{servers}</div>
       <div class='toggle-list'>
         <a class='toggle-row' href='/action?cmd=route_tor'><span>Tor</span><span class='switch {tor_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_vpn'><span>VPN / Прокси</span><span class='switch {vpn_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_leak'><span>Блокировка сети (Kill Switch)</span><span class='switch {kill_on}'></span></a>
+        <a class='toggle-row' href='/action?cmd=route_vpn'><span>{vpn_lbl}</span><span class='switch {vpn_on}'></span></a>
+        <a class='toggle-row' href='/action?cmd=route_leak'><span>{kill_lbl}</span><span class='switch {kill_on}'></span></a>
       </div>
       <details class='panel'>
-        <summary>Свой сервер или прокси</summary>
+        <summary>{custom_sum}</summary>
         <form class='form-stack' action='/action' method='get'>
           <input type='hidden' name='cmd' value='custom_server'>
-          <input id='ip' type='text' name='ip' placeholder='Адрес сервера (host:port)' autocomplete='off' spellcheck='false'>
-          <button class='btn primary' type='submit'>Подключить сервер</button>
+          <input id='ip' type='text' name='ip' placeholder='{srv_ph}' autocomplete='off' spellcheck='false'>
+          <button class='btn primary' type='submit'>{connect_btn}</button>
         </form>
         <form class='form-stack' action='/action' method='get'>
           <input type='hidden' name='cmd' value='set_blind_relay'>
-          <input id='relay' type='text' name='relay' placeholder='Релей (host:port)' autocomplete='off' spellcheck='false'>
-          <button class='btn ghost' type='submit'>Сохранить релей</button>
+          <input id='relay' type='text' name='relay' placeholder='{relay_ph}' autocomplete='off' spellcheck='false'>
+          <button class='btn ghost' type='submit'>{save_relay_btn}</button>
         </form>
         <form class='form-stack' action='/action' method='get'>
           <input type='hidden' name='cmd' value='set_socks5_proxy'>
-          <input id='proxy' type='text' name='proxy' placeholder='SOCKS5 прокси (127.0.0.1:9050)' autocomplete='off' spellcheck='false'>
-          <button class='btn ghost' type='submit'>Сохранить прокси</button>
+          <input id='proxy' type='text' name='proxy' placeholder='{proxy_ph}' autocomplete='off' spellcheck='false'>
+          <button class='btn ghost' type='submit'>{save_proxy_btn}</button>
         </form>
       </details>
       <div class='actions-row'>
-        <a class='btn primary' href='/action?cmd=step_chats'>Открыть чаты</a>
-        <a class='btn ghost' href='/action?cmd=step_account'>Назад</a>
+        <a class='btn primary' href='/action?cmd=step_chats'>{open_chats}</a>
+        <a class='btn ghost' href='/action?cmd=step_account'>{back_btn}</a>
       </div>
     </div>
   </section>
 </div>",
+            brand_lead = self.tr(
+                "Выберите сервер и при необходимости включите нужные переключатели защиты.",
+                "Select a server and enable network protection toggles if needed."
+            ),
+            pt1 = self.tr("Быстрое переключение узлов", "Fast server switching"),
+            pt2 = self.tr("Поддержка Tor, VPN и релея", "Tor, VPN and relay support"),
+            pt3 = self.tr("Блокировка сети в один клик", "One-click network lock"),
             steps = Self::render_step_dots(2),
             actions = self.render_top_actions(),
+            step_label = self.tr("Шаг 2 из 3", "Step 2 of 3"),
+            heading = self.tr("② Матрица Серверов и Релеев", "② Servers & Relays"),
+            lead = self.tr("Выберите сервер для подключения.", "Select a server to connect."),
             status = self.render_status_banner(),
             servers = servers_html,
             tor_on = tor_on,
+            vpn_lbl = self.tr("VPN / Прокси", "VPN / Proxy"),
             vpn_on = vpn_on,
+            kill_lbl = self.tr("Блокировка сети (Kill Switch)", "Network Lock (Kill Switch)"),
             kill_on = kill_on,
+            custom_sum = self.tr("Свой сервер или прокси", "Custom server or proxy"),
+            srv_ph = self.tr("Адрес сервера (host:port)", "Server address (host:port)"),
+            connect_btn = self.tr("Подключить сервер", "Connect server"),
+            relay_ph = self.tr("Релей (host:port)", "Relay (host:port)"),
+            save_relay_btn = self.tr("Сохранить релей", "Save relay"),
+            proxy_ph = self.tr("SOCKS5 прокси (127.0.0.1:9050)", "SOCKS5 proxy (127.0.0.1:9050)"),
+            save_proxy_btn = self.tr("Сохранить прокси", "Save proxy"),
+            open_chats = self.tr("Открыть чаты", "Open chats"),
+            back_btn = self.tr("Назад", "Back"),
         )
     }
 
     fn render_workspace_page(&self) -> String {
         let s = self.state.strings();
         let active_chat = self.state.chats.get(self.state.active_chat_index);
-        let chat_title = active_chat.map_or("Выберите чат", |c| c.title.as_str());
+        let default_chat_title = self.tr("Выберите чат", "Select a chat");
+        let chat_title = active_chat.map_or(default_chat_title, |c| c.title.as_str());
         let chat_locked = active_chat.is_some_and(|c| c.is_locked);
         let active_ttl = active_chat.and_then(|c| c.default_disappearing_ttl_secs).unwrap_or(0);
         let search_filter = self.state.search_query.trim().to_lowercase();
+        let is_en = self.state.locale == Locale::En;
 
         let mut chat_items = String::new();
         for (idx, c) in self.state.chats.iter().enumerate() {
@@ -2716,10 +2824,10 @@ impl DesktopGuiServer {
                 "•"
             };
             let preview = if c.is_locked {
-                "Закрыто PIN-кодом".to_owned()
+                self.tr("Закрыто PIN-кодом", "Locked with PIN").to_owned()
             } else {
                 c.messages.last().map_or_else(
-                    || "Нет сообщений".to_owned(),
+                    || self.tr("Нет сообщений", "No messages").to_owned(),
                     |m| m.text.chars().take(48).collect(),
                 )
             };
@@ -2739,9 +2847,11 @@ impl DesktopGuiServer {
         let mut messages_html = String::new();
         if let Some(chat) = active_chat {
             if chat.is_locked {
-                messages_html.push_str(
-                    "<div class='empty-state'><div class='empty-icon'>🔒</div><h3>Чат закрыт</h3><p>Введите PIN, чтобы открыть переписку.</p></div>",
-                );
+                messages_html.push_str(&format!(
+                    "<div class='empty-state'><div class='empty-icon'>🔒</div><h3>{}</h3><p>{}</p></div>",
+                    self.tr("Чат закрыт", "Chat is locked"),
+                    self.tr("Введите PIN, чтобы открыть переписку.", "Enter PIN to unlock this conversation."),
+                ));
             } else {
                 let mut shown = 0usize;
                 for m in &chat.messages {
@@ -2752,12 +2862,16 @@ impl DesktopGuiServer {
                     let side = if m.outgoing { "out" } else { "in" };
                     let ttl = m
                         .disappearing_ttl_secs
-                        .map_or_else(String::new, human_ttl);
+                        .map_or_else(String::new, |t| human_ttl_locale(t, is_en));
                     let attachment = m.attachment.as_ref().map_or(String::new(), |a| {
                         format!(
                             "<div class='attachment'>📷 {}{}</div>",
                             html_escape(&a.filename),
-                            if a.consumed { " · просмотрено" } else { "" }
+                            if a.consumed {
+                                self.tr(" · просмотрено", " · viewed")
+                            } else {
+                                ""
+                            }
                         )
                     });
                     messages_html.push_str(&format!(
@@ -2773,32 +2887,40 @@ impl DesktopGuiServer {
                     ));
                 }
                 if shown == 0 {
-                    messages_html.push_str(
-                        "<div class='empty-state'><div class='empty-icon'>⌕</div><h3>Ничего не найдено</h3><p>Попробуйте изменить запрос.</p></div>",
-                    );
+                    messages_html.push_str(&format!(
+                        "<div class='empty-state'><div class='empty-icon'>⌕</div><h3>{}</h3><p>{}</p></div>",
+                        self.tr("Ничего не найдено", "Nothing found"),
+                        self.tr("Попробуйте изменить запрос.", "Try a different search query."),
+                    ));
                 }
             }
         } else {
-            messages_html.push_str(
-                "<div class='empty-state'><div class='empty-icon'>💬</div><h3>Выберите чат</h3><p>Слева — список ваших переписок.</p></div>",
-            );
+            messages_html.push_str(&format!(
+                "<div class='empty-state'><div class='empty-icon'>💬</div><h3>{}</h3><p>{}</p></div>",
+                self.tr("Выберите чат", "Select a chat"),
+                self.tr("Слева — список ваших переписок.", "Your conversations are listed on the left."),
+            ));
         }
 
         let unlock_form = if chat_locked {
-            "<form class='unlock-form' action='/action' method='post'>
+            format!(
+                "<form class='unlock-form' action='/action' method='post'>
   <input type='hidden' name='cmd' value='toggle_chat_pin'>
-  <input type='password' name='pin' placeholder='PIN чата' autocomplete='off'>
-  <button class='btn primary' type='submit'>Открыть</button>
-</form>"
+  <input type='password' name='pin' placeholder='{}' autocomplete='off'>
+  <button class='btn primary' type='submit'>{}</button>
+</form>",
+                self.tr("PIN чата", "Chat PIN"),
+                self.tr("Открыть", "Unlock"),
+            )
         } else {
-            ""
+            String::new()
         };
 
         let leak_modal = self.state.leak_guard_modal.as_ref().map_or(String::new(), |modal| {
             format!(
                 "<div class='modal-card'>
   <div class='modal-title'>{title}</div>
-  <p>Обнаружены личные данные ({count}). Скрыть перед отправкой?</p>
+  <p>{desc} ({count}).</p>
   <div class='code-block'>{redacted}</div>
   <div class='actions-row'>
     <a class='btn primary' href='/action?cmd=leak_mask'>{mask}</a>
@@ -2806,6 +2928,7 @@ impl DesktopGuiServer {
   </div>
 </div>",
                 title = html_escape(s.leak_guard_modal_title),
+                desc = self.tr("Обнаружены личные данные", "Sensitive data detected"),
                 count = modal.warnings.len(),
                 redacted = html_escape(&modal.redacted_preview),
                 mask = html_escape(s.leak_guard_mask_btn),
@@ -2814,11 +2937,15 @@ impl DesktopGuiServer {
         });
 
         let key_change = self.state.key_change_warning.as_ref().map_or(String::new(), |_| {
-            "<div class='banner warn'><b>Ключ собеседника изменился.</b> <a href='/action?cmd=ack_key_change'>Подтвердить</a></div>".to_owned()
+            format!(
+                "<div class='banner warn'><b>{}</b> <a href='/action?cmd=ack_key_change'>{}</a></div>",
+                self.tr("Ключ собеседника изменился.", "Contact key has changed."),
+                self.tr("Подтвердить", "Approve"),
+            )
         });
 
         let accounts_html = if self.state.accounts.profiles.is_empty() {
-            "<div class='muted'>Профиль не выбран</div>".to_owned()
+            format!("<div class='muted'>{}</div>", self.tr("Профиль не выбран", "No profile selected"))
         } else {
             self.state
                 .accounts
@@ -2844,15 +2971,15 @@ impl DesktopGuiServer {
         };
 
         let backup_html = if self.state.last_exported_backup_hex.is_some() {
-            "<div class='muted'>Резервная копия сохранена</div>"
+            self.tr("<div class='muted'>Резервная копия сохранена</div>", "<div class='muted'>Backup saved</div>")
         } else {
             ""
         };
 
         let verify_badge = if self.state.peer_verified {
-            "<span class='pill ok'>Ключ подтверждён</span>"
+            self.tr("<span class='pill ok'>Ключ подтверждён</span>", "<span class='pill ok'>Key verified</span>")
         } else {
-            "<span class='pill warn'>Не подтверждён</span>"
+            self.tr("<span class='pill warn'>Не подтверждён</span>", "<span class='pill warn'>Unverified</span>")
         };
         let tor_on = if matches!(self.state.shield_evaluation.status, NetworkRouteStatus::TorAnonymized) { "on" } else { "" };
         let vpn_on = if matches!(self.state.shield_evaluation.status, NetworkRouteStatus::VpnOrProxyProtected) { "on" } else { "" };
@@ -2869,28 +2996,28 @@ impl DesktopGuiServer {
   <aside class='sidebar'>
     <div class='sidebar-head'>
       <div class='brand-row'><span class='brand-mark'>A</span><span class='brand-name'>Aegis</span></div>
-      <a class='icon-btn' href='/action?cmd=disguise' title='Калькулятор'>{calc_icon}</a>
+      <a class='icon-btn' href='/action?cmd=disguise' title='{calc_tip}'>{calc_icon}</a>
     </div>
     <div class='sidebar-search'>
       <form action='/action' method='get'>
         <input type='hidden' name='cmd' value='search_messages'>
-        <input type='text' name='q' value='{search_q}' placeholder='Поиск' autocomplete='off'>
+        <input type='text' name='q' value='{search_q}' placeholder='{search_ph}' autocomplete='off'>
       </form>
     </div>
     <div class='chat-list'>{chat_items}</div>
     <details class='new-chat'>
-      <summary>+ Новый чат</summary>
+      <summary>{new_chat_sum}</summary>
       <form class='form-stack' action='/action' method='get'>
         <input type='hidden' name='cmd' value='new_chat'>
-        <input type='text' name='title' placeholder='Имя собеседника' autocomplete='off'>
-        <input type='text' name='code' placeholder='Код канала' autocomplete='off' spellcheck='false'>
-        <button class='btn primary' type='submit'>Создать чат</button>
+        <input type='text' name='title' placeholder='{peer_ph}' autocomplete='off'>
+        <input type='text' name='code' placeholder='{code_ph}' autocomplete='off' spellcheck='false'>
+        <button class='btn primary' type='submit'>{create_chat_btn}</button>
       </form>
     </details>
     <nav class='sidebar-nav'>
-      <a class='nav-item active' href='/action?cmd=step_chats'><span>💬</span>Чаты</a>
-      <a class='nav-item' href='/action?cmd=step_servers'><span>🌐</span>Серверы</a>
-      <a class='nav-item' href='/action?cmd=step_account'><span>👤</span>Аккаунт</a>
+      <a class='nav-item active' href='/action?cmd=step_chats'><span>💬</span>{nav_chats}</a>
+      <a class='nav-item' href='/action?cmd=step_servers'><span>🌐</span>{nav_servers}</a>
+      <a class='nav-item' href='/action?cmd=step_account'><span>👤</span>{nav_account}</a>
     </nav>
   </aside>
   <main class='main'>
@@ -2898,11 +3025,11 @@ impl DesktopGuiServer {
       <span class='avatar'>{chat_icon}</span>
       <div class='chat-head-meta'>
         <div class='chat-title'>{chat_title}</div>
-        <div class='chat-sub'>В сети</div>
+        <div class='chat-sub'>{online_sub}</div>
       </div>
       <div class='chat-actions'>
-        <a class='icon-btn' href='/action?cmd=sync_remote' title='Обновить'>⟳</a>
-        <a class='icon-btn' href='/action?cmd=toggle_chat_pin' title='PIN чата'>🔒</a>
+        <a class='icon-btn' href='/action?cmd=sync_remote' title='{sync_tip}'>⟳</a>
+        <a class='icon-btn' href='/action?cmd=toggle_chat_pin' title='{pin_tip}'>🔒</a>
       </div>
     </header>
     {status}
@@ -2912,9 +3039,9 @@ impl DesktopGuiServer {
     {unlock_form}
     <form class='composer' action='/action' method='get'>
       <input type='hidden' name='cmd' value='send_text'>
-      <a class='icon-btn' href='/action?cmd=send_photo_view_once' title='Отправить фото'>＋</a>
-      <input class='composer-input' type='text' name='text' placeholder='Сообщение' autocomplete='off'>
-      <button class='send-btn' type='submit' title='Отправить'>➤</button>
+      <a class='icon-btn' href='/action?cmd=send_photo_view_once' title='{photo_tip}'>＋</a>
+      <input class='composer-input' type='text' name='text' placeholder='{msg_ph}' autocomplete='off'>
+      <button class='send-btn' type='submit' title='{send_tip}'>➤</button>
     </form>
   </main>
   <aside class='info-panel'>
@@ -2923,81 +3050,118 @@ impl DesktopGuiServer {
       <h3>{chat_title}</h3>
       <div>{verify_badge}</div>
       <div class='actions-row' style='justify-content:center'>
-        <a class='btn ghost small' href='/action?cmd=verify_contact'>Подтвердить ключ</a>
+        <a class='btn ghost small' href='/action?cmd=verify_contact'>{verify_btn}</a>
       </div>
     </div>
     <div class='panel'>
-      <div class='section-title'>Защита и маршрут</div>
+      <div class='section-title'>{sec_route_title}</div>
       <div class='toggle-list'>
-        <a class='toggle-row' href='/action?cmd=toggle_chat_pin'><span>PIN-код чата</span><span class='switch {lock_on}'></span></a>
+        <a class='toggle-row' href='/action?cmd=toggle_chat_pin'><span>{chat_pin_lbl}</span><span class='switch {lock_on}'></span></a>
         <a class='toggle-row' href='/action?cmd=route_tor'><span>Tor</span><span class='switch {tor_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_vpn'><span>VPN / Прокси</span><span class='switch {vpn_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_direct'><span>Прямое соединение</span><span class='switch {direct_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_leak'><span>Блокировка сети</span><span class='switch {kill_on}'></span></a>
+        <a class='toggle-row' href='/action?cmd=route_vpn'><span>{vpn_lbl}</span><span class='switch {vpn_on}'></span></a>
+        <a class='toggle-row' href='/action?cmd=route_direct'><span>{direct_lbl}</span><span class='switch {direct_on}'></span></a>
+        <a class='toggle-row' href='/action?cmd=route_leak'><span>{kill_lbl}</span><span class='switch {kill_on}'></span></a>
       </div>
     </div>
     <div class='panel'>
-      <div class='section-title'>Исчезающие сообщения</div>
+      <div class='section-title'>{ttl_title}</div>
       <div class='seg-row'>
-        <a class='seg {ttl_off}' href='/action?cmd=set_chat_ttl&amp;ttl=0'>Выкл</a>
-        <a class='seg {ttl_60}' href='/action?cmd=set_chat_ttl&amp;ttl=60'>1 мин</a>
-        <a class='seg {ttl_3600}' href='/action?cmd=set_chat_ttl&amp;ttl=3600'>1 час</a>
+        <a class='seg {ttl_off}' href='/action?cmd=set_chat_ttl&amp;ttl=0'>{ttl_off_lbl}</a>
+        <a class='seg {ttl_60}' href='/action?cmd=set_chat_ttl&amp;ttl=60'>{ttl_1m_lbl}</a>
+        <a class='seg {ttl_3600}' href='/action?cmd=set_chat_ttl&amp;ttl=3600'>{ttl_1h_lbl}</a>
       </div>
     </div>
     <details class='panel'>
-      <summary>Профили</summary>
+      <summary>{profiles_sum}</summary>
       {accounts}
       <div class='actions-row wrap'>
-        <a class='btn ghost small' href='/action?cmd=add_account'>+ Профиль</a>
+        <a class='btn ghost small' href='/action?cmd=add_account'>{add_prof_btn}</a>
         <a class='btn ghost small' href='/action?cmd=activate_pass'>SupporterPass</a>
-        <a class='btn ghost small' href='/action?cmd=export_backup'>Резервная копия</a>
+        <a class='btn ghost small' href='/action?cmd=export_backup'>{backup_btn}</a>
       </div>
       {backup}
     </details>
     <details class='panel'>
-      <summary>Чаты и приглашения</summary>
+      <summary>{invites_sum}</summary>
       <div class='actions-row wrap'>
-        <a class='btn ghost small' href='/action?cmd=generate_invite'>Пригласить</a>
-        <a class='btn ghost small' href='/action?cmd=create_group&amp;title=Новая+группа&amp;members=5'>Новая группа</a>
-        <a class='btn ghost small' href='/action?cmd=rotate_queue'>Обновить канал</a>
+        <a class='btn ghost small' href='/action?cmd=generate_invite'>{invite_btn}</a>
+        <a class='btn ghost small' href='/action?cmd=create_group&amp;title=New+Group&amp;members=5'>{group_btn}</a>
+        <a class='btn ghost small' href='/action?cmd=rotate_queue'>{rotate_btn}</a>
       </div>
     </details>
     <details class='panel'>
-      <summary>Оформление и язык</summary>
+      <summary>{theme_sum}</summary>
       <div class='actions-row wrap'>
-        <a class='btn ghost small' href='/action?cmd=select_theme&amp;theme=obsidian-stealth-dark'>Тёмная</a>
-        <a class='btn ghost small' href='/action?cmd=select_theme&amp;theme=phantom-monolith'>Графит</a>
-        <a class='btn ghost small' href='/action?cmd=select_theme&amp;theme=emerald-matrix'>Изумруд</a>
+        <a class='btn ghost small' href='/action?cmd=select_theme&amp;theme=obsidian-stealth-dark'>{theme_dark}</a>
+        <a class='btn ghost small' href='/action?cmd=select_theme&amp;theme=phantom-monolith'>{theme_graphite}</a>
+        <a class='btn ghost small' href='/action?cmd=select_theme&amp;theme=emerald-matrix'>{theme_emerald}</a>
       </div>
       <div class='actions-row wrap'>
         <a class='btn ghost small' href='/action?cmd=lang_ru'>RU</a>
         <a class='btn ghost small' href='/action?cmd=lang_en'>EN</a>
-        <a class='btn danger small' href='/action?cmd=panic'>Стереть данные</a>
+        <a class='btn danger small' href='/action?cmd=panic'>{wipe_btn}</a>
       </div>
     </details>
   </aside>
 </div>",
             calc_icon = "🧮",
+            calc_tip = self.tr("Калькулятор", "Calculator"),
             search_q = html_escape(&self.state.search_query),
+            search_ph = self.tr("Поиск", "Search"),
             chat_items = chat_items,
+            new_chat_sum = self.tr("+ Новый чат", "+ New chat"),
+            peer_ph = self.tr("Имя собеседника", "Contact name"),
+            code_ph = self.tr("Код канала", "Channel code"),
+            create_chat_btn = self.tr("Создать чат", "Create chat"),
+            nav_chats = self.tr("Чаты", "Chats"),
+            nav_servers = self.tr("Серверы", "Servers"),
+            nav_account = self.tr("Аккаунт", "Account"),
             chat_icon = chat_icon_for(chat_title),
             chat_title = html_escape(chat_title),
+            online_sub = self.tr("В сети", "Online"),
+            sync_tip = self.tr("Обновить", "Refresh"),
+            pin_tip = self.tr("PIN чата", "Chat PIN"),
             status = status,
             key_change = key_change,
             leak_modal = leak_modal,
             messages = messages_html,
             unlock_form = unlock_form,
+            photo_tip = self.tr("Отправить фото", "Send photo"),
+            msg_ph = self.tr("Сообщение", "Message"),
+            send_tip = self.tr("Отправить", "Send"),
             verify_badge = verify_badge,
+            verify_btn = self.tr("Подтвердить ключ", "Verify key"),
+            sec_route_title = self.tr("Защита и маршрут", "Security & Route"),
+            chat_pin_lbl = self.tr("PIN-код чата", "Chat PIN lock"),
             lock_on = lock_on,
             tor_on = tor_on,
+            vpn_lbl = self.tr("VPN / Прокси", "VPN / Proxy"),
             vpn_on = vpn_on,
+            direct_lbl = self.tr("Прямое соединение", "Direct connection"),
             direct_on = direct_on,
+            kill_lbl = self.tr("Блокировка сети", "Network lock"),
             kill_on = kill_on,
+            ttl_title = self.tr("Исчезающие сообщения", "Disappearing messages"),
             ttl_off = ttl_off,
+            ttl_off_lbl = self.tr("Выкл", "Off"),
             ttl_60 = ttl_60,
+            ttl_1m_lbl = self.tr("1 мин", "1 min"),
             ttl_3600 = ttl_3600,
+            ttl_1h_lbl = self.tr("1 час", "1 hour"),
+            profiles_sum = self.tr("Профили", "Profiles"),
             accounts = accounts_html,
+            add_prof_btn = self.tr("+ Профиль", "+ Profile"),
+            backup_btn = self.tr("Резервная копия", "Backup"),
             backup = backup_html,
+            invites_sum = self.tr("Чаты и приглашения", "Chats & Invites"),
+            invite_btn = self.tr("Пригласить", "Invite"),
+            group_btn = self.tr("Новая группа", "New group"),
+            rotate_btn = self.tr("Обновить канал", "Refresh channel"),
+            theme_sum = self.tr("Оформление и язык", "Appearance & Language"),
+            theme_dark = self.tr("Тёмная", "Dark"),
+            theme_graphite = self.tr("Графит", "Graphite"),
+            theme_emerald = self.tr("Изумруд", "Emerald"),
+            wipe_btn = self.tr("Стереть данные", "Wipe data"),
         )
     }
 
@@ -3014,6 +3178,7 @@ impl DesktopGuiServer {
         {
             return;
         }
+        let is_en = self.state.locale == Locale::En;
         match cmd.as_str() {
             "step_account" => {
                 self.state.current_screen = Screen::Onboarding;
@@ -3030,9 +3195,9 @@ impl DesktopGuiServer {
             "toggle_seed_only" => {
                 self.state.seed_only_mode = !self.state.seed_only_mode;
                 self.state.status_banner = if self.state.seed_only_mode {
-                    "Ключи хранятся только на этом устройстве.".to_owned()
+                    self.tr("Ключи хранятся только на этом устройстве.", "Keys stay on this device only.").to_owned()
                 } else {
-                    "Включено восстановление через аккаунт.".to_owned()
+                    self.tr("Включено восстановление через аккаунт.", "Account recovery enabled.").to_owned()
                 };
             }
             "gen_recovery_phrase" => {
@@ -3048,7 +3213,7 @@ impl DesktopGuiServer {
                 if let Ok(phrase) = RecoveryPhrase::generate(&entropy) {
                     self.state.recovery_phrase_preview = Some(phrase.words().join(" "));
                     self.state.status_banner =
-                        "Фраза восстановления создана.".to_owned();
+                        self.tr("Фраза восстановления создана.", "Recovery phrase generated.").to_owned();
                 }
             }
             "search_messages" => {
@@ -3059,57 +3224,75 @@ impl DesktopGuiServer {
             "verify_contact" => {
                 self.state.peer_verified = true;
                 self.state.key_change_warning = None;
-                self.state.status_banner = "Ключ собеседника подтверждён.".to_owned();
+                self.state.status_banner =
+                    self.tr("Ключ собеседника подтверждён.", "Contact key verified.").to_owned();
             }
             "simulate_key_change" => {
                 if detect_identity_key_change(Some(&[0xB2; 32]), &[0xE9; 32]).is_some() {
                     self.state.peer_verified = false;
                     self.state.key_change_warning = Some(
-                        "Ключ собеседника изменился. Подтвердите перед отправкой.".to_owned(),
+                        self.tr(
+                            "Ключ собеседника изменился. Подтвердите перед отправкой.",
+                            "Contact key changed. Approve before sending.",
+                        )
+                        .to_owned(),
                     );
                     self.state.status_banner =
-                        "Обнаружена смена ключа собеседника.".to_owned();
+                        self.tr("Обнаружена смена ключа собеседника.", "Contact key change detected.").to_owned();
                 }
             }
             "ack_key_change" => {
                 self.state.key_change_warning = None;
                 self.state.peer_verified = true;
                 self.state.status_banner =
-                    "Новый ключ собеседника подтверждён.".to_owned();
+                    self.tr("Новый ключ собеседника подтверждён.", "New contact key approved.").to_owned();
             }
             "rotate_queue" => {
                 if self.state.rotate_active_chat_queue().is_some() {
-                    self.state.status_banner = "Канал чата обновлён.".to_owned();
+                    self.state.status_banner =
+                        self.tr("Канал чата обновлён.", "Chat channel refreshed.").to_owned();
                 }
             }
             "set_chat_ttl" => {
                 let ttl_val = extract_query_param(query, "ttl")
                     .and_then(|v| v.parse::<u32>().ok())
                     .unwrap_or(0);
+                let status = if ttl_val == 0 {
+                    self.tr("Таймер сообщений выключен.", "Disappearing timer disabled.").to_owned()
+                } else {
+                    format!(
+                        "{}: {}.",
+                        self.tr("Таймер сообщений", "Disappearing timer"),
+                        human_ttl_locale(ttl_val, is_en)
+                    )
+                };
                 if let Some(chat) = self.state.chats.get_mut(self.state.active_chat_index) {
                     chat.default_disappearing_ttl_secs =
                         if ttl_val == 0 { None } else { Some(ttl_val) };
-                    self.state.status_banner = if ttl_val == 0 {
-                        "Таймер сообщений выключен.".to_owned()
-                    } else {
-                        format!("Таймер сообщений: {}.", human_ttl(ttl_val))
-                    };
+                    self.state.status_banner = status;
                 }
             }
             "create_group" => {
                 let title = extract_query_param(query, "title")
-                    .unwrap_or_else(|| "Новая группа".to_owned());
+                    .unwrap_or_else(|| self.tr("Новая группа", "New Group").to_owned());
                 let members = extract_query_param(query, "members")
                     .and_then(|m| m.parse::<usize>().ok())
                     .unwrap_or(5);
                 match self.state.create_mls_group_conduit(&title, members) {
                     Ok(_) => {
                         self.state.current_screen = Screen::ChatWorkspace;
-                        self.state.status_banner =
-                            format!("Группа «{}» создана.", title.trim());
+                        self.state.status_banner = if is_en {
+                            format!("Group \"{}\" created.", title.trim())
+                        } else {
+                            format!("Группа «{}» создана.", title.trim())
+                        };
                     }
                     Err(e) => {
-                        self.state.status_banner = format!("Не удалось создать группу: {e}");
+                        self.state.status_banner = if is_en {
+                            format!("Could not create group: {e}")
+                        } else {
+                            format!("Не удалось создать группу: {e}")
+                        };
                     }
                 }
             }
@@ -3132,15 +3315,21 @@ impl DesktopGuiServer {
                 };
                 if let Ok(uri) = invite.to_uri() {
                     self.state.active_invite_uri.clone_from(&uri);
-                    self.state.status_banner = "Создано новое приглашение.".to_owned();
+                    self.state.status_banner =
+                        self.tr("Создано новое приглашение.", "New invite created.").to_owned();
                 }
             }
             "export_backup" => match self.state.export_explicit_encrypted_backup() {
                 Ok(_) => {
-                    self.state.status_banner = "Резервная копия создана.".to_owned();
+                    self.state.status_banner =
+                        self.tr("Резервная копия создана.", "Backup created.").to_owned();
                 }
                 Err(e) => {
-                    self.state.status_banner = format!("Ошибка резервной копии: {e}");
+                    self.state.status_banner = if is_en {
+                        format!("Backup error: {e}")
+                    } else {
+                        format!("Ошибка резервной копии: {e}")
+                    };
                 }
             },
             "set_socks5_proxy" => {
@@ -3148,11 +3337,16 @@ impl DesktopGuiServer {
                     let clean = proxy.trim();
                     if clean.is_empty() {
                         self.state.socks5_proxy_endpoint = None;
-                        self.state.status_banner = "Прокси выключен.".to_owned();
+                        self.state.status_banner =
+                            self.tr("Прокси выключен.", "Proxy disabled.").to_owned();
                     } else {
                         self.state.socks5_proxy_endpoint = Some(clean.to_owned());
                         let _ = self.state.update_network_route(true, true, true, false);
-                        self.state.status_banner = format!("Прокси включён ({clean}).");
+                        self.state.status_banner = if is_en {
+                            format!("Proxy enabled ({clean}).")
+                        } else {
+                            format!("Прокси включён ({clean}).")
+                        };
                     }
                 }
             }
@@ -3166,7 +3360,8 @@ impl DesktopGuiServer {
                         requested_forbidden_key_access: false,
                     };
                     if self.state.install_plugin_or_theme(manifest).is_ok() {
-                        self.state.status_banner = "Тема обновлена.".to_owned();
+                        self.state.status_banner =
+                            self.tr("Тема обновлена.", "Theme updated.").to_owned();
                     }
                 }
             }
@@ -3197,12 +3392,15 @@ impl DesktopGuiServer {
                     .unwrap_or_else(|| self.state.onboarding_nickname.clone());
                 let alias = extract_query_param(query, "alias")
                     .filter(|s| !s.trim().is_empty())
-                    .unwrap_or_else(|| "Основной профиль".to_owned());
+                    .unwrap_or_else(|| self.tr("Основной профиль", "Main Profile").to_owned());
                 let Some(pwd) = extract_query_param(query, "pwd").filter(|s| !s.trim().is_empty())
                 else {
-                    self.state.status_banner =
-                        "Проверьте данные входа: введите строгий пароль (≥12 символов, ≥3 ЗАГЛАВНЫЕ, цифры, спецсимвол)."
-                            .to_owned();
+                    self.state.status_banner = self
+                        .tr(
+                            "Введите пароль (≥12 символов, ≥3 ЗАГЛАВНЫЕ, цифры, спецсимвол).",
+                            "Enter a strong password (≥12 chars, ≥3 UPPERCASE, digits, symbol).",
+                        )
+                        .to_owned();
                     return;
                 };
                 let next_idx = (self.state.accounts.profiles.len() + 1) as u8;
@@ -3215,14 +3413,18 @@ impl DesktopGuiServer {
                     Ok(_) => {
                         self.state.recovery_phrase_preview = None;
                         self.state.current_screen = Screen::ServerLauncher;
-                        self.state.status_banner = format!(
-                            "Вы вошли как {} ({}). Шаг 2: Выберите сервер связи.",
-                            alias.trim(),
-                            nick.trim()
-                        );
+                        self.state.status_banner = if is_en {
+                            format!("Signed in as {} ({}).", alias.trim(), nick.trim())
+                        } else {
+                            format!("Вы вошли как {} ({}).", alias.trim(), nick.trim())
+                        };
                     }
                     Err(e) => {
-                        self.state.status_banner = format!("Проверьте данные входа: {e}");
+                        self.state.status_banner = if is_en {
+                            format!("Check your sign-in details: {e}")
+                        } else {
+                            format!("Проверьте данные входа: {e}")
+                        };
                     }
                 }
             }
@@ -3250,6 +3452,7 @@ impl DesktopGuiServer {
                 if let (Some(t), Some(c)) = (title, code) {
                     if self.state.chats.len() < 64 {
                         let id_byte = (self.state.chats.len() as u8).wrapping_add(10);
+                        let msg_text = self.tr("Чат создан.", "Chat created.").to_owned();
                         self.state.chats.push(ChatView {
                             chat_id: [id_byte; 16],
                             title: t.clone(),
@@ -3261,7 +3464,7 @@ impl DesktopGuiServer {
                             default_disappearing_ttl_secs: Some(3600),
                             messages: vec![ChatMessageView {
                                 outgoing: false,
-                                text: "Чат создан.".to_owned(),
+                                text: msg_text,
                                 padded_bucket_bytes: 256,
                                 disappearing_ttl_secs: Some(3600),
                                 attachment: None,
@@ -3270,7 +3473,11 @@ impl DesktopGuiServer {
                         self.state.active_chat_index = self.state.chats.len() - 1;
                         self.state.leak_guard_modal = None;
                         self.state.current_screen = Screen::ChatWorkspace;
-                        self.state.status_banner = format!("Чат с {t} открыт.");
+                        self.state.status_banner = if is_en {
+                            format!("Chat with {t} opened.")
+                        } else {
+                            format!("Чат с {t} открыт.")
+                        };
                     }
                 }
             }
@@ -3297,13 +3504,16 @@ impl DesktopGuiServer {
                                 self.state.current_screen = Screen::ChatWorkspace;
                             }
                             Err(e) => {
-                                self.state.status_banner =
-                                    format!("Не удалось подключить сервер: {e}");
+                                self.state.status_banner = if is_en {
+                                    format!("Could not connect to server: {e}")
+                                } else {
+                                    format!("Не удалось подключить сервер: {e}")
+                                };
                             }
                         }
                     } else {
                         self.state.status_banner =
-                            "Некорректный порт сервера.".to_owned();
+                            self.tr("Некорректный порт сервера.", "Invalid server port.").to_owned();
                     }
                 }
             }
@@ -3312,10 +3522,15 @@ impl DesktopGuiServer {
                     let clean = relay.trim();
                     if clean.is_empty() {
                         self.state.blind_relay_endpoint = None;
-                        self.state.status_banner = "Релей выключен.".to_owned();
+                        self.state.status_banner =
+                            self.tr("Релей выключен.", "Relay disabled.").to_owned();
                     } else {
                         self.state.blind_relay_endpoint = Some(clean.to_owned());
-                        self.state.status_banner = format!("Релей включён ({clean}).");
+                        self.state.status_banner = if is_en {
+                            format!("Relay enabled ({clean}).")
+                        } else {
+                            format!("Релей включён ({clean}).")
+                        };
                     }
                 }
             }
@@ -3332,12 +3547,20 @@ impl DesktopGuiServer {
                     0x42,
                     0x19,
                 ]);
-                self.state.status_banner = format!("Новый логин: {nick}");
+                self.state.status_banner = if is_en {
+                    format!("New username: {nick}")
+                } else {
+                    format!("Новый логин: {nick}")
+                };
             }
             "add_account" => {
                 let next_idx = (self.state.accounts.profiles.len() + 1) as u8;
                 let nick = generate_nickname([next_idx, next_idx.wrapping_add(5), 0x10, next_idx]);
-                let alias = format!("Профиль #{next_idx}");
+                let alias = if is_en {
+                    format!("Profile #{next_idx}")
+                } else {
+                    format!("Профиль #{next_idx}")
+                };
                 match self.state.accounts.create_account(
                     [next_idx; 16],
                     &nick,
@@ -3345,10 +3568,18 @@ impl DesktopGuiServer {
                     "AEGis#StrongPass99!",
                 ) {
                     Ok(_) => {
-                        self.state.status_banner = format!("Добавлен {alias}.");
+                        self.state.status_banner = if is_en {
+                            format!("Added {alias}.")
+                        } else {
+                            format!("Добавлен {alias}.")
+                        };
                     }
                     Err(e) => {
-                        self.state.status_banner = format!("Лимит профилей: {e}");
+                        self.state.status_banner = if is_en {
+                            format!("Profile limit: {e}")
+                        } else {
+                            format!("Лимит профилей: {e}")
+                        };
                     }
                 }
             }
@@ -3362,11 +3593,19 @@ impl DesktopGuiServer {
                     Ok(()) => {
                         self.state.support_portal.supporter_pass_active = true;
                         self.state.support_portal.max_account_slots = 5;
-                        self.state.status_banner =
-                            "SupporterPass активирован (до 5 профилей).".to_owned();
+                        self.state.status_banner = self
+                            .tr(
+                                "SupporterPass активирован (до 5 профилей).",
+                                "SupporterPass activated (up to 5 profiles).",
+                            )
+                            .to_owned();
                     }
                     Err(e) => {
-                        self.state.status_banner = format!("Ошибка SupporterPass: {e}");
+                        self.state.status_banner = if is_en {
+                            format!("SupporterPass error: {e}")
+                        } else {
+                            format!("Ошибка SupporterPass: {e}")
+                        };
                     }
                 }
             }
@@ -3402,39 +3641,47 @@ impl DesktopGuiServer {
             }
             "toggle_chat_pin" => {
                 let idx = self.state.active_chat_index;
-                if let Some(chat) = self.state.chats.get_mut(idx) {
-                    if chat.is_locked {
+                if let Some(chat) = self.state.chats.get(idx).map(|c| c.is_locked) {
+                    if chat {
                         let pin = extract_query_param(query, "pin").unwrap_or_default();
                         match self.state.unlock_chat_with_pin(idx, &pin) {
                             Ok(()) => {
                                 self.state.status_banner =
-                                    "Чат разблокирован персональным PIN-кодом.".to_owned();
+                                    self.tr("Чат разблокирован.", "Chat unlocked.").to_owned();
                             }
                             Err(e) => {
-                                self.state.status_banner = format!("Отказ разблокировки чата: {e}");
+                                self.state.status_banner = if is_en {
+                                    format!("Incorrect PIN: {e}")
+                                } else {
+                                    format!("Отказ разблокировки чата: {e}")
+                                };
                             }
                         }
-                    } else {
-                        chat.is_locked = true;
-                        self.state.status_banner = "Чат закрыт персональным PIN-кодом.".to_owned();
+                    } else if let Some(c) = self.state.chats.get_mut(idx) {
+                        c.is_locked = true;
+                        self.state.status_banner =
+                            self.tr("Чат закрыт PIN-кодом.", "Chat locked with PIN.").to_owned();
                     }
                 }
             }
             "route_tor" => {
                 let _ = self.state.update_network_route(true, true, true, false);
-                self.state.status_banner = "Tor включён.".to_owned();
+                self.state.status_banner = self.tr("Tor включён.", "Tor enabled.").to_owned();
             }
             "route_vpn" => {
                 let _ = self.state.update_network_route(false, true, true, false);
-                self.state.status_banner = "VPN / Прокси включён.".to_owned();
+                self.state.status_banner =
+                    self.tr("VPN / Прокси включён.", "VPN / Proxy enabled.").to_owned();
             }
             "route_direct" => {
                 let _ = self.state.update_network_route(false, false, false, false);
-                self.state.status_banner = "Прямое соединение включено.".to_owned();
+                self.state.status_banner =
+                    self.tr("Прямое соединение включено.", "Direct connection enabled.").to_owned();
             }
             "route_leak" => {
                 let _ = self.state.update_network_route(false, true, true, true);
-                self.state.status_banner = "Сеть заблокирована (Kill Switch).".to_owned();
+                self.state.status_banner =
+                    self.tr("Сеть заблокирована (Kill Switch).", "Network locked (Kill Switch).").to_owned();
             }
             "test_leak_card" => {
                 let sample =
@@ -3442,7 +3689,11 @@ impl DesktopGuiServer {
                 match self.state.send_chat_message(sample, false, None) {
                     Ok(_) => {}
                     Err(e) => {
-                        self.state.status_banner = format!("Отправка приостановлена: {e}");
+                        self.state.status_banner = if is_en {
+                            format!("Send paused: {e}")
+                        } else {
+                            format!("Отправка приостановлена: {e}")
+                        };
                     }
                 }
             }
@@ -3467,7 +3718,12 @@ impl DesktopGuiServer {
                             .state
                             .deliver_capsule_to_active_server(&channel_code, &redacted_text);
                     }
-                    self.state.status_banner = "Личные данные скрыты, сообщение отправлено.".to_owned();
+                    self.state.status_banner = self
+                        .tr(
+                            "Личные данные скрыты, сообщение отправлено.",
+                            "Sensitive data masked, message sent.",
+                        )
+                        .to_owned();
                 }
             }
             "leak_force" => {
@@ -3498,7 +3754,8 @@ impl DesktopGuiServer {
                                 &modal.original_draft,
                             );
                         }
-                        self.state.status_banner = "Сообщение отправлено.".to_owned();
+                        self.state.status_banner =
+                            self.tr("Сообщение отправлено.", "Message sent.").to_owned();
                     }
                 }
             }
@@ -3512,12 +3769,14 @@ impl DesktopGuiServer {
                     &fake_jpeg_with_exif,
                     true,
                 );
+                let caption = self.tr("Одноразовое фото", "View-once photo").to_owned();
                 if self
                     .state
-                    .send_chat_message("Одноразовое фото", true, Some(att))
+                    .send_chat_message(&caption, true, Some(att))
                     .is_ok()
                 {
-                    self.state.status_banner = "Одноразовое фото отправлено.".to_owned();
+                    self.state.status_banner =
+                        self.tr("Одноразовое фото отправлено.", "View-once photo sent.").to_owned();
                 }
             }
             "launch_vps" => {
@@ -3525,27 +3784,34 @@ impl DesktopGuiServer {
                     .state
                     .server_launcher
                     .configure(LaunchTarget::VpsDocker, 8443, 30);
-                self.state.status_banner = "Настройки VPS-сервера готовы.".to_owned();
+                self.state.status_banner =
+                    self.tr("Настройки VPS-сервера готовы.", "VPS server settings ready.").to_owned();
             }
             "launch_onion" => {
                 let _ =
                     self.state
                         .server_launcher
                         .configure(LaunchTarget::TorOnionService, 9001, 14);
-                self.state.status_banner = "Настройки Tor-сервера готовы.".to_owned();
+                self.state.status_banner =
+                    self.tr("Настройки Tor-сервера готовы.", "Tor server settings ready.").to_owned();
             }
             "launch_desktop" => {
                 let _ = self
                     .state
                     .server_launcher
                     .configure(LaunchTarget::DesktopLocal, 8443, 7);
-                self.state.status_banner = "Настройки локального сервера готовы.".to_owned();
+                self.state.status_banner = self
+                    .tr(
+                        "Настройки локального сервера готовы.",
+                        "Local server settings ready.",
+                    )
+                    .to_owned();
             }
             "send_ticket" => {
                 let _ = self.state.submit_support_ticket(
                     [0x55; 32],
                     SupportTicketCategory::SupporterPassIssue,
-                    "Запрос в поддержку.",
+                    "Support request.",
                 );
             }
             "disguise" => {
@@ -3611,7 +3877,11 @@ impl DesktopGuiServer {
                             self.state.status_banner.clear();
                         }
                         Err(e) => {
-                            self.state.status_banner = format!("Отправка приостановлена: {e}");
+                            self.state.status_banner = if is_en {
+                                format!("Send paused: {e}")
+                            } else {
+                                format!("Отправка приостановлена: {e}")
+                            };
                         }
                     }
                 }
@@ -3630,13 +3900,19 @@ impl DesktopGuiServer {
                 match self.state.sync_remote_capsules(&server_ep, &channel_code) {
                     Ok(n) => {
                         if n > 0 {
-                            self.state.status_banner = format!("Новых сообщений: {n}.");
+                            self.state.status_banner = if is_en {
+                                format!("New messages: {n}.")
+                            } else {
+                                format!("Новых сообщений: {n}.")
+                            };
                         } else {
-                            self.state.status_banner = "Новых сообщений нет.".to_owned();
+                            self.state.status_banner =
+                                self.tr("Новых сообщений нет.", "No new messages.").to_owned();
                         }
                     }
                     Err(_) => {
-                        self.state.status_banner = "Сервер сейчас недоступен.".to_owned();
+                        self.state.status_banner =
+                            self.tr("Сервер сейчас недоступен.", "Server is currently offline.").to_owned();
                     }
                 }
             }
@@ -4306,8 +4582,16 @@ pre { margin: 8px 0 0; padding: 10px; border-radius: 8px; background: #0e181f; c
 }
 "#;
 
-fn human_ttl(secs: u32) -> String {
-    if secs >= 3600 {
+fn human_ttl_locale(secs: u32, is_en: bool) -> String {
+    if is_en {
+        if secs >= 3600 {
+            format!("expires in {} h", secs / 3600)
+        } else if secs >= 60 {
+            format!("expires in {} min", secs / 60)
+        } else {
+            format!("expires in {secs} s")
+        }
+    } else if secs >= 3600 {
         format!("исчезает через {} ч", secs / 3600)
     } else if secs >= 60 {
         format!("исчезает через {} мин", secs / 60)
@@ -4539,13 +4823,28 @@ mod tests {
 
     #[test]
     fn desktop_localization_ru_and_en_complete() {
-        let mut app = DesktopAppState::new(Locale::Ru);
-        assert_eq!(app.strings().locale, Locale::Ru);
-        assert!(app.strings().app_title.contains("Анонимный"));
+        let mut gui = DesktopGuiServer::new(0, DesktopAppState::new(Locale::Ru));
+        assert_eq!(gui.state.strings().locale, Locale::Ru);
+        assert!(gui.state.strings().app_title.contains("Анонимный"));
 
-        app.set_locale(Locale::En);
-        assert_eq!(app.strings().locale, Locale::En);
-        assert!(app.strings().app_title.contains("Anonymous"));
+        gui.handle_command("cmd=lang_en");
+        assert_eq!(gui.state.strings().locale, Locale::En);
+        assert!(gui.state.strings().app_title.contains("Anonymous"));
+
+        let ws_html = gui.render_html();
+        assert!(ws_html.contains("Saved Messages"));
+        assert!(ws_html.contains("Security & Route"));
+        assert!(ws_html.contains("Disappearing messages"));
+
+        gui.handle_command("cmd=step_account");
+        let ob_html = gui.render_html();
+        assert!(ob_html.contains("① Account Vault"));
+        assert!(ob_html.contains("This device only"));
+
+        gui.handle_command("cmd=step_servers");
+        let srv_html = gui.render_html();
+        assert!(srv_html.contains("② Servers & Relays"));
+        assert!(srv_html.contains("Network Lock (Kill Switch)"));
     }
 
     #[test]

@@ -39,11 +39,11 @@ class AegisRustBridge(private val context: Context) {
 
     data class StarterServerUi(
         val id: String,
-        val name: String,
+        var name: String,
         val staticIpOrHost: String,
         val port: Int,
         val endpointUri: String,
-        val badge: String,
+        var badge: String,
         val isTorOnion: Boolean,
         val isCustom: Boolean = false
     )
@@ -72,7 +72,7 @@ class AegisRustBridge(private val context: Context) {
 
     data class ChatMessageUi(
         val outgoing: Boolean,
-        val text: String,
+        var text: String,
         val paddedBucketBytes: Int,
         val ttlSeconds: Int?,
         val attachment: MediaAttachmentUi? = null
@@ -80,7 +80,7 @@ class AegisRustBridge(private val context: Context) {
 
     data class ChatItemUi(
         val chatIdHex: String,
-        val title: String,
+        var title: String,
         var queueTag: String,
         val isSavedNotes: Boolean,
         val verifiedSupportBadge: Boolean,
@@ -93,6 +93,66 @@ class AegisRustBridge(private val context: Context) {
     )
 
     var locale: AppLocale = AppLocale.RU
+
+    fun switchLocale(newLocale: AppLocale) {
+        locale = newLocale
+        val en = newLocale == AppLocale.EN
+        starterServers.forEach { srv ->
+            when (srv.id) {
+                "zurich-static-1" -> {
+                    srv.name = if (en) "Server #1 (Zurich)" else "Сервер #1 (Цюрих)"
+                    srv.badge = if (en) "✓✓ Official" else "✓✓ Официальный"
+                }
+                "frankfurt-static-2" -> {
+                    srv.name = if (en) "Server #2 (Frankfurt)" else "Сервер #2 (Франкфурт)"
+                    srv.badge = if (en) "✓✓ Official" else "✓✓ Официальный"
+                }
+                "iceland-static-3" -> {
+                    srv.name = if (en) "Server #3 (Iceland)" else "Сервер #3 (Исландия)"
+                    srv.badge = if (en) "✓ Verified" else "✓ Проверенный"
+                }
+                "onion-relay-4" -> {
+                    srv.name = "Tor Relay"
+                    srv.badge = "✓✓ Tor"
+                }
+            }
+        }
+        chats.forEach { chat ->
+            if (chat.isSavedNotes && chat.chatIdHex == "01010101") {
+                chat.title = if (en) "📌 Saved Messages" else "📌 Избранное"
+                chat.messages.firstOrNull()?.let { first ->
+                    if (first.text.startsWith("Заметки хранятся") || first.text.startsWith("Notes are saved")) {
+                        first.text = if (en) {
+                            "Notes are saved only on this device."
+                        } else {
+                            "Заметки хранятся только на этом устройстве."
+                        }
+                    }
+                }
+            } else if (chat.verifiedSupportBadge) {
+                chat.title = if (en) "Aegis Support ✓" else "Поддержка Aegis ✓"
+                chat.messages.firstOrNull()?.let { first ->
+                    if (first.text.startsWith("Здравствуй!") || first.text.startsWith("Welcome!")) {
+                        first.text = if (en) {
+                            "Welcome! You can message support here."
+                        } else {
+                            "Здравствуй! Здесь можно написать в поддержку."
+                        }
+                    }
+                }
+            } else if (chat.chatIdHex == "02020202") {
+                chat.messages.firstOrNull()?.let { first ->
+                    if (first.text.startsWith("Привет! Напиши") || first.text.startsWith("Hey! Message me")) {
+                        first.text = if (en) {
+                            "Hey! Message me when you're online."
+                        } else {
+                            "Привет! Напиши, когда будешь на связи."
+                        }
+                    }
+                }
+            }
+        }
+    }
     // D-0019: Direct connection to starter Static-IP server by default (Tor is NOT mandatory)
     var shieldState: NetworkShieldState = NetworkShieldState.DIRECT_STATIC_IP_TLS
     var torEnabled: Boolean = false
