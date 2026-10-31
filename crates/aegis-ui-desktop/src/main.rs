@@ -1,8 +1,9 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 //! `aegis-desktop` — runnable desktop client for Aegis.
 //!
 //! Default mode opens a native Windows window (WebView2) around the local UI
-//! server. On other platforms it falls back to the system browser.
-//! `--self-test` runs the end-to-end desktop verification suite.
+//! server without spawning a console window. On other platforms it falls back
+//! to the system browser. `--self-test` runs the end-to-end verification suite.
 
 use aegis_ffi::Locale;
 use aegis_ui_desktop::{
@@ -105,10 +106,6 @@ fn launch_gui_server(
     let mut state = DesktopAppState::new(Locale::Ru);
     state.current_screen = Screen::Onboarding;
     let url = format!("http://127.0.0.1:{port}");
-    println!("============================================================");
-    println!("🛡 AEGIS DESKTOP: {url}");
-    println!("   Приватный мессенджер. Локальный интерфейс без телеметрии.");
-    println!("============================================================");
 
     let mut server = DesktopGuiServer::new(port, state);
     if max_requests.is_some() {
@@ -123,15 +120,11 @@ fn launch_gui_server(
                 "локальный UI-сервер не запустился за 5 секунд".to_owned(),
             ));
         }
-        match run_native_window(port) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                eprintln!("⚠ Нативное окно недоступно ({err}). Открываю браузер.");
-                open_in_browser(&url);
-                let _ = server_thread.join();
-                Ok(())
-            }
+        if run_native_window(port).is_err() {
+            open_in_browser(&url);
+            let _ = server_thread.join();
         }
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -209,7 +202,12 @@ document.addEventListener('keydown', function (event) {
 fn open_in_browser(url: &str) {
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
     }
     #[cfg(target_os = "linux")]
     {

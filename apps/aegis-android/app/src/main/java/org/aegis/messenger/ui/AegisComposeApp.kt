@@ -62,7 +62,7 @@ fun AegisComposeApp(
     var customStaticIpInput by remember { mutableStateOf("185.220.101.42:8443") }
     var blindRelayInput by remember { mutableStateOf(bridge.blindRelayEndpoint) }
     var socks5ProxyInput by remember { mutableStateOf(bridge.socks5ProxyEndpoint) }
-    var launcherTarget by remember { mutableStateOf("VPS_DOCKER") }
+    var showAdvancedNetwork by remember { mutableStateOf(false) }
 
     // Chat list and dialogs.
     var showNewChatDialog by remember { mutableStateOf(false) }
@@ -278,7 +278,7 @@ fun AegisComposeApp(
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("Только на этом устройстве", color = AegisColors.text, fontSize = 13.sp)
                                     Text(
-                                        "Seed-only режим без серверного аккаунта",
+                                        "Не создавать аккаунт на сервере",
                                         color = AegisColors.muted,
                                         fontSize = 11.sp
                                     )
@@ -288,7 +288,7 @@ fun AegisComposeApp(
                                     onCheckedChange = {
                                         bridge.seedOnlyMode = it
                                         applyStatus(
-                                            if (it) "Включён seed-only режим." else "Включён OPAQUE-режим."
+                                            if (it) "Ключи хранятся только на устройстве." else "Включено восстановление через аккаунт."
                                         )
                                     }
                                 )
@@ -302,15 +302,15 @@ fun AegisComposeApp(
                                         applyStatus("Фраза восстановления создана. Сохраните её офлайн.")
                                     }
                                 ) {
-                                    Text("24 слова", color = AegisColors.info, fontSize = 12.sp)
+                                    Text("Фраза восстановления", color = AegisColors.info, fontSize = 12.sp)
                                 }
                                 TextButton(
                                     onClick = {
-                                        val hex = bridge.exportEncryptedVaultBackupHex()
-                                        applyStatus("Зашифрованный экспорт готов: ${hex.length / 2} байт.")
+                                        bridge.exportEncryptedVaultBackupHex()
+                                        applyStatus("Резервная копия создана.")
                                     }
                                 ) {
-                                    Text("Экспорт", color = AegisColors.info, fontSize = 12.sp)
+                                    Text("Резервная копия", color = AegisColors.info, fontSize = 12.sp)
                                 }
                             }
 
@@ -362,15 +362,9 @@ fun AegisComposeApp(
                         }
 
                         Spacer(Modifier.height(18.dp))
-                        SecurityPoint("Сквозное шифрование", "ChaCha20-Poly1305 и Double Ratchet")
-                        SecurityPoint("Без телеметрии", "Ни аналитики, ни рекламных SDK")
-                        SecurityPoint("Локальное хранение", "Ключи не покидают устройство")
-                        Spacer(Modifier.height(10.dp))
-                        Text(
-                            "AGPL-3.0 · открытый код",
-                            color = AegisColors.muted,
-                            fontSize = 11.sp
-                        )
+                        SecurityPoint("Сквозное шифрование", "Сообщения доступны только собеседникам")
+                        SecurityPoint("Без отслеживания", "Ни рекламы, ни сбора данных")
+                        SecurityPoint("Локальное хранение", "Ключи и чаты остаются на устройстве")
                     }
                 }
 
@@ -499,87 +493,103 @@ fun AegisComposeApp(
                                 }
                             }
 
-                            SectionLabel("Приватный маршрут")
+                            SectionLabel("Защита и маршрут")
                             Surface(
                                 color = AegisColors.panel,
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(14.dp)) {
-                                    OutlinedTextField(
-                                        value = blindRelayInput,
-                                        onValueChange = {
-                                            blindRelayInput = it
-                                            bridge.blindRelayEndpoint = it.trim()
-                                        },
-                                        label = { Text("Слепой релей, host:port") },
-                                        singleLine = true,
-                                        keyboardOptions = incognitoKeyboardOptions,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                    Spacer(Modifier.height(8.dp))
-                                    OutlinedTextField(
-                                        value = socks5ProxyInput,
-                                        onValueChange = {
-                                            socks5ProxyInput = it
-                                            bridge.socks5ProxyEndpoint = it.trim()
-                                            if (it.isNotBlank()) {
-                                                bridge.shieldState =
-                                                    AegisRustBridge.NetworkShieldState.TOR_ANONYMIZED
-                                            }
-                                        },
-                                        label = { Text("SOCKS5h / Tor, host:port") },
-                                        singleLine = true,
-                                        keyboardOptions = incognitoKeyboardOptions,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                    Spacer(Modifier.height(8.dp))
+                                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                                     Row(
-                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        SmallChoice("Tor") {
-                                            bridge.shieldState =
-                                                AegisRustBridge.NetworkShieldState.TOR_ANONYMIZED
-                                            applyStatus("Маршрут Tor включён.")
-                                        }
-                                        SmallChoice("VPN") {
-                                            bridge.shieldState =
-                                                AegisRustBridge.NetworkShieldState.VPN_PROTECTED
-                                            applyStatus("Маршрут VPN включён.")
-                                        }
-                                        SmallChoice("Напрямую") {
-                                            bridge.shieldState =
-                                                AegisRustBridge.NetworkShieldState.DIRECT_STATIC_IP_TLS
-                                            applyStatus("Прямое TLS-подключение.")
-                                        }
-                                        SmallChoice("Kill Switch", danger = true) {
-                                            bridge.shieldState =
-                                                AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED
-                                            applyStatus("Kill Switch: сеть заблокирована.")
-                                        }
+                                        Text("Tor", color = AegisColors.text, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                                        Switch(
+                                            checked = bridge.shieldState == AegisRustBridge.NetworkShieldState.TOR_ANONYMIZED,
+                                            onCheckedChange = { enabled ->
+                                                bridge.shieldState = if (enabled) {
+                                                    AegisRustBridge.NetworkShieldState.TOR_ANONYMIZED
+                                                } else {
+                                                    AegisRustBridge.NetworkShieldState.DIRECT_STATIC_IP_TLS
+                                                }
+                                                applyStatus(if (enabled) "Tor включён." else "Прямое подключение.")
+                                            }
+                                        )
                                     }
-                                }
-                            }
-
-                            SectionLabel("Свой сервер за минуту")
-                            Surface(
-                                color = AegisColors.panel,
-                                shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(Modifier.padding(14.dp)) {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        SmallChoice("VPS") { launcherTarget = "VPS_DOCKER" }
-                                        SmallChoice("Tor") { launcherTarget = "TOR_ONION" }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("VPN / Прокси", color = AegisColors.text, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                                        Switch(
+                                            checked = bridge.shieldState == AegisRustBridge.NetworkShieldState.VPN_PROTECTED,
+                                            onCheckedChange = { enabled ->
+                                                bridge.shieldState = if (enabled) {
+                                                    AegisRustBridge.NetworkShieldState.VPN_PROTECTED
+                                                } else {
+                                                    AegisRustBridge.NetworkShieldState.DIRECT_STATIC_IP_TLS
+                                                }
+                                                applyStatus(if (enabled) "VPN включён." else "Прямое подключение.")
+                                            }
+                                        )
                                     }
-                                    Spacer(Modifier.height(8.dp))
-                                    Text(
-                                        bridge.buildServerLaunchBundle(launcherTarget, 8443, 30),
-                                        color = AegisColors.muted,
-                                        fontSize = 10.sp,
-                                        lineHeight = 14.sp
-                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("Блокировка сети (Kill Switch)", color = AegisColors.text, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                                        Switch(
+                                            checked = bridge.shieldState == AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED,
+                                            onCheckedChange = { enabled ->
+                                                bridge.shieldState = if (enabled) {
+                                                    AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED
+                                                } else {
+                                                    AegisRustBridge.NetworkShieldState.DIRECT_STATIC_IP_TLS
+                                                }
+                                                applyStatus(if (enabled) "Сеть заблокирована." else "Сеть включена.")
+                                            }
+                                        )
+                                    }
+                                    TextButton(
+                                        onClick = { showAdvancedNetwork = !showAdvancedNetwork },
+                                        contentPadding = PaddingValues(0.dp)
+                                    ) {
+                                        Text(
+                                            if (showAdvancedNetwork) "Скрыть релей и прокси" else "Настроить релей или прокси",
+                                            color = AegisColors.info,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                    if (showAdvancedNetwork) {
+                                        OutlinedTextField(
+                                            value = blindRelayInput,
+                                            onValueChange = {
+                                                blindRelayInput = it
+                                                bridge.blindRelayEndpoint = it.trim()
+                                            },
+                                            label = { Text("Релей (host:port)") },
+                                            singleLine = true,
+                                            keyboardOptions = incognitoKeyboardOptions,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                        Spacer(Modifier.height(8.dp))
+                                        OutlinedTextField(
+                                            value = socks5ProxyInput,
+                                            onValueChange = {
+                                                socks5ProxyInput = it
+                                                bridge.socks5ProxyEndpoint = it.trim()
+                                                if (it.isNotBlank()) {
+                                                    bridge.shieldState =
+                                                        AegisRustBridge.NetworkShieldState.TOR_ANONYMIZED
+                                                }
+                                            },
+                                            label = { Text("SOCKS5 прокси (host:port)") },
+                                            singleLine = true,
+                                            keyboardOptions = incognitoKeyboardOptions,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
                                 }
                             }
 
@@ -589,7 +599,7 @@ fun AegisComposeApp(
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
-                                Text("Перейти к чатам", fontWeight = FontWeight.Bold)
+                                Text("Открыть чаты", fontWeight = FontWeight.Bold)
                             }
                             Spacer(Modifier.height(16.dp))
                         }
@@ -606,7 +616,7 @@ fun AegisComposeApp(
                     Column(Modifier.fillMaxSize()) {
                         AppTopBar(
                             title = "Профиль",
-                            subtitle = "Локальный аккаунт",
+                            subtitle = "Настройки",
                             onMenu = { showMenu = true }
                         )
                         StatusBanner(statusBanner)
@@ -641,11 +651,6 @@ fun AegisComposeApp(
                                                 color = AegisColors.muted,
                                                 fontSize = 12.sp
                                             )
-                                            Text(
-                                                "Пароль: ${account.passwordScore}%",
-                                                color = AegisColors.accent,
-                                                fontSize = 11.sp
-                                            )
                                         }
                                     }
                                 }
@@ -675,52 +680,67 @@ fun AegisComposeApp(
                                                 Text(slot.displayName, color = AegisColors.text, fontSize = 13.sp)
                                                 Text("@${slot.loginNickname}", color = AegisColors.muted, fontSize = 11.sp)
                                             }
-                                            Text("${slot.passwordScore}%", color = AegisColors.muted, fontSize = 11.sp)
                                         }
                                     }
                                     Spacer(Modifier.height(6.dp))
                                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        SmallChoice("Добавить профиль") { go("STEP_1_ACCOUNT") }
+                                        SmallChoice("+ Профиль") { go("STEP_1_ACCOUNT") }
                                         SmallChoice("SupporterPass") {
                                             if (bridge.activateSupporterPass("BLIND_TOKEN_ED25519_VERIFIED_2026")) {
                                                 applyStatus("SupporterPass активирован: до 5 профилей.")
                                             } else {
-                                                applyStatus("SupporterPass уже активирован или токен неверен.")
+                                                applyStatus("SupporterPass уже активирован.")
                                             }
                                         }
                                     }
                                 }
                             }
 
-                            SectionLabel("Приватность")
+                            SectionLabel("Переключатели")
                             Surface(
                                 color = AegisColors.panel,
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(14.dp)) {
+                                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text("Seed-only", color = AegisColors.text, fontSize = 13.sp)
-                                            Text("Без серверного аккаунта", color = AegisColors.muted, fontSize = 11.sp)
-                                        }
+                                        Text(
+                                            "Только на этом устройстве",
+                                            color = AegisColors.text,
+                                            fontSize = 13.sp,
+                                            modifier = Modifier.weight(1f)
+                                        )
                                         Switch(
                                             checked = bridge.seedOnlyMode,
                                             onCheckedChange = {
                                                 bridge.seedOnlyMode = it
-                                                applyStatus(if (it) "Seed-only включён." else "OPAQUE включён.")
+                                                applyStatus(if (it) "Ключи только на устройстве." else "Включено восстановление.")
+                                            }
+                                        )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "Маскировка под калькулятор",
+                                            color = AegisColors.text,
+                                            fontSize = 13.sp,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Switch(
+                                            checked = bridge.calculatorDisguiseActive,
+                                            onCheckedChange = { enabled ->
+                                                if (enabled) enterCalculator()
                                             }
                                         )
                                     }
                                     Spacer(Modifier.height(8.dp))
                                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        SmallChoice("24 слова") {
+                                        SmallChoice("Фраза восстановления") {
                                             bridge.generateRecoveryPhrase24Words()
                                             applyStatus("Фраза восстановления создана.")
                                         }
-                                        SmallChoice("Экспорт") {
-                                            val hex = bridge.exportEncryptedVaultBackupHex()
-                                            applyStatus("Экспорт: ${hex.length / 2} байт.")
+                                        SmallChoice("Резервная копия") {
+                                            bridge.exportEncryptedVaultBackupHex()
+                                            applyStatus("Резервная копия сохранена.")
                                         }
                                         SmallChoice("Приглашение") {
                                             inviteDialogValue = bridge.generateInviteV2Uri()
@@ -731,38 +751,6 @@ fun AegisComposeApp(
                                         Spacer(Modifier.height(10.dp))
                                         Text("Фраза восстановления", color = AegisColors.warning, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                         Text(phrase, color = AegisColors.text, fontSize = 11.sp, lineHeight = 17.sp)
-                                    }
-                                    bridge.lastExportedBackupHex?.let { hex ->
-                                        Spacer(Modifier.height(8.dp))
-                                        Text(
-                                            "Экспорт: ${hex.length / 2} байт · ${hex.take(32)}…",
-                                            color = AegisColors.muted,
-                                            fontSize = 10.sp
-                                        )
-                                    }
-                                }
-                            }
-
-                            SectionLabel("Сеть")
-                            Surface(
-                                color = AegisColors.panel,
-                                shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(Modifier.padding(14.dp)) {
-                                    ProfileRow("Сервер", "${bridge.activeServer.staticIpOrHost}:${bridge.activeServer.port}")
-                                    ProfileRow("Маршрут", shieldLabel(bridge.shieldState))
-                                    ProfileRow(
-                                        "Релей",
-                                        bridge.blindRelayEndpoint.ifBlank { "не задан" }
-                                    )
-                                    ProfileRow(
-                                        "SOCKS5h",
-                                        bridge.socks5ProxyEndpoint.ifBlank { "не задан" }
-                                    )
-                                    Spacer(Modifier.height(8.dp))
-                                    TextButton(onClick = { go("STEP_2_SERVERS") }, contentPadding = PaddingValues(0.dp)) {
-                                        Text("Изменить маршрут", color = AegisColors.info, fontSize = 12.sp)
                                     }
                                 }
                             }
@@ -776,7 +764,7 @@ fun AegisComposeApp(
                                 Column(Modifier.padding(14.dp)) {
                                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                         SmallChoice(if (isRu) "English" else "Русский") { toggleLanguage() }
-                                        SmallChoice("Калькулятор") { enterCalculator() }
+                                        SmallChoice("Серверы") { go("STEP_2_SERVERS") }
                                     }
                                     Spacer(Modifier.height(10.dp))
                                     Button(
@@ -1287,17 +1275,6 @@ fun AegisComposeApp(
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
-                                                Text(
-                                                    if (chat.isLocked) {
-                                                        "Защищено PIN-кодом"
-                                                    } else {
-                                                        "${chat.messages.size} сообщений · ${chat.queueTag.take(28)}"
-                                                    },
-                                                    color = AegisColors.accent.copy(alpha = 0.85f),
-                                                    fontSize = 10.sp,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
                                             }
                                         }
                                     }
@@ -1792,23 +1769,6 @@ private fun SmallChoice(label: String, danger: Boolean = false, onClick: () -> U
 }
 
 @Composable
-private fun ProfileRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(label, color = AegisColors.muted, fontSize = 12.sp)
-        Text(
-            value,
-            color = AegisColors.text,
-            fontSize = 12.sp,
-            textAlign = TextAlign.End,
-            modifier = Modifier.weight(1f).padding(start = 12.dp)
-        )
-    }
-}
-
-@Composable
 private fun MessageBubble(message: AegisRustBridge.ChatMessageUi) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1834,7 +1794,7 @@ private fun MessageBubble(message: AegisRustBridge.ChatMessageUi) {
                 message.attachment?.let { attachment ->
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "📷 ${attachment.filename} · EXIF очищен",
+                        "📷 ${attachment.filename}",
                         color = AegisColors.info,
                         fontSize = 11.sp
                     )
@@ -1844,14 +1804,10 @@ private fun MessageBubble(message: AegisRustBridge.ChatMessageUi) {
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
                 ) {
-                    Text(
-                        "${message.paddedBucketBytes} B",
-                        color = AegisColors.muted,
-                        fontSize = 9.sp
-                    )
                     message.ttlSeconds?.let { ttl ->
+                        val ttlLabel = if (ttl >= 3600) "${ttl / 3600} ч" else if (ttl >= 60) "${ttl / 60} мин" else "${ttl} с"
                         Text(
-                            " · ${ttl}с",
+                            ttlLabel,
                             color = AegisColors.muted,
                             fontSize = 9.sp
                         )

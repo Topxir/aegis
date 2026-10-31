@@ -433,17 +433,17 @@ class AegisRustBridge(private val context: Context) {
     }
 
     fun createMlsGroupConduit(groupTitle: String, memberCount: Int): Result<Int> {
-        val cleanTitle = groupTitle.trim().ifEmpty { "Группа MLS" }
+        val cleanTitle = groupTitle.trim().ifEmpty { "Новая группа" }
         if (memberCount !in 2..20) {
-            return Result.failure(IllegalArgumentException("Лимит группы в бете: от 2 до 20 участников"))
+            return Result.failure(IllegalArgumentException("Лимит группы: от 2 до 20 участников"))
         }
         if (chats.size >= 64) {
-            return Result.failure(IllegalStateException("Достигнут лимит открытых контуров"))
+            return Result.failure(IllegalStateException("Достигнут лимит чатов"))
         }
         val groupIdx = chats.size + 20
         val newGroup = ChatItemUi(
             chatIdHex = "mls-$groupIdx",
-            title = "👥 $cleanTitle (MLS ≤20: $memberCount уч.)",
+            title = "👥 $cleanTitle ($memberCount уч.)",
             queueTag = "queue://mls-group-$groupIdx",
             isSavedNotes = false,
             verifiedSupportBadge = false,
@@ -452,7 +452,7 @@ class AegisRustBridge(private val context: Context) {
             messages = mutableListOf(
                 ChatMessageUi(
                     outgoing = true,
-                    text = "Создана защищённая группа MLS ($memberCount/20 участников, Pad-Before-Encrypt 256 B).",
+                    text = "Группа создана ($memberCount участников).",
                     paddedBucketBytes = 256,
                     ttlSeconds = 3600
                 )
@@ -650,7 +650,7 @@ class AegisRustBridge(private val context: Context) {
         val tag = if (cleanCode.startsWith("queue://")) cleanCode else "queue://$cleanCode"
         val newChat = ChatItemUi(
             chatIdHex = "ch-${chats.size + 10}",
-            title = "🔐 $cleanTitle",
+            title = cleanTitle,
             queueTag = tag,
             isSavedNotes = false,
             verifiedSupportBadge = false,
@@ -659,7 +659,7 @@ class AegisRustBridge(private val context: Context) {
             messages = mutableListOf(
                 ChatMessageUi(
                     outgoing = false,
-                    text = "Международный канал «$cleanCode» открыт. Сообщения шифруются ChaCha20-Poly1305 (256B).",
+                    text = "Чат создан.",
                     paddedBucketBytes = 256,
                     ttlSeconds = 3600
                 )
@@ -1235,16 +1235,16 @@ class AegisRustBridge(private val context: Context) {
                     mainHandler.post {
                         if (wipedByPanicOrDuress) return@post
                         if (ok) {
-                            onResult(true, "🌐 Капсула (${frame.size} B, Pad-Before-Encrypt) доставлена на узел ${srv.staticIpOrHost}:${srv.port}")
+                            onResult(true, "")
                         } else {
-                            onResult(false, "Капсула сохранена локально (узел вернул отказ)")
+                            onResult(false, "Сервер отклонил отправку")
                         }
                     }
                 }
             } catch (_: Exception) {
                 mainHandler.post {
                     if (!wipedByPanicOrDuress) {
-                        onResult(false, "Капсула запечатана локально (узел ${srv.staticIpOrHost}:${srv.port} офлайн)")
+                        onResult(false, "")
                     }
                 }
             }
@@ -1368,14 +1368,14 @@ class AegisRustBridge(private val context: Context) {
                         }
                         onResult(
                             decodedMessages.size,
-                            "🌐 Синхронизация с ${srv.staticIpOrHost}:${srv.port}: принято новых капсул: ${decodedMessages.size}"
+                            if (decodedMessages.isNotEmpty()) "Новых сообщений: ${decodedMessages.size}" else "Новых сообщений нет"
                         )
                     }
                 }
             } catch (_: Exception) {
                 mainHandler.post {
                     if (!wipedByPanicOrDuress) {
-                        onResult(0, "⛔ Не удалось связаться с узлом ${srv.staticIpOrHost}:${srv.port}")
+                        onResult(0, "Сервер сейчас недоступен")
                     }
                 }
             }
@@ -1414,38 +1414,38 @@ class AegisRustBridge(private val context: Context) {
             listOf(
                 StarterServerUi(
                     id = "zurich-static-1",
-                    name = "Стартовый #1 (Zurich Static IP — Без Tor)",
+                    name = "Сервер #1 (Цюрих)",
                     staticIpOrHost = "185.220.101.42",
                     port = 8443,
                     endpointUri = "aegis://185.220.101.42:8443",
-                    badge = "✓✓ Official",
+                    badge = "✓✓ Официальный",
                     isTorOnion = false
                 ),
                 StarterServerUi(
                     id = "frankfurt-static-2",
-                    name = "Стартовый #2 (Frankfurt Static IP — Без Tor)",
+                    name = "Сервер #2 (Франкфурт)",
                     staticIpOrHost = "91.108.56.110",
                     port = 8443,
                     endpointUri = "aegis://91.108.56.110:8443",
-                    badge = "✓✓ Official",
+                    badge = "✓✓ Официальный",
                     isTorOnion = false
                 ),
                 StarterServerUi(
                     id = "iceland-static-3",
-                    name = "Стартовый #3 (Iceland Static IP — Без Tor)",
+                    name = "Сервер #3 (Исландия)",
                     staticIpOrHost = "193.163.125.18",
                     port = 8443,
                     endpointUri = "aegis://193.163.125.18:8443",
-                    badge = "✓ Verified",
+                    badge = "✓ Проверенный",
                     isTorOnion = false
                 ),
                 StarterServerUi(
                     id = "onion-relay-4",
-                    name = "Опциональный Tor Onion v3 Relay",
+                    name = "Tor Relay",
                     staticIpOrHost = "aegis7xq2v4k3m3n5p7r2t2w4y6z2a3b3c5d7e2f3g3h5j7k2l2m4n2d.onion",
                     port = 8443,
                     endpointUri = "aegis://aegis7xq2v4k3m3n5p7r2t2w4y6z2a3b3c5d7e2f3g3h5j7k2l2m4n2d.onion:8443",
-                    badge = "✓✓ Onion",
+                    badge = "✓✓ Tor",
                     isTorOnion = true
                 )
             )
@@ -1467,7 +1467,7 @@ class AegisRustBridge(private val context: Context) {
         chats.add(
             ChatItemUi(
                 chatIdHex = "01010101",
-                title = "📌 Избранное (Локальный сейф SQLCipher)",
+                title = "📌 Избранное",
                 queueTag = "local-device-only",
                 isSavedNotes = true,
                 verifiedSupportBadge = false,
@@ -1476,7 +1476,7 @@ class AegisRustBridge(private val context: Context) {
                 messages = mutableListOf(
                     ChatMessageUi(
                         outgoing = true,
-                        text = "Заметки в «Избранном» хранятся только на устройстве и шифруются локальным ключом.",
+                        text = "Заметки хранятся только на этом устройстве.",
                         paddedBucketBytes = 256,
                         ttlSeconds = null
                     )
@@ -1487,7 +1487,7 @@ class AegisRustBridge(private val context: Context) {
         chats.add(
             ChatItemUi(
                 chatIdHex = "02020202",
-                title = "nordic-falcon (PQXDH + Double Ratchet)",
+                title = "nordic-falcon",
                 queueTag = "queue://nordic-falcon-global-v1",
                 isSavedNotes = false,
                 verifiedSupportBadge = false,
@@ -1496,7 +1496,7 @@ class AegisRustBridge(private val context: Context) {
                 messages = mutableListOf(
                     ChatMessageUi(
                         outgoing = false,
-                        text = "Прямое соединение со стартовым сервером 185.220.101.42:8443 активно (Без обязательного Tor, E2EE + 0 IP-логов).",
+                        text = "Привет! Напиши, когда будешь на связи.",
                         paddedBucketBytes = 256,
                         ttlSeconds = 3600
                     )
@@ -1507,7 +1507,7 @@ class AegisRustBridge(private val context: Context) {
         chats.add(
             ChatItemUi(
                 chatIdHex = "03030303",
-                title = "Официальная поддержка Aegis ✓",
+                title = "Поддержка Aegis ✓",
                 queueTag = "queue://verified-support-ed25519",
                 isSavedNotes = false,
                 verifiedSupportBadge = true,
@@ -1516,7 +1516,7 @@ class AegisRustBridge(private val context: Context) {
                 messages = mutableListOf(
                     ChatMessageUi(
                         outgoing = false,
-                        text = "Сертификат поддержки проверен (✓). Здесь можно отправить зашифрованный тикет или активировать SupporterPass.",
+                        text = "Здравствуй! Здесь можно написать в поддержку.",
                         paddedBucketBytes = 256,
                         ttlSeconds = null
                     )
