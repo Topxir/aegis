@@ -1543,46 +1543,6 @@ class AegisRustBridge(private val context: Context) {
                 )
             )
         )
-
-        chats.add(
-            ChatItemUi(
-                chatIdHex = "02020202",
-                title = "nordic-falcon",
-                queueTag = "queue://nordic-falcon-global-v1",
-                isSavedNotes = false,
-                verifiedSupportBadge = false,
-                perChatPin = "7788",
-                isLocked = false,
-                messages = mutableListOf(
-                    ChatMessageUi(
-                        outgoing = false,
-                        text = "Привет! Напиши, когда будешь на связи.",
-                        paddedBucketBytes = 256,
-                        ttlSeconds = 3600
-                    )
-                )
-            )
-        )
-
-        chats.add(
-            ChatItemUi(
-                chatIdHex = "03030303",
-                title = "Тестовый канал",
-                queueTag = "queue://verified-support-ed25519",
-                isSavedNotes = false,
-                verifiedSupportBadge = true,
-                perChatPin = null,
-                isLocked = false,
-                messages = mutableListOf(
-                    ChatMessageUi(
-                        outgoing = false,
-                        text = "Демонстрационный чат для проверки отправки сообщений.",
-                        paddedBucketBytes = 256,
-                        ttlSeconds = null
-                    )
-                )
-            )
-        )
     }
 
     companion object {

@@ -7,12 +7,12 @@
 ## 📦 Сборки в папке [`builds/`](builds/)
 
 1. **📱 Android APK — [`builds/android-apk/aegis-messenger-release.apk`](builds/android-apk/aegis-messenger-release.apk)**
-   - Клиент на Jetpack Compose (русский и английский интерфейс, список чатов, локальный поиск, PIN-блокировка чата, проверка чувствительных данных `LeakGuard`, маскировка под калькулятор, `FLAG_SECURE`, `excludeFromRecents="true"`, `allowBackup="false"`, без Google Play Services и без разрешений на микрофон/камеру).
+   - Клиент на Jetpack Compose (русский и английский интерфейс, список чатов, локальный поиск, PIN-блокировка чата, проверка чувствительных данных `LeakGuard`, `FLAG_SECURE`, `excludeFromRecents="true"`, `allowBackup="false"`, без Google Play Services и без разрешений на микрофон/камеру).
    - Поддерживает обмен капсулами с сервером `aegis-serverd` напрямую по `host:port`, через `SOCKS5h` прокси или через релей.
 
 2. **🖥 ПК-клиент (Windows) — [`builds/desktop/aegis-desktop.exe`](builds/desktop/aegis-desktop.exe) + [`builds/desktop/WebView2Loader.dll`](builds/desktop/WebView2Loader.dll)**
    - Нативное графическое окно Windows (`tao` + `wry` поверх WebView2, без запуска окна консоли).
-   - Поддерживает русский и английский язык (`RU / EN`), локальные профили, подключение к серверу `aegis-serverd` (`host:port`), `SOCKS5h` прокси, релей, блокировку сети (`Kill Switch`), PIN-код чата, таймер сообщений и маскировку под калькулятор.
+   - Поддерживает русский и английский язык (`RU / EN`), локальные профили, подключение к серверу `aegis-serverd` (`host:port`), `SOCKS5h` прокси, релей, блокировку сети (`Kill Switch`), PIN-код чата и таймер сообщений.
 
 3. **🌐 Сервер очередей — [`builds/server/`](builds/server/)**
    - **`aegis-serverd.exe`** — демон сервера очередей (`--bind=0.0.0.0 --port=8443`, фиксированные корзины `256..16384 B`, проверка `auth_hash` / `read_token`, эндпоинты пересылки `/api/v1/queue/relay` и `/api/v1/queue/relay_poll`).

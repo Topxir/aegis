@@ -805,25 +805,6 @@ impl DesktopAppState {
             }],
         };
 
-        let support_chat = ChatView {
-            chat_id: [0x03; 16],
-            title: "Тестовый канал".to_owned(),
-            queue_tag: "queue://support-verified-cert".to_owned(),
-            is_local_saved_notes: false,
-            verified_support_badge: true,
-            per_chat_pin: None,
-            is_locked: false,
-            default_disappearing_ttl_secs: None,
-            messages: vec![ChatMessageView {
-                outgoing: false,
-                text: "Демонстрационный чат для проверки отправки сообщений."
-                    .to_owned(),
-                padded_bucket_bytes: 256,
-                disappearing_ttl_secs: None,
-                attachment: None,
-            }],
-        };
-
         let obsidian_theme = PluginManifest {
             plugin_id: "obsidian-stealth-dark".to_owned(),
             declarative_theme_only: true,
@@ -848,7 +829,7 @@ impl DesktopAppState {
             cover_traffic_enabled: true,
             directory_servers,
             selected_server_index: 0,
-            chats: vec![saved_notes_chat, peer_chat, support_chat],
+            chats: vec![saved_notes_chat, peer_chat],
             active_chat_index: 1,
             leak_guard_modal: None,
             calculator_disguise: CalculatorDisguiseView {
@@ -2550,17 +2531,11 @@ impl DesktopGuiServer {
     }
 
     fn render_top_actions(&self) -> String {
-        let s = self.state.strings();
-        format!(
-            "<div class='top-actions'>
+        "<div class='top-actions'>
   <a class='chip' href='/action?cmd=lang_ru'>RU</a>
   <a class='chip' href='/action?cmd=lang_en'>EN</a>
-  <a class='chip' href='/action?cmd=disguise'>{calc}</a>
-  <a class='chip danger' href='/action?cmd=panic'>{panic}</a>
-</div>",
-            calc = html_escape(s.disguise_calculator_title),
-            panic = html_escape(s.panic_button_label),
-        )
+</div>"
+            .to_owned()
     }
 
     fn render_status_banner(&self) -> String {
@@ -2661,31 +2636,6 @@ impl DesktopGuiServer {
     }
 
     fn render_servers_page(&self) -> String {
-        let mut servers_html = String::new();
-        for (idx, srv) in self.state.directory_servers.iter().enumerate() {
-            let active = idx == self.state.selected_server_index;
-            let badge = match srv.badge {
-                ServerBadge::CommunityUnverified => self.tr("Пользовательский узел", "Custom node"),
-                _ => self.tr("Демо-шаблон", "Demo template"),
-            };
-            let switch_cls = if active { "on" } else { "" };
-            servers_html.push_str(&format!(
-                "<a class='server-card {active_cls}' href='/action?cmd=select_server&amp;idx={idx}'>
-  <div class='server-card-head'>
-    <div>
-      <div class='server-name'>{endpoint}</div>
-      <div class='server-badge'>{badge}</div>
-    </div>
-    <span class='switch {switch_cls}'></span>
-  </div>
-</a>",
-                active_cls = if active { "active" } else { "" },
-                endpoint = html_escape(&srv.endpoint),
-                badge = badge,
-                idx = idx,
-                switch_cls = switch_cls,
-            ));
-        }
         let is_killed = matches!(self.state.shield_evaluation.status, NetworkRouteStatus::Offline);
         let kill_on = if is_killed { "on" } else { "" };
         let kill_href = if is_killed {
@@ -2727,10 +2677,6 @@ impl DesktopGuiServer {
         <a class='toggle-row' href='{kill_href}'><span>{kill_lbl}</span><span class='switch {kill_on}'></span></a>
       </div>
       <details class='panel'>
-        <summary>{templates_sum}</summary>
-        <div class='server-list'>{servers}</div>
-      </details>
-      <details class='panel'>
         <summary>{proxy_sum}</summary>
         <form class='form-stack' action='/action' method='get'>
           <input type='hidden' name='cmd' value='set_blind_relay'>
@@ -2751,8 +2697,8 @@ impl DesktopGuiServer {
   </section>
 </div>",
             brand_lead = self.tr(
-                "Укажите адрес своего сервера aegis-serverd или выберите шаблон.",
-                "Enter the address of your aegis-serverd node or select a template."
+                "Укажите адрес своего сервера aegis-serverd.",
+                "Enter the address of your aegis-serverd node."
             ),
             pt1 = self.tr("Прямое подключение к вашему узлу", "Direct connection to your node"),
             pt2 = self.tr("Поддержка SOCKS5 прокси и релея", "SOCKS5 proxy and relay support"),
@@ -2769,8 +2715,6 @@ impl DesktopGuiServer {
             kill_href = kill_href,
             kill_lbl = self.tr("Блокировка сети (Kill Switch)", "Network Lock (Kill Switch)"),
             kill_on = kill_on,
-            templates_sum = self.tr("Демо-шаблоны узлов", "Demo node templates"),
-            servers = servers_html,
             proxy_sum = self.tr("SOCKS5 прокси и релей", "SOCKS5 proxy & relay"),
             relay_ph = self.tr("Релей (host:port)", "Relay (host:port)"),
             save_relay_btn = self.tr("Сохранить релей", "Save relay"),
@@ -2974,7 +2918,6 @@ impl DesktopGuiServer {
   <aside class='sidebar'>
     <div class='sidebar-head'>
       <div class='brand-row'><span class='brand-mark'>A</span><span class='brand-name'>Aegis</span></div>
-      <a class='icon-btn' href='/action?cmd=disguise' title='{calc_tip}'>{calc_icon}</a>
     </div>
     <div class='sidebar-search'>
       <form action='/action' method='get'>
@@ -3051,14 +2994,11 @@ impl DesktopGuiServer {
       <div class='actions-row wrap'>
         <a class='btn ghost small' href='/action?cmd=lang_ru'>RU</a>
         <a class='btn ghost small' href='/action?cmd=lang_en'>EN</a>
-        <a class='btn ghost small' href='/action?cmd=disguise'>{calc_tip}</a>
         <a class='btn danger small' href='/action?cmd=panic'>{wipe_btn}</a>
       </div>
     </div>
   </aside>
 </div>",
-            calc_icon = "🧮",
-            calc_tip = self.tr("Калькулятор", "Calculator"),
             search_q = html_escape(&self.state.search_query),
             search_ph = self.tr("Поиск", "Search"),
             chat_items = chat_items,

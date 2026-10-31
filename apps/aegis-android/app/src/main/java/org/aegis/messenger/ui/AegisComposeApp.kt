@@ -31,16 +31,14 @@ import org.aegis.messenger.core.AegisRustBridge
 @Composable
 fun AegisComposeApp(
     bridge: AegisRustBridge,
-    onToggleCalculatorLauncherIcon: (Boolean) -> Unit,
     onPanicWipeTriggered: () -> Unit
 ) {
     var uiTick by remember { mutableStateOf(0) }
     var activeScreen by remember { mutableStateOf("STEP_1_ACCOUNT") }
-    var activeChatIndex by remember { mutableStateOf(1) }
+    var activeChatIndex by remember { mutableStateOf(0) }
     var draftText by remember { mutableStateOf("") }
     var statusBanner by remember { mutableStateOf("") }
     var pendingLeakWarning by remember { mutableStateOf<AegisRustBridge.LeakWarningUi?>(null) }
-    var calculatorDisplay by remember { mutableStateOf("") }
     var chatPinInput by remember { mutableStateOf("") }
 
     var generatedNickname by remember { mutableStateOf(bridge.generateAnonymousNickname()) }
@@ -52,7 +50,6 @@ fun AegisComposeApp(
     var blindRelayInput by remember { mutableStateOf(bridge.blindRelayEndpoint) }
     var socks5ProxyInput by remember { mutableStateOf(bridge.socks5ProxyEndpoint) }
     var showAdvancedNetwork by remember { mutableStateOf(false) }
-    var showDemoTemplates by remember { mutableStateOf(false) }
 
     var showNewChatDialog by remember { mutableStateOf(false) }
     var newChatPeerName by remember { mutableStateOf("") }
@@ -99,22 +96,9 @@ fun AegisComposeApp(
         )
     }
 
-    fun enterCalculator() {
-        bridge.onAppBackgrounded()
-        bridge.setCalculatorDisguiseEnabled(true)
-        pendingLeakWarning = null
-        draftText = ""
-        chatPinInput = ""
-        onboardingPassword = ""
-        onToggleCalculatorLauncherIcon(true)
-        activeScreen = "CALCULATOR_DISGUISE"
-        uiTick++
-    }
-
     fun runPanicWipe() {
         draftText = ""
         pendingLeakWarning = null
-        calculatorDisplay = ""
         chatPinInput = ""
         onboardingPassword = ""
         showPanicConfirm = false
@@ -139,38 +123,6 @@ fun AegisComposeApp(
         Surface(modifier = Modifier.fillMaxSize(), color = AegisColors.bg) {
             if (currentTick >= 0 && bridge.wipedByPanicOrDuress) {
                 WipedScreen(isRu = isRu)
-                return@Surface
-            }
-
-            if (activeScreen == "CALCULATOR_DISGUISE" || bridge.calculatorDisguiseActive) {
-                CalculatorScreen(
-                    isRu = isRu,
-                    display = calculatorDisplay,
-                    onDisplayChange = { calculatorDisplay = it },
-                    onEvaluate = {
-                        when (val result = bridge.evaluateCalculatorOrPin(calculatorDisplay)) {
-                            "UNLOCKED" -> {
-                                calculatorDisplay = ""
-                                onToggleCalculatorLauncherIcon(false)
-                                activeScreen = "STEP_3_CHAT_LIST"
-                                applyStatus(tr("PIN принят. Открыт Aegis.", "PIN accepted. Aegis unlocked."))
-                            }
-                            "DURESS" -> {
-                                calculatorDisplay = ""
-                                onToggleCalculatorLauncherIcon(false)
-                                activeScreen = "STEP_3_CHAT_LIST"
-                                activeChatIndex = 0
-                                applyStatus(tr("Открыт профиль по умолчанию.", "Default profile opened."))
-                            }
-                            "WIPED" -> {
-                                calculatorDisplay = ""
-                                runPanicWipe()
-                            }
-                            else -> calculatorDisplay = result
-                        }
-                    },
-                    onClear = { calculatorDisplay = "" }
-                )
                 return@Surface
             }
 
@@ -459,55 +411,6 @@ fun AegisComposeApp(
                                             modifier = Modifier.fillMaxWidth()
                                         )
                                     }
-                                    TextButton(
-                                        onClick = { showDemoTemplates = !showDemoTemplates },
-                                        contentPadding = PaddingValues(0.dp)
-                                    ) {
-                                        Text(
-                                            if (showDemoTemplates) {
-                                                tr("Скрыть демо-шаблоны", "Hide demo templates")
-                                            } else {
-                                                tr("Демо-шаблоны узлов", "Demo node templates")
-                                            },
-                                            color = AegisColors.muted,
-                                            fontSize = 12.sp
-                                        )
-                                    }
-                                    if (showDemoTemplates) {
-                                        bridge.starterServers.forEachIndexed { index, server ->
-                                            val selected = index == bridge.activeServerIndex
-                                            Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clickable {
-                                                        bridge.selectStarterServer(index).onSuccess {
-                                                            applyStatus(
-                                                                tr(
-                                                                    "Выбран ${it.staticIpOrHost}:${it.port}.",
-                                                                    "Selected ${it.staticIpOrHost}:${it.port}."
-                                                                )
-                                                            )
-                                                        }
-                                                    }
-                                                    .padding(vertical = 8.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text(server.name, color = AegisColors.text, fontSize = 13.sp)
-                                                    Text(
-                                                        "${server.staticIpOrHost}:${server.port} · ${server.badge}",
-                                                        color = AegisColors.muted,
-                                                        fontSize = 11.sp
-                                                    )
-                                                }
-                                                Text(
-                                                    if (selected) "✓" else "→",
-                                                    color = if (selected) AegisColors.accent else AegisColors.muted,
-                                                    fontSize = 16.sp
-                                                )
-                                            }
-                                        }
-                                    }
                                 }
                             }
 
@@ -632,20 +535,6 @@ fun AegisComposeApp(
                                                     if (enabled) tr("Сеть заблокирована.", "Network locked.")
                                                     else tr("Сеть включена.", "Network enabled.")
                                                 )
-                                            }
-                                        )
-                                    }
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            tr("Маскировка под калькулятор", "Calculator disguise"),
-                                            color = AegisColors.text,
-                                            fontSize = 13.sp,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        Switch(
-                                            checked = bridge.calculatorDisguiseActive,
-                                            onCheckedChange = { enabled ->
-                                                if (enabled) enterCalculator()
                                             }
                                         )
                                     }
@@ -1162,10 +1051,6 @@ fun AegisComposeApp(
                         Column {
                             TextButton(onClick = {
                                 showMenu = false
-                                enterCalculator()
-                            }) { Text(tr("Калькулятор", "Calculator")) }
-                            TextButton(onClick = {
-                                showMenu = false
                                 toggleLanguage()
                             }) { Text(if (isRu) "Switch to English" else "Переключить на русский") }
                             TextButton(onClick = {
@@ -1316,88 +1201,6 @@ private fun WipedScreen(isRu: Boolean) {
             textAlign = TextAlign.Center,
             lineHeight = 19.sp
         )
-    }
-}
-
-@Composable
-private fun CalculatorScreen(
-    isRu: Boolean,
-    display: String,
-    onDisplayChange: (String) -> Unit,
-    onEvaluate: () -> Unit,
-    onClear: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF0E1114))
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Text(
-            if (isRu) "Калькулятор" else "Calculator",
-            color = Color.White,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(Modifier.height(8.dp))
-        Surface(
-            color = Color(0xFF1A1F24),
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = display.ifEmpty { "0" },
-                color = Color.White,
-                fontSize = 42.sp,
-                fontWeight = FontWeight.Light,
-                textAlign = TextAlign.End,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 24.dp)
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        val rows = listOf(
-            listOf("7", "8", "9", "/"),
-            listOf("4", "5", "6", "*"),
-            listOf("1", "2", "3", "-"),
-            listOf("C", "0", "+", "=")
-        )
-        rows.forEach { row ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                row.forEach { key ->
-                    Button(
-                        onClick = {
-                            when (key) {
-                                "C" -> onClear()
-                                "=" -> onEvaluate()
-                                else -> onDisplayChange(display + key)
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = when (key) {
-                                "=" -> AegisColors.accent
-                                "C" -> Color(0xFF3A2326)
-                                in listOf("/", "*", "-", "+") -> Color(0xFF2A3138)
-                                else -> Color(0xFF1E2429)
-                            }
-                        ),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(0.dp),
-                        modifier = Modifier.weight(1f).height(64.dp)
-                    ) {
-                        Text(
-                            key,
-                            color = if (key == "=") AegisColors.onAccent else Color.White,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                }
-            }
-        }
     }
 }
 

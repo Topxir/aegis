@@ -3,7 +3,7 @@
 > ⚠ **Примечание:** артефакты в этой папке — **неаудированный прототип (`v0.1.0-alpha`, unaudited)**. Не используйте их для критически чувствительной переписки до завершения миграции криптоядра по плану [`docs/security-reset/`](../docs/security-reset/).
 
 ## 1. 📱 `builds/android-apk/aegis-messenger-release.apk`
-- APK для Android 9.0+ (`minSdk 28`, `targetSdk 34`) на базе Jetpack Compose (русский и английский язык `RU / EN`, `FLAG_SECURE`, `excludeFromRecents="true"`, `allowBackup="false"`, инкогнито-клавиатура, маскировка под калькулятор, `LeakGuard`, без Google Play Services и без разрешений на микрофон/камеру).
+- APK для Android 9.0+ (`minSdk 28`, `targetSdk 34`) на базе Jetpack Compose (русский и английский язык `RU / EN`, `FLAG_SECURE`, `excludeFromRecents="true"`, `allowBackup="false"`, инкогнито-клавиатура, `LeakGuard`, без Google Play Services и без разрешений на микрофон/камеру).
 - Поддерживает подключение к вашему серверу `aegis-serverd` (`host:port`), `SOCKS5h` прокси, релею и блокировку сети (`Kill Switch`).
 
 ## 2. 🖥 `builds/desktop/aegis-desktop.exe` + `builds/desktop/WebView2Loader.dll`
