@@ -302,7 +302,58 @@ fun AegisComposeApp(
                                 .verticalScroll(rememberScrollState())
                                 .padding(horizontal = 14.dp, vertical = 8.dp)
                         ) {
-                            SectionLabel(tr("Ваш сервер", "Your server"))
+                            SectionLabel(tr("Доверенные серверы (активны)", "Trusted servers (online)"))
+                            bridge.starterServers.forEachIndexed { index, server ->
+                                val selected = index == bridge.activeServerIndex
+                                Surface(
+                                    color = if (selected) AegisColors.panel2 else AegisColors.panel,
+                                    shape = RoundedCornerShape(14.dp),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (selected) AegisColors.accent else AegisColors.line
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 8.dp)
+                                        .clickable {
+                                            bridge.selectStarterServer(index).onSuccess {
+                                                applyStatus(
+                                                    tr(
+                                                        "Подключён ${it.staticIpOrHost}:${it.port}.",
+                                                        "Connected to ${it.staticIpOrHost}:${it.port}."
+                                                    )
+                                                )
+                                            }
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(14.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                server.name,
+                                                color = AegisColors.text,
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                            Text(
+                                                "${server.staticIpOrHost}:${server.port} · ${server.badge}",
+                                                color = AegisColors.muted,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                        Text(
+                                            if (selected) "✓" else "→",
+                                            color = if (selected) AegisColors.accent else AegisColors.muted,
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+
+                            SectionLabel(tr("Или подключите свой адрес", "Or connect a custom address"))
                             Surface(
                                 color = AegisColors.panel,
                                 shape = RoundedCornerShape(14.dp),

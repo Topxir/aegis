@@ -114,6 +114,7 @@ fn launch_gui_server(
 
     #[cfg(target_os = "windows")]
     {
+        ensure_background_tunnel_server();
         let server_thread = thread::spawn(move || server.serve_blocking(None));
         if !wait_for_local_port(port, Duration::from_secs(5)) {
             return Err(DesktopUiError::IoError(
@@ -131,6 +132,53 @@ fn launch_gui_server(
     {
         open_in_browser(&url);
         server.serve_blocking(None)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_background_tunnel_server() {
+    use std::os::windows::process::CommandExt;
+    use std::path::PathBuf;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    if TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], 8443)),
+        Duration::from_millis(120),
+    )
+    .is_err()
+    {
+        let exe_dir = env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(PathBuf::from));
+        let candidates = [
+            exe_dir.as_ref().map(|d| d.join("aegis-serverd.exe")),
+            exe_dir
+                .as_ref()
+                .and_then(|d| d.parent().map(|p| p.join("server").join("aegis-serverd.exe"))),
+        ];
+        for cand in candidates.into_iter().flatten() {
+            if cand.is_file() {
+                let _ = Command::new(cand)
+                    .args(["--bind=127.0.0.1", "--port=8443"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn();
+                break;
+            }
+        }
+    }
+
+    if let Ok(profile) = env::var("USERPROFILE") {
+        let cfg = PathBuf::from(profile)
+            .join(".cloudflared")
+            .join("aegis-tunnel.yml");
+        if cfg.is_file() {
+            let _ = Command::new("cloudflared")
+                .args(["tunnel", "--config"])
+                .arg(&cfg)
+                .arg("run")
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
+        }
     }
 }
 

@@ -947,6 +947,18 @@ fn parse_frames_hex_from_http_response(text: &str) -> Result<Vec<Vec<u8>>, Trans
 /// # Errors
 /// Returns [`TransportError`] if `queue_id` is all-zero, `padded_frame` is not a valid bucket size,
 /// or the remote server rejects the request.
+fn http_host_header_for_endpoint(clean_host: &str) -> &str {
+    let host_only = clean_host.rsplit_once(':').map_or(clean_host, |(h, _)| h);
+    if host_only == "104.21.53.92"
+        || host_only == "172.67.211.53"
+        || host_only.eq_ignore_ascii_case("freeoasis.space")
+    {
+        "freeoasis.space"
+    } else {
+        clean_host
+    }
+}
+
 pub fn send_capsule_over_tcp(
     server_host_port: &str,
     queue_id: &[u8; 32],
@@ -963,6 +975,7 @@ pub fn send_capsule_over_tcp(
         ));
     }
     let clean_host = sanitize_endpoint_host_port(server_host_port)?;
+    let host_hdr = http_host_header_for_endpoint(clean_host);
     let mut stream = open_timed_tcp_stream(clean_host, timeout_ms)?;
     let queue_hex = hex_encode_bytes(queue_id);
     let mut read_tok = derive_queue_read_token(queue_id, channel_key);
@@ -971,7 +984,7 @@ pub fn send_capsule_over_tcp(
     let auth_hex = hex_encode_bytes(&auth_hash);
     let body_hex = hex_encode_bytes(padded_frame);
     let req = format!(
-        "POST /api/v1/queue/send?queue={queue_hex}&auth_hash={auth_hex} HTTP/1.1\r\nHost: {clean_host}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
+        "POST /api/v1/queue/send?queue={queue_hex}&auth_hash={auth_hex} HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: Aegis/0.1\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
         body_hex.len()
     );
     stream
@@ -1002,13 +1015,14 @@ pub fn poll_capsules_over_tcp(
         return Err(TransportError::InvalidEndpoint);
     }
     let clean_host = sanitize_endpoint_host_port(server_host_port)?;
+    let host_hdr = http_host_header_for_endpoint(clean_host);
     let mut stream = open_timed_tcp_stream(clean_host, timeout_ms)?;
     let queue_hex = hex_encode_bytes(queue_id);
     let mut read_tok = derive_queue_read_token(queue_id, channel_key);
     let tok_hex = hex_encode_bytes(&read_tok);
     read_tok.fill(0);
     let req = format!(
-        "POST /api/v1/queue/poll?queue={queue_hex}&read_token={tok_hex} HTTP/1.1\r\nHost: {clean_host}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "POST /api/v1/queue/poll?queue={queue_hex}&read_token={tok_hex} HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: Aegis/0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
     stream
         .write_all(req.as_bytes())
@@ -1041,6 +1055,7 @@ pub fn send_capsule_via_socks5(
         ));
     }
     let clean_target = sanitize_endpoint_host_port(target_host_port)?;
+    let host_hdr = http_host_header_for_endpoint(clean_target);
     let (target_host, port_str) = clean_target
         .rsplit_once(':')
         .ok_or(TransportError::InvalidEndpoint)?;
@@ -1059,7 +1074,7 @@ pub fn send_capsule_via_socks5(
     let auth_hex = hex_encode_bytes(&auth_hash);
     let body_hex = hex_encode_bytes(padded_frame);
     let req = format!(
-        "POST /api/v1/queue/send?queue={queue_hex}&auth_hash={auth_hex} HTTP/1.1\r\nHost: {clean_target}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
+        "POST /api/v1/queue/send?queue={queue_hex}&auth_hash={auth_hex} HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: Aegis/0.1\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_hex}",
         body_hex.len()
     );
     stream
@@ -1091,6 +1106,7 @@ pub fn poll_capsules_via_socks5(
         return Err(TransportError::InvalidEndpoint);
     }
     let clean_target = sanitize_endpoint_host_port(target_host_port)?;
+    let host_hdr = http_host_header_for_endpoint(clean_target);
     let (target_host, port_str) = clean_target
         .rsplit_once(':')
         .ok_or(TransportError::InvalidEndpoint)?;
@@ -1107,7 +1123,7 @@ pub fn poll_capsules_via_socks5(
     let tok_hex = hex_encode_bytes(&read_tok);
     read_tok.fill(0);
     let req = format!(
-        "POST /api/v1/queue/poll?queue={queue_hex}&read_token={tok_hex} HTTP/1.1\r\nHost: {clean_target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "POST /api/v1/queue/poll?queue={queue_hex}&read_token={tok_hex} HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: Aegis/0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
     stream
         .write_all(req.as_bytes())

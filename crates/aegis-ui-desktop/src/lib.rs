@@ -727,33 +727,33 @@ impl DesktopAppState {
 
         let directory_servers = vec![
             DirectoryServerEntry {
-                endpoint: "185.220.101.42:8443".to_owned(),
-                static_ipv4: Some([185, 220, 101, 42]),
+                endpoint: "104.21.53.92:80".to_owned(),
+                static_ipv4: Some([104, 21, 53, 92]),
                 is_tor_onion: false,
                 public_key: official_server_key,
                 badge: official_badge,
                 description:
-                    "Стартовый сервер #1 (Цюрих, Статический IP 185.220.101.42 — Без Tor, 0 IP-логов) ✓✓"
+                    "Доверенный узел #1 (Anycast IP 104.21.53.92:80 — Скрытый туннель, статический IP) ✓✓"
                         .to_owned(),
             },
             DirectoryServerEntry {
-                endpoint: "91.108.56.110:8443".to_owned(),
-                static_ipv4: Some([91, 108, 56, 110]),
+                endpoint: "172.67.211.53:80".to_owned(),
+                static_ipv4: Some([172, 67, 211, 53]),
                 is_tor_onion: false,
                 public_key: official_server_key_2,
                 badge: official_badge,
                 description:
-                    "Стартовый сервер #2 (Франкфурт, Статический IP 91.108.56.110 — Без Tor, 0 IP-логов) ✓✓"
+                    "Доверенный узел #2 (Anycast IP 172.67.211.53:80 — Резервный статический IP) ✓✓"
                         .to_owned(),
             },
             DirectoryServerEntry {
-                endpoint: "193.163.125.18:8443".to_owned(),
-                static_ipv4: Some([193, 163, 125, 18]),
+                endpoint: "freeoasis.space:80".to_owned(),
+                static_ipv4: None,
                 is_tor_onion: false,
                 public_key: verified_server_key,
                 badge: verified_badge,
                 description:
-                    "Проверенный сервер #3 (Исландия, Статический IP 193.163.125.18 — Без Tor) ✓"
+                    "Доверенный узел #3 (freeoasis.space:80 — Cloudflare Tunnel) ✓"
                         .to_owned(),
             },
             DirectoryServerEntry {
@@ -762,7 +762,7 @@ impl DesktopAppState {
                 is_tor_onion: true,
                 public_key: onion_server_key,
                 badge: official_badge,
-                description: "Опциональный Tor Onion v3 сервер фонда Aegis ✓✓ (для режима Tor)"
+                description: "Опциональный Tor Onion v3 узел ✓✓ (для режима Tor)"
                     .to_owned(),
             },
         ];
@@ -2589,7 +2589,7 @@ impl DesktopGuiServer {
       <h2>{heading}</h2>
       <p class='lead'>{lead}</p>
       {status}
-      <form class='form-stack' action='/action' method='post'>
+      <form class='form-stack' action='/action' method='get'>
         <input type='hidden' name='cmd' value='login_account'>
         <label for='nick'>{login_lbl}</label>
         <div class='input-row'>
@@ -2636,6 +2636,41 @@ impl DesktopGuiServer {
     }
 
     fn render_servers_page(&self) -> String {
+        let mut servers_html = String::new();
+        for (idx, srv) in self.state.directory_servers.iter().enumerate() {
+            if srv.is_tor_onion {
+                continue;
+            }
+            let active = idx == self.state.selected_server_index;
+            let badge = match srv.badge {
+                ServerBadge::OfficialDoubleCheck => self.tr(
+                    "✓✓ Доверенный · Статический Anycast IP (скрывает IP сервера)",
+                    "✓✓ Trusted · Static Anycast IP (hides server IP)",
+                ),
+                ServerBadge::VerifiedSingleCheck => self.tr(
+                    "✓ Доверенный туннель (скрывает IP сервера)",
+                    "✓ Trusted tunnel (hides server IP)",
+                ),
+                ServerBadge::CommunityUnverified => self.tr("Пользовательский узел", "Custom node"),
+            };
+            let switch_cls = if active { "on" } else { "" };
+            servers_html.push_str(&format!(
+                "<a class='server-card {active_cls}' href='/action?cmd=select_server&amp;idx={idx}'>
+  <div class='server-card-head'>
+    <div>
+      <div class='server-name'>{endpoint}</div>
+      <div class='server-badge'>{badge}</div>
+    </div>
+    <span class='switch {switch_cls}'></span>
+  </div>
+</a>",
+                active_cls = if active { "active" } else { "" },
+                endpoint = html_escape(&srv.endpoint),
+                badge = badge,
+                idx = idx,
+                switch_cls = switch_cls,
+            ));
+        }
         let is_killed = matches!(self.state.shield_evaluation.status, NetworkRouteStatus::Offline);
         let kill_on = if is_killed { "on" } else { "" };
         let kill_href = if is_killed {
@@ -2665,6 +2700,8 @@ impl DesktopGuiServer {
       <h2>{heading}</h2>
       <p class='lead'>{lead}</p>
       {status}
+      <div class='section-title'>{trusted_title}</div>
+      <div class='server-list'>{servers}</div>
       <form class='form-stack' action='/action' method='get'>
         <input type='hidden' name='cmd' value='custom_server'>
         <label for='ip'>{custom_sum}</label>
@@ -2697,19 +2734,21 @@ impl DesktopGuiServer {
   </section>
 </div>",
             brand_lead = self.tr(
-                "Укажите адрес своего сервера aegis-serverd.",
-                "Enter the address of your aegis-serverd node."
+                "Доверенные серверы работают через статический Anycast-туннель: реальный IP сервера и вашего ПК полностью скрыт.",
+                "Trusted servers run over a static Anycast tunnel: the real IP of the server and your PC is completely hidden."
             ),
-            pt1 = self.tr("Прямое подключение к вашему узлу", "Direct connection to your node"),
-            pt2 = self.tr("Поддержка SOCKS5 прокси и релея", "SOCKS5 proxy and relay support"),
-            pt3 = self.tr("Блокировка сети в один клик", "One-click network lock"),
+            pt1 = self.tr("Статический Anycast IP не меняется при перезапуске", "Static Anycast IP never changes across restarts"),
+            pt2 = self.tr("Реальный IP вашего ПК невозможно обнаружить", "Your PC's real IP can never be discovered"),
+            pt3 = self.tr("Поддержка SOCKS5 прокси и релея", "SOCKS5 proxy and relay support"),
             steps = Self::render_step_dots(2),
             actions = self.render_top_actions(),
             step_label = self.tr("Шаг 2 из 3", "Step 2 of 3"),
             heading = self.tr("② Матрица Серверов и Релеев", "② Servers & Relays"),
-            lead = self.tr("Укажите адрес работающего сервера.", "Enter a running server address."),
+            lead = self.tr("Выберите доверенный узел из списка или укажите свой.", "Select a trusted node from the list or enter your own."),
             status = self.render_status_banner(),
-            custom_sum = self.tr("Адрес вашего сервера", "Your server address"),
+            trusted_title = self.tr("Доверенные серверы (активны)", "Trusted servers (online)"),
+            servers = servers_html,
+            custom_sum = self.tr("Или подключите свой адрес", "Or connect a custom address"),
             srv_ph = self.tr("host:port", "host:port"),
             connect_btn = self.tr("Подключить", "Connect"),
             kill_href = kill_href,
@@ -2827,7 +2866,7 @@ impl DesktopGuiServer {
 
         let unlock_form = if chat_locked {
             format!(
-                "<form class='unlock-form' action='/action' method='post'>
+                "<form class='unlock-form' action='/action' method='get'>
   <input type='hidden' name='cmd' value='toggle_chat_pin'>
   <input type='password' name='pin' placeholder='{}' autocomplete='off'>
   <button class='btn primary' type='submit'>{}</button>
@@ -3834,7 +3873,7 @@ impl DesktopGuiServer {
 
             let html = self.render_html();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n{}",
                 html.len(),
                 html
             );
@@ -3939,6 +3978,8 @@ pub fn is_trusted_local_http_request(raw_request: &str) -> bool {
         .split_once("\r\n\r\n")
         .map_or(raw_request, |(h, _)| h);
     let mut saw_valid_host = false;
+    let mut saw_same_origin_fetch = false;
+    let mut saw_null_origin = false;
     for line in head.lines().skip(1) {
         let Some((name, val)) = line.split_once(':') else {
             continue;
@@ -3963,23 +4004,35 @@ pub fn is_trusted_local_http_request(raw_request: &str) -> bool {
                 }
                 saw_valid_host = true;
             }
-            "sec-fetch-site" if header_val == "cross-site" || header_val == "same-site" => {
-                return false;
+            "sec-fetch-site" => {
+                if header_val == "cross-site" || header_val == "same-site" {
+                    return false;
+                }
+                if header_val == "same-origin" || header_val == "none" {
+                    saw_same_origin_fetch = true;
+                }
             }
             "origin" => {
-                let valid_origin = ["http://127.0.0.1", "http://localhost"]
-                    .iter()
-                    .any(|prefix| {
-                        header_val.strip_prefix(prefix).is_some_and(|rest| {
-                            rest.is_empty() || rest.starts_with(':') || rest.starts_with('/')
-                        })
-                    });
-                if !valid_origin {
-                    return false;
+                if header_val == "null" {
+                    saw_null_origin = true;
+                } else {
+                    let valid_origin = ["http://127.0.0.1", "http://localhost"]
+                        .iter()
+                        .any(|prefix| {
+                            header_val.strip_prefix(prefix).is_some_and(|rest| {
+                                rest.is_empty() || rest.starts_with(':') || rest.starts_with('/')
+                            })
+                        });
+                    if !valid_origin {
+                        return false;
+                    }
                 }
             }
             _ => {}
         }
+    }
+    if saw_null_origin && !saw_same_origin_fetch {
+        return false;
     }
     saw_valid_host
 }
@@ -4934,7 +4987,7 @@ mod tests {
         assert!(app.shield_evaluation.traffic_permitted);
         assert_eq!(
             app.directory_servers[0].static_ipv4,
-            Some([185, 220, 101, 42])
+            Some([104, 21, 53, 92])
         );
 
         // Connect custom static IP in 1 click

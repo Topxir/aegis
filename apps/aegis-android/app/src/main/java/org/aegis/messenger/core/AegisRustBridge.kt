@@ -100,20 +100,16 @@ class AegisRustBridge(private val context: Context) {
         starterServers.forEach { srv ->
             when (srv.id) {
                 "zurich-static-1" -> {
-                    srv.name = if (en) "Demo template #1" else "Демо-шаблон #1"
-                    srv.badge = if (en) "Template" else "Шаблон"
+                    srv.name = if (en) "Trusted Node #1 (Anycast IP)" else "Доверенный узел #1 (Anycast IP)"
+                    srv.badge = if (en) "✓✓ Trusted · Hides server IP" else "✓✓ Доверенный · Скрывает IP сервера"
                 }
                 "frankfurt-static-2" -> {
-                    srv.name = if (en) "Demo template #2" else "Демо-шаблон #2"
-                    srv.badge = if (en) "Template" else "Шаблон"
+                    srv.name = if (en) "Trusted Node #2 (Anycast IP)" else "Доверенный узел #2 (Anycast IP)"
+                    srv.badge = if (en) "✓✓ Trusted · Backup IP" else "✓✓ Доверенный · Резервный IP"
                 }
                 "iceland-static-3" -> {
-                    srv.name = if (en) "Demo template #3" else "Демо-шаблон #3"
-                    srv.badge = if (en) "Template" else "Шаблон"
-                }
-                "onion-relay-4" -> {
-                    srv.name = if (en) "Tor template (.onion)" else "Tor-шаблон (.onion)"
-                    srv.badge = if (en) "Template" else "Шаблон"
+                    srv.name = if (en) "Trusted Node #3 (Tunnel)" else "Доверенный узел #3 (Туннель)"
+                    srv.badge = if (en) "✓ Trusted tunnel" else "✓ Доверенный туннель"
                 }
             }
         }
@@ -1283,8 +1279,14 @@ class AegisRustBridge(private val context: Context) {
                     }
                 }
                 sock.use { activeSock ->
+                    val hostHdr = if (connectHost == "104.21.53.92" || connectHost == "172.67.211.53" || connectHost.equals("freeoasis.space", ignoreCase = true)) {
+                        "freeoasis.space"
+                    } else {
+                        "$connectHost:$connectPort"
+                    }
                     val req = "POST $pathAndQuery HTTP/1.1\r\n" +
-                        "Host: $connectHost:$connectPort\r\n" +
+                        "Host: $hostHdr\r\n" +
+                        "User-Agent: Aegis/0.1\r\n" +
                         "Content-Type: text/plain\r\n" +
                         "Content-Length: ${bodyHex.length}\r\n" +
                         "Connection: close\r\n\r\n$bodyHex"
@@ -1366,8 +1368,14 @@ class AegisRustBridge(private val context: Context) {
                     }
                 }
                 sock.use { activeSock ->
+                    val hostHdr = if (connectHost == "104.21.53.92" || connectHost == "172.67.211.53" || connectHost.equals("freeoasis.space", ignoreCase = true)) {
+                        "freeoasis.space"
+                    } else {
+                        "$connectHost:$connectPort"
+                    }
                     val req = "POST $pathAndQuery HTTP/1.1\r\n" +
-                        "Host: $connectHost:$connectPort\r\n" +
+                        "Host: $hostHdr\r\n" +
+                        "User-Agent: Aegis/0.1\r\n" +
                         "Content-Length: 0\r\n" +
                         "Connection: close\r\n\r\n"
                     activeSock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
@@ -1474,39 +1482,30 @@ class AegisRustBridge(private val context: Context) {
             listOf(
                 StarterServerUi(
                     id = "zurich-static-1",
-                    name = "Демо-шаблон #1",
-                    staticIpOrHost = "185.220.101.42",
-                    port = 8443,
-                    endpointUri = "aegis://185.220.101.42:8443",
-                    badge = "Шаблон",
+                    name = "Доверенный узел #1 (Anycast IP)",
+                    staticIpOrHost = "104.21.53.92",
+                    port = 80,
+                    endpointUri = "aegis://104.21.53.92:80",
+                    badge = "✓✓ Доверенный · Скрывает IP сервера",
                     isTorOnion = false
                 ),
                 StarterServerUi(
                     id = "frankfurt-static-2",
-                    name = "Демо-шаблон #2",
-                    staticIpOrHost = "91.108.56.110",
-                    port = 8443,
-                    endpointUri = "aegis://91.108.56.110:8443",
-                    badge = "Шаблон",
+                    name = "Доверенный узел #2 (Anycast IP)",
+                    staticIpOrHost = "172.67.211.53",
+                    port = 80,
+                    endpointUri = "aegis://172.67.211.53:80",
+                    badge = "✓✓ Доверенный · Резервный IP",
                     isTorOnion = false
                 ),
                 StarterServerUi(
                     id = "iceland-static-3",
-                    name = "Демо-шаблон #3",
-                    staticIpOrHost = "193.163.125.18",
-                    port = 8443,
-                    endpointUri = "aegis://193.163.125.18:8443",
-                    badge = "Шаблон",
+                    name = "Доверенный узел #3 (Туннель)",
+                    staticIpOrHost = "freeoasis.space",
+                    port = 80,
+                    endpointUri = "aegis://freeoasis.space:80",
+                    badge = "✓ Доверенный туннель",
                     isTorOnion = false
-                ),
-                StarterServerUi(
-                    id = "onion-relay-4",
-                    name = "Tor-шаблон (.onion)",
-                    staticIpOrHost = "aegis7xq2v4k3m3n5p7r2t2w4y6z2a3b3c5d7e2f3g3h5j7k2l2m4n2d.onion",
-                    port = 8443,
-                    endpointUri = "aegis://aegis7xq2v4k3m3n5p7r2t2w4y6z2a3b3c5d7e2f3g3h5j7k2l2m4n2d.onion:8443",
-                    badge = "Шаблон",
-                    isTorOnion = true
                 )
             )
         )

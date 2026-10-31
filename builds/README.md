@@ -12,5 +12,6 @@
 - Для запуска держите `WebView2Loader.dll` в одной папке с `aegis-desktop.exe`.
 
 ## 3. 🌐 `builds/server/`
-- **`aegis-serverd.exe`** — сервер очередей (`--bind=0.0.0.0 --port=8443`, фиксированные блоки `256..16384 B`, проверка `auth_hash` / `read_token`, пересылка `/api/v1/queue/relay` и `/api/v1/queue/relay_poll`).
+- **`aegis-serverd.exe`** — сервер очередей (`--bind=127.0.0.1 --port=8443`, фиксированные блоки `256..16384 B`, проверка `auth_hash` / `read_token`, пересылка `/api/v1/queue/relay` и `/api/v1/queue/relay_poll`).
+- **`start-hidden-server.bat`** — запускает сервер без раскрытия IP вашего ПК через исходящий Anycast-туннель (встроенные доверенные узлы: `104.21.53.92:80`, `172.67.211.53:80`, `freeoasis.space:80`).
 - **`deploy-static-ip-vps.sh`** и **`docker-compose.yml`** — шаблоны запуска сервера в Docker на Linux VPS.
