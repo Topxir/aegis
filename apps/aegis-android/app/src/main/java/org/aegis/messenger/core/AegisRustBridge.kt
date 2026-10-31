@@ -100,20 +100,20 @@ class AegisRustBridge(private val context: Context) {
         starterServers.forEach { srv ->
             when (srv.id) {
                 "zurich-static-1" -> {
-                    srv.name = if (en) "Server #1 (Zurich)" else "Сервер #1 (Цюрих)"
-                    srv.badge = if (en) "✓✓ Official" else "✓✓ Официальный"
+                    srv.name = if (en) "Demo template #1" else "Демо-шаблон #1"
+                    srv.badge = if (en) "Template" else "Шаблон"
                 }
                 "frankfurt-static-2" -> {
-                    srv.name = if (en) "Server #2 (Frankfurt)" else "Сервер #2 (Франкфурт)"
-                    srv.badge = if (en) "✓✓ Official" else "✓✓ Официальный"
+                    srv.name = if (en) "Demo template #2" else "Демо-шаблон #2"
+                    srv.badge = if (en) "Template" else "Шаблон"
                 }
                 "iceland-static-3" -> {
-                    srv.name = if (en) "Server #3 (Iceland)" else "Сервер #3 (Исландия)"
-                    srv.badge = if (en) "✓ Verified" else "✓ Проверенный"
+                    srv.name = if (en) "Demo template #3" else "Демо-шаблон #3"
+                    srv.badge = if (en) "Template" else "Шаблон"
                 }
                 "onion-relay-4" -> {
-                    srv.name = "Tor Relay"
-                    srv.badge = "✓✓ Tor"
+                    srv.name = if (en) "Tor template (.onion)" else "Tor-шаблон (.onion)"
+                    srv.badge = if (en) "Template" else "Шаблон"
                 }
             }
         }
@@ -130,13 +130,13 @@ class AegisRustBridge(private val context: Context) {
                     }
                 }
             } else if (chat.verifiedSupportBadge) {
-                chat.title = if (en) "Aegis Support ✓" else "Поддержка Aegis ✓"
+                chat.title = if (en) "Test Channel" else "Тестовый канал"
                 chat.messages.firstOrNull()?.let { first ->
-                    if (first.text.startsWith("Здравствуй!") || first.text.startsWith("Welcome!")) {
+                    if (first.text.startsWith("Демонстрационный чат") || first.text.startsWith("Demo chat")) {
                         first.text = if (en) {
-                            "Welcome! You can message support here."
+                            "Demo chat for testing message delivery."
                         } else {
-                            "Здравствуй! Здесь можно написать в поддержку."
+                            "Демонстрационный чат для проверки отправки сообщений."
                         }
                     }
                 }
@@ -1474,38 +1474,38 @@ class AegisRustBridge(private val context: Context) {
             listOf(
                 StarterServerUi(
                     id = "zurich-static-1",
-                    name = "Сервер #1 (Цюрих)",
+                    name = "Демо-шаблон #1",
                     staticIpOrHost = "185.220.101.42",
                     port = 8443,
                     endpointUri = "aegis://185.220.101.42:8443",
-                    badge = "✓✓ Официальный",
+                    badge = "Шаблон",
                     isTorOnion = false
                 ),
                 StarterServerUi(
                     id = "frankfurt-static-2",
-                    name = "Сервер #2 (Франкфурт)",
+                    name = "Демо-шаблон #2",
                     staticIpOrHost = "91.108.56.110",
                     port = 8443,
                     endpointUri = "aegis://91.108.56.110:8443",
-                    badge = "✓✓ Официальный",
+                    badge = "Шаблон",
                     isTorOnion = false
                 ),
                 StarterServerUi(
                     id = "iceland-static-3",
-                    name = "Сервер #3 (Исландия)",
+                    name = "Демо-шаблон #3",
                     staticIpOrHost = "193.163.125.18",
                     port = 8443,
                     endpointUri = "aegis://193.163.125.18:8443",
-                    badge = "✓ Проверенный",
+                    badge = "Шаблон",
                     isTorOnion = false
                 ),
                 StarterServerUi(
                     id = "onion-relay-4",
-                    name = "Tor Relay",
+                    name = "Tor-шаблон (.onion)",
                     staticIpOrHost = "aegis7xq2v4k3m3n5p7r2t2w4y6z2a3b3c5d7e2f3g3h5j7k2l2m4n2d.onion",
                     port = 8443,
                     endpointUri = "aegis://aegis7xq2v4k3m3n5p7r2t2w4y6z2a3b3c5d7e2f3g3h5j7k2l2m4n2d.onion:8443",
-                    badge = "✓✓ Tor",
+                    badge = "Шаблон",
                     isTorOnion = true
                 )
             )
@@ -1567,7 +1567,7 @@ class AegisRustBridge(private val context: Context) {
         chats.add(
             ChatItemUi(
                 chatIdHex = "03030303",
-                title = "Поддержка Aegis ✓",
+                title = "Тестовый канал",
                 queueTag = "queue://verified-support-ed25519",
                 isSavedNotes = false,
                 verifiedSupportBadge = true,
@@ -1576,7 +1576,7 @@ class AegisRustBridge(private val context: Context) {
                 messages = mutableListOf(
                     ChatMessageUi(
                         outgoing = false,
-                        text = "Здравствуй! Здесь можно написать в поддержку.",
+                        text = "Демонстрационный чат для проверки отправки сообщений.",
                         paddedBucketBytes = 256,
                         ttlSeconds = null
                     )

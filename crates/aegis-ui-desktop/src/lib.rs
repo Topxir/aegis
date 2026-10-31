@@ -131,45 +131,45 @@ impl UiStrings {
         match locale {
             Locale::Ru => Self {
                 locale: Locale::Ru,
-                app_title: "Aegis — Анонимный мессенджер (E2EE / Zero-Knowledge)",
-                onboarding_title: "Регистрация за 3 шага: Ник → Строгий пароль → PIN и Сервер ✓✓",
-                nickname_generate_btn: "🎲 Сгенерировать криптостойкий ник",
+                app_title: "Aegis — Анонимный мессенджер",
+                onboarding_title: "Создание профиля",
+                nickname_generate_btn: "Сгенерировать",
                 password_policy_hint:
-                    "Минимум 12 символов, ≥3 ЗАГЛАВНЫЕ буквы, строчные, цифры и спецсимволы (OPAQUE + Argon2id)",
-                network_shield_tor: "🔒 Tor / Onion (Максимальная защита IP)",
-                network_shield_vpn: "🛡 VPN / SOCKS5 Прокси активен",
-                network_shield_direct: "🌐 Прямой Static IP (E2EE + 0 IP-логов, без Tor)",
-                network_shield_offline: "⛔ Офлайн / Заблокировано Kill Switch",
-                saved_notes_title: "📌 Избранное (Локальное зашифрованное хранилище)",
-                leak_guard_modal_title: "🛡 LeakGuard: Обнаружены чувствительные данные!",
-                leak_guard_mask_btn: "Скрыть звёздочками (****) и отправить",
-                leak_guard_send_anyway_btn: "Отправить без изменений",
-                panic_button_label: "🚨 ПАНИК-КНОПКА (Мгновенный крипто-сброс)",
+                    "Минимум 12 символов, ≥3 ЗАГЛАВНЫЕ буквы, строчные, цифры и спецсимволы",
+                network_shield_tor: "Через SOCKS5 / Tor",
+                network_shield_vpn: "Через прокси",
+                network_shield_direct: "Прямое подключение",
+                network_shield_offline: "Сеть заблокирована",
+                saved_notes_title: "📌 Избранное",
+                leak_guard_modal_title: "LeakGuard: Обнаружены чувствительные данные",
+                leak_guard_mask_btn: "Скрыть (****) и отправить",
+                leak_guard_send_anyway_btn: "Отправить как есть",
+                panic_button_label: "Сброс данных",
                 disguise_calculator_title: "Инженерный калькулятор",
-                server_launcher_title: "🚀 Мастер запуска своего сервера Aegis в 1 клик",
-                support_portal_title: "🎫 Анонимная поддержка ✓ и активация SupporterPass",
-                theme_store_title: "🎨 Магазин декларативных тем и WASM-песочница плагинов",
+                server_launcher_title: "Локальный сервер",
+                support_portal_title: "Обратная связь",
+                theme_store_title: "Оформление",
             },
             Locale::En => Self {
                 locale: Locale::En,
-                app_title: "Aegis — Anonymous Messenger (E2EE / Zero-Knowledge)",
-                onboarding_title: "3-Step Onboarding: Nickname → Strict Password → PIN & Server ✓✓",
-                nickname_generate_btn: "🎲 Generate CSPRNG Anonymous Nickname",
+                app_title: "Aegis — Anonymous Messenger",
+                onboarding_title: "Create Profile",
+                nickname_generate_btn: "Generate",
                 password_policy_hint:
-                    "Min 12 chars, ≥3 UPPERCASE letters, lowercase, digits & special symbols (OPAQUE + Argon2id)",
-                network_shield_tor: "🔒 Tor / Onion (Maximum IP Anonymity)",
-                network_shield_vpn: "🛡 VPN / SOCKS5 Proxy Protected",
-                network_shield_direct: "🌐 Direct Static IP (E2EE + Zero IP Logs, No Tor Required)",
-                network_shield_offline: "⛔ Offline / Blocked by Kill Switch",
-                saved_notes_title: "📌 Saved Notes (Device-Only Encrypted Vault)",
-                leak_guard_modal_title: "🛡 LeakGuard: Sensitive Data Detected Before Encryption!",
-                leak_guard_mask_btn: "Mask with (****) & Send",
+                    "Min 12 chars, ≥3 UPPERCASE letters, lowercase, digits & symbols",
+                network_shield_tor: "Via SOCKS5 / Tor",
+                network_shield_vpn: "Via proxy",
+                network_shield_direct: "Direct connection",
+                network_shield_offline: "Network locked",
+                saved_notes_title: "📌 Saved Messages",
+                leak_guard_modal_title: "LeakGuard: Sensitive Data Detected",
+                leak_guard_mask_btn: "Mask (****) & Send",
                 leak_guard_send_anyway_btn: "Send Anyway",
-                panic_button_label: "🚨 PANIC BUTTON (Instant Crypto-Erase)",
+                panic_button_label: "Wipe data",
                 disguise_calculator_title: "Scientific Calculator",
-                server_launcher_title: "🚀 1-Click Self-Hosted Aegis Server Wizard",
-                support_portal_title: "🎫 Verified Support Portal ✓ & SupporterPass Activation",
-                theme_store_title: "🎨 Declarative Theme Store & WASM Plugin Sandbox",
+                server_launcher_title: "Local Server",
+                support_portal_title: "Feedback",
+                theme_store_title: "Appearance",
             },
         }
     }
@@ -807,7 +807,7 @@ impl DesktopAppState {
 
         let support_chat = ChatView {
             chat_id: [0x03; 16],
-            title: "Поддержка Aegis ✓".to_owned(),
+            title: "Тестовый канал".to_owned(),
             queue_tag: "queue://support-verified-cert".to_owned(),
             is_local_saved_notes: false,
             verified_support_badge: true,
@@ -816,7 +816,7 @@ impl DesktopAppState {
             default_disappearing_ttl_secs: None,
             messages: vec![ChatMessageView {
                 outgoing: false,
-                text: "Здравствуй! Здесь можно написать в поддержку."
+                text: "Демонстрационный чат для проверки отправки сообщений."
                     .to_owned(),
                 padded_bucket_bytes: 256,
                 disappearing_ttl_secs: None,
@@ -922,16 +922,16 @@ impl DesktopAppState {
                 }
             } else if chat.verified_support_badge {
                 chat.title = match locale {
-                    Locale::Ru => "Поддержка Aegis ✓".to_owned(),
-                    Locale::En => "Aegis Support ✓".to_owned(),
+                    Locale::Ru => "Тестовый канал".to_owned(),
+                    Locale::En => "Test Channel".to_owned(),
                 };
                 if let Some(first) = chat.messages.first_mut() {
-                    if first.text.starts_with("Здравствуй!")
-                        || first.text.starts_with("Welcome!")
+                    if first.text.starts_with("Демонстрационный чат")
+                        || first.text.starts_with("Demo chat")
                     {
                         first.text = match locale {
-                            Locale::Ru => "Здравствуй! Здесь можно написать в поддержку.".to_owned(),
-                            Locale::En => "Welcome! You can message support here.".to_owned(),
+                            Locale::Ru => "Демонстрационный чат для проверки отправки сообщений.".to_owned(),
+                            Locale::En => "Demo chat for testing message delivery.".to_owned(),
                         };
                     }
                 }
@@ -2592,23 +2592,6 @@ impl DesktopGuiServer {
 
     fn render_onboarding_page(&self) -> String {
         let s = self.state.strings();
-        let seed_on = if self.state.seed_only_mode { "on" } else { "" };
-        let rec_title = self.tr("Фраза восстановления", "Recovery Phrase");
-        let rec_desc = self.tr("Сохраните её в надёжном месте.", "Store it in a safe offline place.");
-        let recovery_html = self
-            .state
-            .recovery_phrase_preview
-            .as_ref()
-            .map_or(String::new(), |phrase| {
-                format!(
-                    "<div class='notice'>
-  <div class='notice-title'>{rec_title}</div>
-  <p>{rec_desc}</p>
-  <code class='secret'>{}</code>
-</div>",
-                    html_escape(phrase)
-                )
-            });
         format!(
             "<div class='auth-page'>
   <section class='auth-brand'>
@@ -2631,12 +2614,6 @@ impl DesktopGuiServer {
       <h2>{heading}</h2>
       <p class='lead'>{lead}</p>
       {status}
-      <a class='toggle-row' href='/action?cmd=toggle_seed_only'>
-        <span>{device_only}</span>
-        <span class='switch {seed_on}'></span>
-      </a>
-      <a class='btn ghost small' href='/action?cmd=gen_recovery_phrase'>{rec_btn}</a>
-      {recovery}
       <form class='form-stack' action='/action' method='post'>
         <input type='hidden' name='cmd' value='login_account'>
         <label for='nick'>{login_lbl}</label>
@@ -2658,22 +2635,18 @@ impl DesktopGuiServer {
   </section>
 </div>",
             brand_lead = self.tr(
-                "Приватный мессенджер без номера телефона и почты.",
-                "Private messenger with no phone number or email required."
+                "Мессенджер без номера телефона и почты.",
+                "Messenger with no phone number or email required."
             ),
-            pt1 = self.tr("Сообщения и контакты хранятся на устройстве", "Messages and contacts stay on your device"),
-            pt2 = self.tr("Сквозное шифрование по умолчанию", "End-to-end encryption by default"),
-            pt3 = self.tr("Без рекламы и отслеживания", "No ads and no tracking"),
+            pt1 = self.tr("Локальный профиль на устройстве", "Local profile on your device"),
+            pt2 = self.tr("Обмен сообщениями через выбранный узел", "Messaging over your chosen server"),
+            pt3 = self.tr("Без рекламы и аналитики", "No ads and no analytics"),
             steps = Self::render_step_dots(1),
             actions = self.render_top_actions(),
             step_label = self.tr("Шаг 1 из 3", "Step 1 of 3"),
             heading = self.tr("① Сейф Аккаунта", "① Account Vault"),
-            lead = self.tr("Создайте профиль для входа.", "Create a local profile to sign in."),
+            lead = self.tr("Создайте локальный профиль.", "Create a local profile."),
             status = self.render_status_banner(),
-            device_only = self.tr("Только на этом устройстве", "This device only"),
-            seed_on = seed_on,
-            rec_btn = self.tr("Фраза восстановления", "Recovery phrase"),
-            recovery = recovery_html,
             login_lbl = self.tr("Логин", "Username"),
             nick = html_escape(&self.state.onboarding_nickname),
             gen_nick = html_escape(s.nickname_generate_btn),
@@ -2692,9 +2665,8 @@ impl DesktopGuiServer {
         for (idx, srv) in self.state.directory_servers.iter().enumerate() {
             let active = idx == self.state.selected_server_index;
             let badge = match srv.badge {
-                ServerBadge::OfficialDoubleCheck => self.tr("✓✓ Официальный", "✓✓ Official"),
-                ServerBadge::VerifiedSingleCheck => self.tr("✓ Проверенный", "✓ Verified"),
-                ServerBadge::CommunityUnverified => self.tr("Пользовательский", "Custom"),
+                ServerBadge::CommunityUnverified => self.tr("Пользовательский узел", "Custom node"),
+                _ => self.tr("Демо-шаблон", "Demo template"),
             };
             let switch_cls = if active { "on" } else { "" };
             servers_html.push_str(&format!(
@@ -2714,9 +2686,13 @@ impl DesktopGuiServer {
                 switch_cls = switch_cls,
             ));
         }
-        let tor_on = if matches!(self.state.shield_evaluation.status, NetworkRouteStatus::TorAnonymized) { "on" } else { "" };
-        let vpn_on = if matches!(self.state.shield_evaluation.status, NetworkRouteStatus::VpnOrProxyProtected) { "on" } else { "" };
-        let kill_on = if matches!(self.state.shield_evaluation.status, NetworkRouteStatus::Offline) { "on" } else { "" };
+        let is_killed = matches!(self.state.shield_evaluation.status, NetworkRouteStatus::Offline);
+        let kill_on = if is_killed { "on" } else { "" };
+        let kill_href = if is_killed {
+            "/action?cmd=route_direct"
+        } else {
+            "/action?cmd=route_leak"
+        };
         format!(
             "<div class='auth-page'>
   <section class='auth-brand'>
@@ -2739,19 +2715,23 @@ impl DesktopGuiServer {
       <h2>{heading}</h2>
       <p class='lead'>{lead}</p>
       {status}
-      <div class='server-list'>{servers}</div>
-      <div class='toggle-list'>
-        <a class='toggle-row' href='/action?cmd=route_tor'><span>Tor</span><span class='switch {tor_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_vpn'><span>{vpn_lbl}</span><span class='switch {vpn_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_leak'><span>{kill_lbl}</span><span class='switch {kill_on}'></span></a>
-      </div>
-      <details class='panel'>
-        <summary>{custom_sum}</summary>
-        <form class='form-stack' action='/action' method='get'>
-          <input type='hidden' name='cmd' value='custom_server'>
+      <form class='form-stack' action='/action' method='get'>
+        <input type='hidden' name='cmd' value='custom_server'>
+        <label for='ip'>{custom_sum}</label>
+        <div class='input-row'>
           <input id='ip' type='text' name='ip' placeholder='{srv_ph}' autocomplete='off' spellcheck='false'>
           <button class='btn primary' type='submit'>{connect_btn}</button>
-        </form>
+        </div>
+      </form>
+      <div class='toggle-list'>
+        <a class='toggle-row' href='{kill_href}'><span>{kill_lbl}</span><span class='switch {kill_on}'></span></a>
+      </div>
+      <details class='panel'>
+        <summary>{templates_sum}</summary>
+        <div class='server-list'>{servers}</div>
+      </details>
+      <details class='panel'>
+        <summary>{proxy_sum}</summary>
         <form class='form-stack' action='/action' method='get'>
           <input type='hidden' name='cmd' value='set_blind_relay'>
           <input id='relay' type='text' name='relay' placeholder='{relay_ph}' autocomplete='off' spellcheck='false'>
@@ -2771,27 +2751,27 @@ impl DesktopGuiServer {
   </section>
 </div>",
             brand_lead = self.tr(
-                "Выберите сервер и при необходимости включите нужные переключатели защиты.",
-                "Select a server and enable network protection toggles if needed."
+                "Укажите адрес своего сервера aegis-serverd или выберите шаблон.",
+                "Enter the address of your aegis-serverd node or select a template."
             ),
-            pt1 = self.tr("Быстрое переключение узлов", "Fast server switching"),
-            pt2 = self.tr("Поддержка Tor, VPN и релея", "Tor, VPN and relay support"),
+            pt1 = self.tr("Прямое подключение к вашему узлу", "Direct connection to your node"),
+            pt2 = self.tr("Поддержка SOCKS5 прокси и релея", "SOCKS5 proxy and relay support"),
             pt3 = self.tr("Блокировка сети в один клик", "One-click network lock"),
             steps = Self::render_step_dots(2),
             actions = self.render_top_actions(),
             step_label = self.tr("Шаг 2 из 3", "Step 2 of 3"),
             heading = self.tr("② Матрица Серверов и Релеев", "② Servers & Relays"),
-            lead = self.tr("Выберите сервер для подключения.", "Select a server to connect."),
+            lead = self.tr("Укажите адрес работающего сервера.", "Enter a running server address."),
             status = self.render_status_banner(),
-            servers = servers_html,
-            tor_on = tor_on,
-            vpn_lbl = self.tr("VPN / Прокси", "VPN / Proxy"),
-            vpn_on = vpn_on,
+            custom_sum = self.tr("Адрес вашего сервера", "Your server address"),
+            srv_ph = self.tr("host:port", "host:port"),
+            connect_btn = self.tr("Подключить", "Connect"),
+            kill_href = kill_href,
             kill_lbl = self.tr("Блокировка сети (Kill Switch)", "Network Lock (Kill Switch)"),
             kill_on = kill_on,
-            custom_sum = self.tr("Свой сервер или прокси", "Custom server or proxy"),
-            srv_ph = self.tr("Адрес сервера (host:port)", "Server address (host:port)"),
-            connect_btn = self.tr("Подключить сервер", "Connect server"),
+            templates_sum = self.tr("Демо-шаблоны узлов", "Demo node templates"),
+            servers = servers_html,
+            proxy_sum = self.tr("SOCKS5 прокси и релей", "SOCKS5 proxy & relay"),
             relay_ph = self.tr("Релей (host:port)", "Relay (host:port)"),
             save_relay_btn = self.tr("Сохранить релей", "Save relay"),
             proxy_ph = self.tr("SOCKS5 прокси (127.0.0.1:9050)", "SOCKS5 proxy (127.0.0.1:9050)"),
@@ -2807,6 +2787,7 @@ impl DesktopGuiServer {
         let default_chat_title = self.tr("Выберите чат", "Select a chat");
         let chat_title = active_chat.map_or(default_chat_title, |c| c.title.as_str());
         let chat_locked = active_chat.is_some_and(|c| c.is_locked);
+        let is_saved_notes = active_chat.is_some_and(|c| c.is_local_saved_notes);
         let active_ttl = active_chat.and_then(|c| c.default_disappearing_ttl_secs).unwrap_or(0);
         let search_filter = self.state.search_query.trim().to_lowercase();
         let is_en = self.state.locale == Locale::En;
@@ -2816,8 +2797,6 @@ impl DesktopGuiServer {
             let active = idx == self.state.active_chat_index;
             let icon = if c.is_local_saved_notes {
                 "★"
-            } else if c.verified_support_badge {
-                "✓"
             } else if c.is_locked {
                 "🔒"
             } else {
@@ -2970,26 +2949,25 @@ impl DesktopGuiServer {
                 .collect()
         };
 
-        let backup_html = if self.state.last_exported_backup_hex.is_some() {
-            self.tr("<div class='muted'>Резервная копия сохранена</div>", "<div class='muted'>Backup saved</div>")
+        let is_killed = matches!(self.state.shield_evaluation.status, NetworkRouteStatus::Offline);
+        let kill_on = if is_killed { "on" } else { "" };
+        let kill_href = if is_killed {
+            "/action?cmd=route_direct"
         } else {
-            ""
+            "/action?cmd=route_leak"
         };
-
-        let verify_badge = if self.state.peer_verified {
-            self.tr("<span class='pill ok'>Ключ подтверждён</span>", "<span class='pill ok'>Key verified</span>")
-        } else {
-            self.tr("<span class='pill warn'>Не подтверждён</span>", "<span class='pill warn'>Unverified</span>")
-        };
-        let tor_on = if matches!(self.state.shield_evaluation.status, NetworkRouteStatus::TorAnonymized) { "on" } else { "" };
-        let vpn_on = if matches!(self.state.shield_evaluation.status, NetworkRouteStatus::VpnOrProxyProtected) { "on" } else { "" };
-        let direct_on = if matches!(self.state.shield_evaluation.status, NetworkRouteStatus::DirectWarning) { "on" } else { "" };
-        let kill_on = if matches!(self.state.shield_evaluation.status, NetworkRouteStatus::Offline) { "on" } else { "" };
         let lock_on = if chat_locked { "on" } else { "" };
         let ttl_off = if active_ttl == 0 { "active" } else { "" };
         let ttl_60 = if active_ttl == 60 { "active" } else { "" };
         let ttl_3600 = if active_ttl == 3600 { "active" } else { "" };
         let status = self.render_status_banner();
+        let chat_sub = if is_saved_notes {
+            self.tr("Локальные заметки", "Local notes")
+        } else if is_killed {
+            self.tr("Сеть заблокирована", "Network locked")
+        } else {
+            self.tr("Канал сообщений", "Message channel")
+        };
 
         format!(
             "<div class='app'>
@@ -3025,7 +3003,7 @@ impl DesktopGuiServer {
       <span class='avatar'>{chat_icon}</span>
       <div class='chat-head-meta'>
         <div class='chat-title'>{chat_title}</div>
-        <div class='chat-sub'>{online_sub}</div>
+        <div class='chat-sub'>{chat_sub}</div>
       </div>
       <div class='chat-actions'>
         <a class='icon-btn' href='/action?cmd=sync_remote' title='{sync_tip}'>⟳</a>
@@ -3039,7 +3017,6 @@ impl DesktopGuiServer {
     {unlock_form}
     <form class='composer' action='/action' method='get'>
       <input type='hidden' name='cmd' value='send_text'>
-      <a class='icon-btn' href='/action?cmd=send_photo_view_once' title='{photo_tip}'>＋</a>
       <input class='composer-input' type='text' name='text' placeholder='{msg_ph}' autocomplete='off'>
       <button class='send-btn' type='submit' title='{send_tip}'>➤</button>
     </form>
@@ -3048,19 +3025,13 @@ impl DesktopGuiServer {
     <div class='info-card'>
       <span class='avatar large'>{chat_icon}</span>
       <h3>{chat_title}</h3>
-      <div>{verify_badge}</div>
-      <div class='actions-row' style='justify-content:center'>
-        <a class='btn ghost small' href='/action?cmd=verify_contact'>{verify_btn}</a>
-      </div>
+      <div class='muted'>{chat_sub}</div>
     </div>
     <div class='panel'>
       <div class='section-title'>{sec_route_title}</div>
       <div class='toggle-list'>
         <a class='toggle-row' href='/action?cmd=toggle_chat_pin'><span>{chat_pin_lbl}</span><span class='switch {lock_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_tor'><span>Tor</span><span class='switch {tor_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_vpn'><span>{vpn_lbl}</span><span class='switch {vpn_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_direct'><span>{direct_lbl}</span><span class='switch {direct_on}'></span></a>
-        <a class='toggle-row' href='/action?cmd=route_leak'><span>{kill_lbl}</span><span class='switch {kill_on}'></span></a>
+        <a class='toggle-row' href='{kill_href}'><span>{kill_lbl}</span><span class='switch {kill_on}'></span></a>
       </div>
     </div>
     <div class='panel'>
@@ -3071,37 +3042,19 @@ impl DesktopGuiServer {
         <a class='seg {ttl_3600}' href='/action?cmd=set_chat_ttl&amp;ttl=3600'>{ttl_1h_lbl}</a>
       </div>
     </div>
-    <details class='panel'>
-      <summary>{profiles_sum}</summary>
+    <div class='panel'>
+      <div class='section-title'>{profiles_sum}</div>
       {accounts}
-      <div class='actions-row wrap'>
-        <a class='btn ghost small' href='/action?cmd=add_account'>{add_prof_btn}</a>
-        <a class='btn ghost small' href='/action?cmd=activate_pass'>SupporterPass</a>
-        <a class='btn ghost small' href='/action?cmd=export_backup'>{backup_btn}</a>
-      </div>
-      {backup}
-    </details>
-    <details class='panel'>
-      <summary>{invites_sum}</summary>
-      <div class='actions-row wrap'>
-        <a class='btn ghost small' href='/action?cmd=generate_invite'>{invite_btn}</a>
-        <a class='btn ghost small' href='/action?cmd=create_group&amp;title=New+Group&amp;members=5'>{group_btn}</a>
-        <a class='btn ghost small' href='/action?cmd=rotate_queue'>{rotate_btn}</a>
-      </div>
-    </details>
-    <details class='panel'>
-      <summary>{theme_sum}</summary>
-      <div class='actions-row wrap'>
-        <a class='btn ghost small' href='/action?cmd=select_theme&amp;theme=obsidian-stealth-dark'>{theme_dark}</a>
-        <a class='btn ghost small' href='/action?cmd=select_theme&amp;theme=phantom-monolith'>{theme_graphite}</a>
-        <a class='btn ghost small' href='/action?cmd=select_theme&amp;theme=emerald-matrix'>{theme_emerald}</a>
-      </div>
+    </div>
+    <div class='panel'>
+      <div class='section-title'>{theme_sum}</div>
       <div class='actions-row wrap'>
         <a class='btn ghost small' href='/action?cmd=lang_ru'>RU</a>
         <a class='btn ghost small' href='/action?cmd=lang_en'>EN</a>
+        <a class='btn ghost small' href='/action?cmd=disguise'>{calc_tip}</a>
         <a class='btn danger small' href='/action?cmd=panic'>{wipe_btn}</a>
       </div>
-    </details>
+    </div>
   </aside>
 </div>",
             calc_icon = "🧮",
@@ -3118,7 +3071,7 @@ impl DesktopGuiServer {
             nav_account = self.tr("Аккаунт", "Account"),
             chat_icon = chat_icon_for(chat_title),
             chat_title = html_escape(chat_title),
-            online_sub = self.tr("В сети", "Online"),
+            chat_sub = chat_sub,
             sync_tip = self.tr("Обновить", "Refresh"),
             pin_tip = self.tr("PIN чата", "Chat PIN"),
             status = status,
@@ -3126,20 +3079,13 @@ impl DesktopGuiServer {
             leak_modal = leak_modal,
             messages = messages_html,
             unlock_form = unlock_form,
-            photo_tip = self.tr("Отправить фото", "Send photo"),
             msg_ph = self.tr("Сообщение", "Message"),
             send_tip = self.tr("Отправить", "Send"),
-            verify_badge = verify_badge,
-            verify_btn = self.tr("Подтвердить ключ", "Verify key"),
-            sec_route_title = self.tr("Защита и маршрут", "Security & Route"),
+            sec_route_title = self.tr("Переключатели", "Toggles"),
             chat_pin_lbl = self.tr("PIN-код чата", "Chat PIN lock"),
             lock_on = lock_on,
-            tor_on = tor_on,
-            vpn_lbl = self.tr("VPN / Прокси", "VPN / Proxy"),
-            vpn_on = vpn_on,
-            direct_lbl = self.tr("Прямое соединение", "Direct connection"),
-            direct_on = direct_on,
-            kill_lbl = self.tr("Блокировка сети", "Network lock"),
+            kill_href = kill_href,
+            kill_lbl = self.tr("Блокировка сети (Kill Switch)", "Network Lock (Kill Switch)"),
             kill_on = kill_on,
             ttl_title = self.tr("Исчезающие сообщения", "Disappearing messages"),
             ttl_off = ttl_off,
@@ -3150,17 +3096,7 @@ impl DesktopGuiServer {
             ttl_1h_lbl = self.tr("1 час", "1 hour"),
             profiles_sum = self.tr("Профили", "Profiles"),
             accounts = accounts_html,
-            add_prof_btn = self.tr("+ Профиль", "+ Profile"),
-            backup_btn = self.tr("Резервная копия", "Backup"),
-            backup = backup_html,
-            invites_sum = self.tr("Чаты и приглашения", "Chats & Invites"),
-            invite_btn = self.tr("Пригласить", "Invite"),
-            group_btn = self.tr("Новая группа", "New group"),
-            rotate_btn = self.tr("Обновить канал", "Refresh channel"),
-            theme_sum = self.tr("Оформление и язык", "Appearance & Language"),
-            theme_dark = self.tr("Тёмная", "Dark"),
-            theme_graphite = self.tr("Графит", "Graphite"),
-            theme_emerald = self.tr("Изумруд", "Emerald"),
+            theme_sum = self.tr("Язык и управление", "Language & Controls"),
             wipe_btn = self.tr("Стереть данные", "Wipe data"),
         )
     }
@@ -4833,13 +4769,13 @@ mod tests {
 
         let ws_html = gui.render_html();
         assert!(ws_html.contains("Saved Messages"));
-        assert!(ws_html.contains("Security & Route"));
+        assert!(ws_html.contains("Toggles"));
         assert!(ws_html.contains("Disappearing messages"));
 
         gui.handle_command("cmd=step_account");
         let ob_html = gui.render_html();
         assert!(ob_html.contains("① Account Vault"));
-        assert!(ob_html.contains("This device only"));
+        assert!(ob_html.contains("Create a local profile."));
 
         gui.handle_command("cmd=step_servers");
         let srv_html = gui.render_html();

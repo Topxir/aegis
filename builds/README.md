@@ -1,16 +1,16 @@
-# Глобальные релизные сборки Aegis
+# Сборки Aegis (`builds/`)
 
-Эта папка (`builds/`) содержит актуальные релизные артефакты **Aegis v0.1.0** (`D-0021`..`D-0028`, `T-0018`):
+> ⚠ **Примечание:** артефакты в этой папке — **неаудированный прототип (`v0.1.0-alpha`, unaudited)**. Не используйте их для критически чувствительной переписки до завершения миграции криптоядра по плану [`docs/security-reset/`](../docs/security-reset/).
 
 ## 1. 📱 `builds/android-apk/aegis-messenger-release.apk`
-- Подписанный релизный APK для Android 9.0+ (`minSdk 28`, `targetSdk 34`): чистый тёмный мессенджер-интерфейс (список чатов, пузыри сообщений, нижняя навигация `Чаты / Серверы / Профиль`), `FLAG_SECURE`, `excludeFromRecents="true"`, `allowBackup="false"`, Android StrongBox Keystore, инкогнито-клавиатура, маскировка под калькулятор, LeakGuard, сверка 60-значного Safety Number и **0 разрешений на микрофон и камеру**.
-- Поддерживает прямое подключение по IP/домену, SOCKS5h/Tor с изоляцией потоков и слепой релей (`Zero-Metadata Blind Relay`).
+- APK для Android 9.0+ (`minSdk 28`, `targetSdk 34`) на базе Jetpack Compose (русский и английский язык `RU / EN`, `FLAG_SECURE`, `excludeFromRecents="true"`, `allowBackup="false"`, инкогнито-клавиатура, маскировка под калькулятор, `LeakGuard`, без Google Play Services и без разрешений на микрофон/камеру).
+- Поддерживает подключение к вашему серверу `aegis-serverd` (`host:port`), `SOCKS5h` прокси, релею и блокировку сети (`Kill Switch`).
 
 ## 2. 🖥 `builds/desktop/aegis-desktop.exe` + `builds/desktop/WebView2Loader.dll`
-- Нативный десктопный клиент Aegis для Windows (`tao 0.37.2` + `wry 0.57.1` поверх системного WebView2): открывается в собственном окне приложения (при недоступности WebView2 автоматически переключается на системный браузер).
-- Навигация жёстко ограничена локальным адресом `http://127.0.0.1:<port>`, новые окна (`NewWindowResponse::Deny`), внешние разрешения (`PermissionResponse::Deny`), DevTools, контекстное меню и drag-and-drop отключены, форма входа отправляется через `POST` (`application/x-www-form-urlencoded`).
-- Включает полный самотест всех 10 подсистем: `aegis-desktop.exe --self-test`.
+- Нативный десктопный клиент для Windows (`tao 0.37.2` + `wry 0.57.1` поверх системного WebView2, `windows_subsystem = "windows"` — запускается сразу в окне приложения без консоли).
+- Навигация WebView ограничена локальным адресом `http://127.0.0.1:<port>`, всплывающие окна, внешние разрешения и DevTools отключены.
+- Для запуска держите `WebView2Loader.dll` в одной папке с `aegis-desktop.exe`.
 
 ## 3. 🌐 `builds/server/`
-- **`aegis-serverd.exe`** — демон сервера федерации (`--bind=0.0.0.0 --port=8443`, `Zero-IP-Logs`, односторонние очереди `256..16384 B` с проверкой `auth_hash` / `read_token`, слепые релеи `/api/v1/queue/relay` и `/api/v1/queue/relay_poll`, constant-shape `OPAQUE` 1024 B, адаптивный PoW и портал `SupporterPass`).
-- **`deploy-static-ip-vps.sh`** и **`docker-compose.yml`** — однокомандное развёртывание узла на Linux VPS (`umask 077`, CSPRNG `AEGIS_BLINDING_SALT_HEX`, `logging: driver: "none"`, `read_only: true`, `cap_drop: ALL`).
+- **`aegis-serverd.exe`** — сервер очередей (`--bind=0.0.0.0 --port=8443`, фиксированные блоки `256..16384 B`, проверка `auth_hash` / `read_token`, пересылка `/api/v1/queue/relay` и `/api/v1/queue/relay_poll`).
+- **`deploy-static-ip-vps.sh`** и **`docker-compose.yml`** — шаблоны запуска сервера в Docker на Linux VPS.
