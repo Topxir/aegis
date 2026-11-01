@@ -4656,6 +4656,15 @@ impl DesktopGuiServer {
   var lastMsgHtml = box ? box.innerHTML : '';
   var chatBox = document.getElementById('chat-list-box');
   var lastChatHtml = chatBox ? chatBox.innerHTML : '';
+  var notifAsked = false;
+  function ensureNotificationPermission() {{
+    try {{
+      if ('Notification' in window && Notification.permission === 'default' && !notifAsked) {{
+        notifAsked = true;
+        Notification.requestPermission();
+      }}
+    }} catch (e) {{}}
+  }}
   function playChime() {{
     try {{
       var Ctx = window.AudioContext || window.webkitAudioContext;
@@ -4701,6 +4710,7 @@ impl DesktopGuiServer {
       if (updSlot && typeof d.update_html === 'string' && updSlot.innerHTML !== d.update_html) {{
         updSlot.innerHTML = d.update_html;
       }}
+      if (d.push_enabled) {{ ensureNotificationPermission(); }}
       if (d.push_enabled && d.push_title && d.push_title.length > 0) {{
         showPushToast(d.push_title, d.push_text || '', d.sound_enabled);
       }}

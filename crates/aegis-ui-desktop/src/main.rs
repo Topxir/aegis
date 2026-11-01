@@ -234,7 +234,12 @@ document.addEventListener('keydown', function (event) {
         .with_devtools(false)
         .with_navigation_handler(move |uri| uri == allowed_root || uri.starts_with(&allowed_path))
         .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
-        .with_permission_handler(|_| PermissionResponse::Deny)
+        // Only system notifications are allowed: everything else (camera, microphone,
+        // geolocation, clipboard, file access) stays fail-closed.
+        .with_permission_handler(|kind| match kind {
+            wry::PermissionKind::Notifications => PermissionResponse::Allow,
+            _ => PermissionResponse::Deny,
+        })
         .with_initialization_script(HARDEN_SCRIPT)
         .build(&window)
         .map_err(|e| e.to_string())?;
