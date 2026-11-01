@@ -417,6 +417,34 @@ impl FederationServerState {
         Ok(self.queues.remove(queue_id).unwrap_or_default())
     }
 
+    /// Reads all active (non-expired) frames from `queue_id` after verifying `presented_read_token`
+    /// without deleting them, so multiple participants on a shared channel can poll messages until TTL expiry.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::UnauthorizedRead`] if `queue_id` requires a `read_token` and `presented_read_token` is missing or wrong.
+    pub fn peek_queue_authenticated(
+        &mut self,
+        queue_id: &[u8; 32],
+        presented_read_token: Option<&[u8; 32]>,
+    ) -> Result<Vec<Vec<u8>>, ServerError> {
+        if *queue_id == [0u8; 32] {
+            return Err(ServerError::InvalidIdentifier);
+        }
+        let now = current_unix_seconds();
+        let _ = self.purge_expired_frames(now, DEFAULT_QUEUE_TTL_SECS);
+        let _ = self.record_request(false);
+        if let Some(expected_hash) = self.queue_auth_hashes.get(queue_id) {
+            let Some(token) = presented_read_token else {
+                return Err(ServerError::UnauthorizedRead);
+            };
+            let candidate_hash = compute_inbox_auth_hash(token);
+            if !constant_time_eq(expected_hash, &candidate_hash) {
+                return Err(ServerError::UnauthorizedRead);
+            }
+        }
+        Ok(self.queues.get(queue_id).cloned().unwrap_or_default())
+    }
+
     /// Drains and deletes all pending frames from `queue_id` (delete-on-delivery per PLAN.md §5).
     /// Always returns an empty `Vec` if the queue does not exist, without leaking metadata.
     /// Fails closed with [`ServerError::UnauthorizedRead`] if the queue has a registered `read_token`.
@@ -864,8 +892,7 @@ fn is_safe_relay_host_literal(host: &str) -> bool {
 
 fn is_allowed_relay_socket_addr(addr: &SocketAddr) -> bool {
     let port = addr.port();
-    // Never allow relaying to privileged system ports (< 1024) or local Desktop GUI port 7878
-    if port < 1024 || port == 7878 {
+    if (port < 1024 && port != 80 && port != 443) || port == 7878 {
         return false;
     }
     match addr {
@@ -873,7 +900,7 @@ fn is_allowed_relay_socket_addr(addr: &SocketAddr) -> bool {
             let [a, b, c, _] = v4.ip().octets();
             if a == 127 {
                 // Allow ephemeral local test ports (>= 1024, != 7878)
-                return true;
+                return port >= 1024;
             }
             !(a == 0
                 || a == 10
@@ -931,7 +958,10 @@ fn parse_endpoint_param_from_query<'a>(query: Option<&'a str>, key_name: &str) -
                     return None;
                 }
                 let port = port_str.parse::<u16>().ok()?;
-                if port < 1024 || port == 7878 {
+                if (port < 1024 && port != 80 && port != 443) || port == 7878 {
+                    return None;
+                }
+                if host == "127.0.0.1" && port < 1024 {
                     return None;
                 }
                 return Some(clean);
@@ -1271,7 +1301,7 @@ pub fn handle_http_request(
                 );
             };
             let read_token_opt = parse_hex32_param_from_query(query_opt, "read_token");
-            match server.drain_queue_authenticated(&queue_id, read_token_opt.as_ref()) {
+            match server.peek_queue_authenticated(&queue_id, read_token_opt.as_ref()) {
                 Ok(mut frames) => {
                     let count = frames.len();
                     let hex_list: Vec<String> = frames

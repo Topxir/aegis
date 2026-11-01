@@ -52,7 +52,8 @@ class AegisRustBridge(private val context: Context) {
         val slotIndex: Int,
         val loginNickname: String,
         val displayName: String,
-        val passwordScore: Int
+        val passwordScore: Int,
+        val passwordHashHex: String = ""
     )
 
     data class LeakWarningUi(
@@ -167,6 +168,8 @@ class AegisRustBridge(private val context: Context) {
     val starterServers = mutableListOf<StarterServerUi>()
     var activeServerIndex: Int = 0
     val accounts = mutableListOf<AccountSlotUi>()
+    var activeAccountIndex: Int = 0
+    var isAuthenticated: Boolean = false
     val chats = mutableListOf<ChatItemUi>()
     private val redeemedSupporterTokens = mutableSetOf<String>()
     private val seenCapsuleHexPrefixes = mutableSetOf<String>()
@@ -177,11 +180,11 @@ class AegisRustBridge(private val context: Context) {
         get() = starterServers.getOrElse(activeServerIndex) {
             StarterServerUi(
                 id = "zurich-static-1",
-                name = "Aegis Official #1 (Zurich Static IP)",
-                staticIpOrHost = "185.220.101.42",
-                port = 8443,
-                endpointUri = "aegis://185.220.101.42:8443",
-                badge = "✓✓ Official",
+                name = "Trusted Node #1 (Anycast IP)",
+                staticIpOrHost = "104.21.53.92",
+                port = 80,
+                endpointUri = "aegis://104.21.53.92:80",
+                badge = "✓✓ Trusted",
                 isTorOnion = false
             )
         }
@@ -194,11 +197,140 @@ class AegisRustBridge(private val context: Context) {
             calculatorDisguiseActive = prefs.getBoolean(PREF_CALC_DISGUISE, false)
             wipedByPanicOrDuress = prefs.getBoolean(PREF_WIPED, false)
             remainingPinAttempts = prefs.getInt(PREF_PIN_ATTEMPTS, 10)
+            loadWorkspaceFromPrefs()
             if (wipedByPanicOrDuress) {
                 accounts.clear()
                 chats.clear()
+                isAuthenticated = false
             }
         }
+    }
+
+    private fun tr(ru: String, en: String): String = if (locale == AppLocale.EN) en else ru
+
+    fun computePasswordVerifierHex(loginNickname: String, password: String): String {
+        val material = "aegis-account-auth-v1:${loginNickname.trim().lowercase()}:$password"
+        val (_, key, _) = deriveChannelKeyAndQueue(material)
+        val hex = bytesToHex(key)
+        key.fill(0)
+        return hex
+    }
+
+    fun saveWorkspaceToPrefs() {
+        runCatching {
+            val accSerialized = accounts.joinToString("\n") { a ->
+                val encAlias = android.util.Base64.encodeToString(a.displayName.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                "${a.loginNickname}\t$encAlias\t${a.passwordScore}\t${a.passwordHashHex}"
+            }
+            val chatLines = mutableListOf<String>()
+            chats.forEach { c ->
+                if (!c.isSavedNotes) {
+                    val encTitle = android.util.Base64.encodeToString(c.title.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                    chatLines.add("C\t${c.chatIdHex}\t$encTitle\t${c.queueTag}")
+                    c.messages.forEach { m ->
+                        val encText = android.util.Base64.encodeToString(m.text.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                        chatLines.add("M\t${c.queueTag}\t${if (m.outgoing) "1" else "0"}\t$encText")
+                    }
+                }
+            }
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString("saved_accounts_v2", accSerialized)
+                .putString("saved_chats_v2", chatLines.joinToString("\n"))
+                .putInt("active_account_idx", activeAccountIndex)
+                .putBoolean("is_authenticated", isAuthenticated)
+                .putInt("active_server_idx", activeServerIndex)
+                .putString("app_locale", locale.name)
+                .apply()
+        }
+    }
+
+    private fun loadWorkspaceFromPrefs() {
+        runCatching {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val locStr = prefs.getString("app_locale", "RU") ?: "RU"
+            if (locStr == "EN") {
+                switchLocale(AppLocale.EN)
+            }
+            activeServerIndex = prefs.getInt("active_server_idx", 0).coerceIn(0, (starterServers.size - 1).coerceAtLeast(0))
+            val accRaw = prefs.getString("saved_accounts_v2", "") ?: ""
+            if (accRaw.isNotBlank()) {
+                accounts.clear()
+                accRaw.lines().forEach { line ->
+                    val parts = line.split('\t')
+                    if (parts.size >= 4) {
+                        val nick = parts[0]
+                        val alias = String(android.util.Base64.decode(parts[1], android.util.Base64.NO_WRAP), Charsets.UTF_8)
+                        val score = parts[2].toIntOrNull() ?: 90
+                        val hashHex = parts[3]
+                        accounts.add(
+                            AccountSlotUi(
+                                slotIndex = accounts.size + 1,
+                                loginNickname = nick,
+                                displayName = alias,
+                                passwordScore = score,
+                                passwordHashHex = hashHex
+                            )
+                        )
+                    }
+                }
+            }
+            activeAccountIndex = prefs.getInt("active_account_idx", 0).coerceIn(0, (accounts.size - 1).coerceAtLeast(0))
+            isAuthenticated = prefs.getBoolean("is_authenticated", false) && accounts.isNotEmpty()
+
+            val chatsRaw = prefs.getString("saved_chats_v2", "") ?: ""
+            if (chatsRaw.isNotBlank()) {
+                chatsRaw.lines().forEach { line ->
+                    val parts = line.split('\t')
+                    if (parts.firstOrNull() == "C" && parts.size >= 4) {
+                        val idHex = parts[1]
+                        val title = String(android.util.Base64.decode(parts[2], android.util.Base64.NO_WRAP), Charsets.UTF_8)
+                        val qTag = parts[3]
+                        if (chats.none { it.queueTag == qTag }) {
+                            chats.add(
+                                ChatItemUi(
+                                    chatIdHex = idHex,
+                                    title = title,
+                                    queueTag = qTag,
+                                    isSavedNotes = false,
+                                    verifiedSupportBadge = false,
+                                    perChatPin = null,
+                                    isLocked = false,
+                                    messages = mutableListOf()
+                                )
+                            )
+                        }
+                    } else if (parts.firstOrNull() == "M" && parts.size >= 4) {
+                        val qTag = parts[1]
+                        val outgoing = parts[2] == "1"
+                        val text = String(android.util.Base64.decode(parts[3], android.util.Base64.NO_WRAP), Charsets.UTF_8)
+                        chats.find { it.queueTag == qTag }?.messages?.add(
+                            ChatMessageUi(
+                                outgoing = outgoing,
+                                text = text,
+                                paddedBucketBytes = 256,
+                                ttlSeconds = 3600
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun logout() {
+        isAuthenticated = false
+        saveWorkspaceToPrefs()
+    }
+
+    fun resetAfterWipe() {
+        wipedByPanicOrDuress = false
+        remainingPinAttempts = 10
+        isAuthenticated = false
+        activeAccountIndex = 0
+        seedDefaultWorkspace()
+        persistSecurityState()
+        saveWorkspaceToPrefs()
     }
 
     private fun persistSecurityState() {
@@ -607,18 +739,34 @@ class AegisRustBridge(private val context: Context) {
      */
     fun validateNickname(loginNickname: String): Result<String> {
         if (loginNickname != loginNickname.trim() || loginNickname.length !in 3..32) {
-            return Result.failure(IllegalArgumentException("Длина ника должна быть 3..32 символа без пробелов"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Длина логина должна быть 3..32 символа без пробелов", "Username must be 3..32 characters with no spaces")
+                )
+            )
         }
         if (loginNickname.first() == '-' || loginNickname.first() == '_' ||
             loginNickname.last() == '-' || loginNickname.last() == '_'
         ) {
-            return Result.failure(IllegalArgumentException("Ник не может начинаться или заканчиваться на '-' или '_'"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Логин не может начинаться или заканчиваться на '-' или '_'", "Username cannot start or end with '-' or '_'")
+                )
+            )
         }
         if (!loginNickname.all { it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }) {
-            return Result.failure(IllegalArgumentException("Ник может содержать только строчные буквы a-z, цифры, '-' и '_'"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Разрешены только строчные буквы a-z, цифры, '-' и '_'", "Use only lowercase a-z, digits, '-' and '_'")
+                )
+            )
         }
         if (loginNickname.all { it.isDigit() }) {
-            return Result.failure(IllegalArgumentException("Ник не может состоять только из цифр"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Логин не может состоять только из цифр", "Username cannot be digits only")
+                )
+            )
         }
         return Result.success(loginNickname)
     }
@@ -628,25 +776,47 @@ class AegisRustBridge(private val context: Context) {
      */
     fun validateStrictPassword(password: String, loginNickname: String): Result<Int> {
         if (password.length < 12 || password.length > 256) {
-            return Result.failure(IllegalArgumentException("Длина пароля должна быть 12..256 символов"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Длина пароля должна быть от 12 до 256 символов", "Password length must be 12..256 characters")
+                )
+            )
         }
         if (password.any { it.isISOControl() }) {
-            return Result.failure(IllegalArgumentException("Пароль не должен содержать управляющие символы"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Пароль не должен содержать управляющие символы", "Password cannot contain control characters")
+                )
+            )
         }
         val upperCount = password.count { it.isUpperCase() }
         if (upperCount < 3) {
             return Result.failure(
-                IllegalArgumentException("Нужно минимум 3 ЗАГЛАВНЫЕ буквы (сейчас: $upperCount)")
+                IllegalArgumentException(
+                    tr("Нужно минимум 3 ЗАГЛАВНЫЕ буквы (сейчас: $upperCount)", "Need at least 3 UPPERCASE letters (currently: $upperCount)")
+                )
             )
         }
         if (password.none { it.isLowerCase() }) {
-            return Result.failure(IllegalArgumentException("Нужна хотя бы 1 строчная буква"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Нужна хотя бы 1 строчная буква", "Need at least 1 lowercase letter")
+                )
+            )
         }
         if (password.none { it.isDigit() }) {
-            return Result.failure(IllegalArgumentException("Нужна хотя бы 1 цифра"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Нужна хотя бы 1 цифра", "Need at least 1 digit")
+                )
+            )
         }
         if (password.none { !it.isLetterOrDigit() && !it.isWhitespace() && !it.isISOControl() }) {
-            return Result.failure(IllegalArgumentException("Нужен хотя бы 1 спецсимвол (!@#\$%^&*)"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Нужен хотя бы 1 спецсимвол (!@#\$%^&*)", "Need at least 1 special character (!@#\$%^&*)")
+                )
+            )
         }
         val cleanNick = loginNickname.trim().lowercase()
         val strippedNick = cleanNick.filter { it != '-' && it != '_' && !it.isWhitespace() }
@@ -654,41 +824,107 @@ class AegisRustBridge(private val context: Context) {
         if ((cleanNick.length >= 3 && password.lowercase().contains(cleanNick)) ||
             (strippedNick.length >= 3 && strippedPwd.contains(strippedNick))
         ) {
-            return Result.failure(IllegalArgumentException("Пароль не должен содержать ваш ник"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Пароль не должен содержать ваш логин", "Password must not contain your username")
+                )
+            )
         }
         val score = (65 + (password.length - 12) * 3 + upperCount * 2).coerceAtMost(100)
         return Result.success(score)
     }
 
     /**
-     * Registers an isolated local account profile (max 3 free, 5+ with blind-signed `SupporterPass`, D-0010).
+     * Registers an isolated local account profile and signs the user in.
      */
-    fun registerAccount(loginNickname: String, displayName: String, password: String): Result<AccountSlotUi> {
-        val cleanNick = validateNickname(loginNickname).getOrElse {
+    fun registerAccount(
+        loginNickname: String,
+        displayName: String,
+        password: String,
+        confirmPassword: String? = null
+    ): Result<AccountSlotUi> {
+        val cleanNick = validateNickname(loginNickname.trim().lowercase()).getOrElse {
             return Result.failure(it)
         }
         if (displayName.isBlank()) {
-            return Result.failure(IllegalArgumentException("Отображаемое имя профиля не может быть пустым"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Укажите отображаемое имя", "Enter a display name")
+                )
+            )
+        }
+        if (confirmPassword != null && !constantTimeEquals(password, confirmPassword)) {
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Пароли не совпадают", "Passwords do not match")
+                )
+            )
         }
         if (accounts.any { it.loginNickname.equals(cleanNick, ignoreCase = true) }) {
-            return Result.failure(IllegalStateException("Аккаунт с таким ником уже зарегистрирован на устройстве"))
+            return Result.failure(
+                IllegalStateException(
+                    tr("Такой логин уже зарегистрирован. Перейдите на вкладку «Вход».", "Username already exists. Switch to the Sign In tab.")
+                )
+            )
         }
         if (accounts.size >= maxAccountSlots) {
             return Result.failure(
-                IllegalStateException("Лимит 3 бесплатных аккаунтов исчерпан. Активируйте SupporterPass.")
+                IllegalStateException(
+                    tr("Достигнут лимит профилей на устройстве", "Profile limit reached on this device")
+                )
             )
         }
         val score = validateStrictPassword(password, cleanNick).getOrElse {
             return Result.failure(it)
         }
+        val verifierHex = computePasswordVerifierHex(cleanNick, password)
         val slot = AccountSlotUi(
             slotIndex = accounts.size + 1,
             loginNickname = cleanNick,
             displayName = displayName.trim(),
-            passwordScore = score
+            passwordScore = score,
+            passwordHashHex = verifierHex
         )
         accounts.add(slot)
+        activeAccountIndex = accounts.lastIndex
+        isAuthenticated = true
+        saveWorkspaceToPrefs()
         return Result.success(slot)
+    }
+
+    /**
+     * Authenticates an existing account by username and password.
+     */
+    fun loginAccount(loginNickname: String, password: String): Result<AccountSlotUi> {
+        val cleanNick = loginNickname.trim().lowercase()
+        if (cleanNick.isEmpty() || password.isEmpty()) {
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Введите логин и пароль", "Enter your username and password")
+                )
+            )
+        }
+        val idx = accounts.indexOfFirst { it.loginNickname.equals(cleanNick, ignoreCase = true) }
+        if (idx < 0) {
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Неверный логин или пароль", "Invalid username or password")
+                )
+            )
+        }
+        val acc = accounts[idx]
+        val candidateHex = computePasswordVerifierHex(cleanNick, password)
+        if (!constantTimeEquals(acc.passwordHashHex, candidateHex)) {
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Неверный логин или пароль", "Invalid username or password")
+                )
+            )
+        }
+        activeAccountIndex = idx
+        isAuthenticated = true
+        saveWorkspaceToPrefs()
+        return Result.success(acc)
     }
 
     /**
@@ -696,14 +932,22 @@ class AegisRustBridge(private val context: Context) {
      */
     fun createCustomChannelChat(contactTitle: String, channelCode: String): Result<Int> {
         val cleanTitle = contactTitle.trim()
-        val cleanCode = channelCode.trim()
+        val cleanCode = normalizeChannelCode(channelCode)
         if (cleanTitle.isEmpty() || cleanCode.isEmpty()) {
-            return Result.failure(IllegalArgumentException("Укажите имя собеседника и код канала"))
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Укажите имя собеседника и код канала", "Enter contact name and channel code")
+                )
+            )
         }
         if (chats.size >= 64) {
-            return Result.failure(IllegalStateException("Достигнут лимит открытых чатов"))
+            return Result.failure(
+                IllegalStateException(
+                    tr("Достигнут лимит открытых чатов", "Chat limit reached")
+                )
+            )
         }
-        val tag = if (cleanCode.startsWith("queue://")) cleanCode else "queue://$cleanCode"
+        val tag = "queue://$cleanCode"
         val newChat = ChatItemUi(
             chatIdHex = "ch-${chats.size + 10}",
             title = cleanTitle,
@@ -715,13 +959,14 @@ class AegisRustBridge(private val context: Context) {
             messages = mutableListOf(
                 ChatMessageUi(
                     outgoing = false,
-                    text = "Чат создан.",
+                    text = tr("Чат создан.", "Chat created."),
                     paddedBucketBytes = 256,
                     ttlSeconds = 3600
                 )
             )
         )
         chats.add(newChat)
+        saveWorkspaceToPrefs()
         return Result.success(chats.lastIndex)
     }
 
@@ -1512,16 +1757,8 @@ class AegisRustBridge(private val context: Context) {
         activeServerIndex = 0
         torEnabled = false
         shieldState = NetworkShieldState.DIRECT_STATIC_IP_TLS
-
-        val nick = generateAnonymousNickname()
-        accounts.add(
-            AccountSlotUi(
-                slotIndex = 1,
-                loginNickname = nick,
-                displayName = "Основной профиль",
-                passwordScore = 96
-            )
-        )
+        accounts.clear()
+        chats.clear()
 
         chats.add(
             ChatItemUi(

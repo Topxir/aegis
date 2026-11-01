@@ -34,16 +34,22 @@ fun AegisComposeApp(
     onPanicWipeTriggered: () -> Unit
 ) {
     var uiTick by remember { mutableStateOf(0) }
-    var activeScreen by remember { mutableStateOf("STEP_1_ACCOUNT") }
+    var activeScreen by remember {
+        mutableStateOf(if (bridge.isAuthenticated) "STEP_3_CHAT_LIST" else "STEP_1_ACCOUNT")
+    }
+    var authTabLogin by remember { mutableStateOf(bridge.accounts.isNotEmpty()) }
     var activeChatIndex by remember { mutableStateOf(0) }
     var draftText by remember { mutableStateOf("") }
     var statusBanner by remember { mutableStateOf("") }
     var pendingLeakWarning by remember { mutableStateOf<AegisRustBridge.LeakWarningUi?>(null) }
     var chatPinInput by remember { mutableStateOf("") }
 
-    var generatedNickname by remember { mutableStateOf(bridge.generateAnonymousNickname()) }
+    var generatedNickname by remember {
+        mutableStateOf(bridge.accounts.lastOrNull()?.loginNickname ?: bridge.generateAnonymousNickname())
+    }
     var displayNameInput by remember { mutableStateOf("Призрак Сети") }
     var onboardingPassword by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
 
     var customStaticIpInput by remember { mutableStateOf("") }
@@ -71,6 +77,15 @@ fun AegisComposeApp(
     }
 
     fun go(screen: String) {
+        if (!bridge.isAuthenticated && screen != "STEP_1_ACCOUNT") {
+            activeScreen = "STEP_1_ACCOUNT"
+            statusBanner = tr(
+                "Сначала зарегистрируйтесь или войдите в аккаунт.",
+                "Please register or sign in to an account first."
+            )
+            uiTick++
+            return
+        }
         activeScreen = screen
         uiTick++
     }
@@ -122,11 +137,21 @@ fun AegisComposeApp(
     ) {
         Surface(modifier = Modifier.fillMaxSize(), color = AegisColors.bg) {
             if (currentTick >= 0 && bridge.wipedByPanicOrDuress) {
-                WipedScreen(isRu = isRu)
+                WipedScreen(
+                    isRu = isRu,
+                    onReset = {
+                        bridge.resetAfterWipe()
+                        authTabLogin = false
+                        activeScreen = "STEP_1_ACCOUNT"
+                        statusBanner = ""
+                        uiTick++
+                    }
+                )
                 return@Surface
             }
 
-            when (activeScreen) {
+            val effectiveScreen = if (!bridge.isAuthenticated) "STEP_1_ACCOUNT" else activeScreen
+            when (effectiveScreen) {
                 "STEP_1_ACCOUNT" -> {
                     Column(
                         modifier = Modifier
@@ -164,8 +189,8 @@ fun AegisComposeApp(
                         Spacer(Modifier.height(8.dp))
                         Text(
                             tr(
-                                "Создайте локальный профиль и укажите адрес сервера для обмена сообщениями.",
-                                "Create a local profile and enter a server address to exchange messages."
+                                "Доступ к чатам и серверам открывается только после регистрации или входа в аккаунт.",
+                                "Access to chats and servers requires registering or signing in to an account."
                             ),
                             color = AegisColors.muted,
                             fontSize = 14.sp,
@@ -176,113 +201,221 @@ fun AegisComposeApp(
                         Spacer(Modifier.height(12.dp))
 
                         AuthCard {
-                            Text(
-                                tr("Создание профиля", "Create profile"),
-                                color = AegisColors.text,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                tr("Шаг 1 из 3", "Step 1 of 3"),
-                                color = AegisColors.accent,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(Modifier.height(14.dp))
-
-                            OutlinedTextField(
-                                value = generatedNickname,
-                                onValueChange = { generatedNickname = it },
-                                label = { Text(tr("Логин", "Username")) },
-                                singleLine = true,
-                                keyboardOptions = incognitoKeyboardOptions,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            TextButton(
-                                onClick = { generatedNickname = bridge.generateAnonymousNickname() },
-                                contentPadding = PaddingValues(horizontal = 0.dp)
-                            ) {
-                                Text(
-                                    tr("Сгенерировать случайный логин", "Generate random username"),
-                                    color = AegisColors.info,
-                                    fontSize = 12.sp
-                                )
-                            }
-
-                            OutlinedTextField(
-                                value = displayNameInput,
-                                onValueChange = { displayNameInput = it },
-                                label = { Text(tr("Имя", "Display name")) },
-                                singleLine = true,
-                                keyboardOptions = incognitoKeyboardOptions,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(Modifier.height(8.dp))
-
-                            OutlinedTextField(
-                                value = onboardingPassword,
-                                onValueChange = { onboardingPassword = it },
-                                label = { Text(tr("Пароль", "Password")) },
-                                singleLine = true,
-                                visualTransformation = if (showPassword) {
-                                    VisualTransformation.None
-                                } else {
-                                    PasswordVisualTransformation()
-                                },
-                                keyboardOptions = incognitoKeyboardOptions,
-                                trailingIcon = {
-                                    TextButton(onClick = { showPassword = !showPassword }) {
-                                        Text(
-                                            if (showPassword) tr("Скрыть", "Hide") else tr("Показать", "Show"),
-                                            fontSize = 11.sp
-                                        )
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Text(
-                                tr(
-                                    "Минимум 12 символов, 3 заглавные, цифра и спецсимвол.",
-                                    "At least 12 characters, 3 uppercase letters, a digit and a symbol."
-                                ),
-                                color = AegisColors.muted,
-                                fontSize = 11.sp
-                            )
-
-                            Spacer(Modifier.height(14.dp))
-                            Button(
-                                onClick = {
-                                    bridge.registerAccount(
-                                        generatedNickname.trim(),
-                                        displayNameInput.ifBlank { tr("Основной профиль", "Main Profile") },
-                                        onboardingPassword
-                                    ).onSuccess { slot ->
-                                        onboardingPassword = ""
-                                        activeScreen = "STEP_2_SERVERS"
-                                        applyStatus(
-                                            tr(
-                                                "Профиль ${slot.displayName} создан. Выберите сервер.",
-                                                "Profile ${slot.displayName} created. Select a server."
-                                            )
-                                        )
-                                    }.onFailure { error ->
-                                        applyStatus(tr("Проверьте данные: ${error.message}", "Check details: ${error.message}"))
-                                    }
-                                },
+                            Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp)
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Text(tr("Продолжить", "Continue"), fontWeight = FontWeight.Bold)
+                                Button(
+                                    onClick = {
+                                        authTabLogin = false
+                                        statusBanner = ""
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (!authTabLogin) AegisColors.accent else AegisColors.panel2
+                                    ),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        tr("Регистрация", "Register"),
+                                        color = if (!authTabLogin) AegisColors.onAccent else AegisColors.text,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                                Button(
+                                    onClick = {
+                                        authTabLogin = true
+                                        statusBanner = ""
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (authTabLogin) AegisColors.accent else AegisColors.panel2
+                                    ),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        tr("Вход", "Sign in"),
+                                        color = if (authTabLogin) AegisColors.onAccent else AegisColors.text,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                }
                             }
-                            TextButton(
-                                onClick = { go("STEP_2_SERVERS") },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
+                            Spacer(Modifier.height(14.dp))
+
+                            if (authTabLogin) {
                                 Text(
-                                    tr("Перейти к выбору сервера →", "Go to server selection →"),
-                                    color = AegisColors.muted,
-                                    fontSize = 12.sp
+                                    tr("Вход в аккаунт", "Sign in to account"),
+                                    color = AegisColors.text,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
+                                Spacer(Modifier.height(10.dp))
+                                OutlinedTextField(
+                                    value = generatedNickname,
+                                    onValueChange = { generatedNickname = it },
+                                    label = { Text(tr("Логин", "Username")) },
+                                    singleLine = true,
+                                    keyboardOptions = incognitoKeyboardOptions,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = onboardingPassword,
+                                    onValueChange = { onboardingPassword = it },
+                                    label = { Text(tr("Пароль", "Password")) },
+                                    singleLine = true,
+                                    visualTransformation = if (showPassword) {
+                                        VisualTransformation.None
+                                    } else {
+                                        PasswordVisualTransformation()
+                                    },
+                                    keyboardOptions = incognitoKeyboardOptions,
+                                    trailingIcon = {
+                                        TextButton(onClick = { showPassword = !showPassword }) {
+                                            Text(
+                                                if (showPassword) tr("Скрыть", "Hide") else tr("Показать", "Show"),
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(Modifier.height(14.dp))
+                                Button(
+                                    onClick = {
+                                        bridge.loginAccount(
+                                            generatedNickname.trim(),
+                                            onboardingPassword
+                                        ).onSuccess { slot ->
+                                            onboardingPassword = ""
+                                            confirmPassword = ""
+                                            activeScreen = "STEP_3_CHAT_LIST"
+                                            applyStatus(
+                                                tr(
+                                                    "Вы вошли как ${slot.displayName} (@${slot.loginNickname}).",
+                                                    "Signed in as ${slot.displayName} (@${slot.loginNickname})."
+                                                )
+                                            )
+                                        }.onFailure { error ->
+                                            applyStatus("${error.message}")
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text(tr("Войти", "Sign in"), fontWeight = FontWeight.Bold)
+                                }
+                            } else {
+                                Text(
+                                    tr("Регистрация аккаунта", "Create account"),
+                                    color = AegisColors.text,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(Modifier.height(10.dp))
+
+                                OutlinedTextField(
+                                    value = generatedNickname,
+                                    onValueChange = { generatedNickname = it },
+                                    label = { Text(tr("Логин", "Username")) },
+                                    singleLine = true,
+                                    keyboardOptions = incognitoKeyboardOptions,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                TextButton(
+                                    onClick = { generatedNickname = bridge.generateAnonymousNickname() },
+                                    contentPadding = PaddingValues(horizontal = 0.dp)
+                                ) {
+                                    Text(
+                                        tr("Сгенерировать случайный логин", "Generate random username"),
+                                        color = AegisColors.info,
+                                        fontSize = 12.sp
+                                    )
+                                }
+
+                                OutlinedTextField(
+                                    value = displayNameInput,
+                                    onValueChange = { displayNameInput = it },
+                                    label = { Text(tr("Имя", "Display name")) },
+                                    singleLine = true,
+                                    keyboardOptions = incognitoKeyboardOptions,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(Modifier.height(8.dp))
+
+                                OutlinedTextField(
+                                    value = onboardingPassword,
+                                    onValueChange = { onboardingPassword = it },
+                                    label = { Text(tr("Пароль", "Password")) },
+                                    singleLine = true,
+                                    visualTransformation = if (showPassword) {
+                                        VisualTransformation.None
+                                    } else {
+                                        PasswordVisualTransformation()
+                                    },
+                                    keyboardOptions = incognitoKeyboardOptions,
+                                    trailingIcon = {
+                                        TextButton(onClick = { showPassword = !showPassword }) {
+                                            Text(
+                                                if (showPassword) tr("Скрыть", "Hide") else tr("Показать", "Show"),
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = confirmPassword,
+                                    onValueChange = { confirmPassword = it },
+                                    label = { Text(tr("Повторите пароль", "Confirm password")) },
+                                    singleLine = true,
+                                    visualTransformation = if (showPassword) {
+                                        VisualTransformation.None
+                                    } else {
+                                        PasswordVisualTransformation()
+                                    },
+                                    keyboardOptions = incognitoKeyboardOptions,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text(
+                                    tr(
+                                        "Минимум 12 символов, 3 заглавные, цифра и спецсимвол.",
+                                        "At least 12 characters, 3 uppercase letters, a digit and a symbol."
+                                    ),
+                                    color = AegisColors.muted,
+                                    fontSize = 11.sp
+                                )
+
+                                Spacer(Modifier.height(14.dp))
+                                Button(
+                                    onClick = {
+                                        bridge.registerAccount(
+                                            generatedNickname.trim(),
+                                            displayNameInput.ifBlank { tr("Основной профиль", "Main Profile") },
+                                            onboardingPassword,
+                                            confirmPassword
+                                        ).onSuccess { slot ->
+                                            onboardingPassword = ""
+                                            confirmPassword = ""
+                                            activeScreen = "STEP_2_SERVERS"
+                                            applyStatus(
+                                                tr(
+                                                    "Аккаунт ${slot.displayName} зарегистрирован. Выберите сервер.",
+                                                    "Account ${slot.displayName} registered. Select a server."
+                                                )
+                                            )
+                                        }.onFailure { error ->
+                                            applyStatus("${error.message}")
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text(tr("Зарегистрироваться", "Create account"), fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
@@ -499,7 +632,7 @@ fun AegisComposeApp(
                                 .verticalScroll(rememberScrollState())
                                 .padding(horizontal = 14.dp, vertical = 8.dp)
                         ) {
-                            val account = bridge.accounts.firstOrNull()
+                            val account = bridge.accounts.getOrNull(bridge.activeAccountIndex)
                             if (account != null) {
                                 Surface(
                                     color = AegisColors.panel,
@@ -538,15 +671,31 @@ fun AegisComposeApp(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(Modifier.padding(12.dp)) {
-                                    bridge.accounts.forEach { slot ->
+                                    bridge.accounts.forEachIndexed { idx, slot ->
+                                        val isCurrent = idx == bridge.activeAccountIndex
                                         Row(
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    bridge.activeAccountIndex = idx
+                                                    bridge.saveWorkspaceToPrefs()
+                                                    applyStatus(
+                                                        tr(
+                                                            "Активный профиль: ${slot.displayName}",
+                                                            "Active profile: ${slot.displayName}"
+                                                        )
+                                                    )
+                                                }
+                                                .padding(vertical = 6.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Box(
                                                 modifier = Modifier
                                                     .size(8.dp)
-                                                    .background(AegisColors.accent, CircleShape)
+                                                    .background(
+                                                        if (isCurrent) AegisColors.accent else AegisColors.muted,
+                                                        CircleShape
+                                                    )
                                             )
                                             Spacer(Modifier.width(10.dp))
                                             Column(modifier = Modifier.weight(1f)) {
@@ -556,7 +705,20 @@ fun AegisComposeApp(
                                         }
                                     }
                                     Spacer(Modifier.height(6.dp))
-                                    SmallChoice(tr("+ Профиль", "+ Profile")) { go("STEP_1_ACCOUNT") }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        SmallChoice(tr("+ Новый аккаунт", "+ New account")) {
+                                            bridge.logout()
+                                            authTabLogin = false
+                                            activeScreen = "STEP_1_ACCOUNT"
+                                            uiTick++
+                                        }
+                                        SmallChoice(tr("Выйти из аккаунта", "Log out"), danger = true) {
+                                            bridge.logout()
+                                            authTabLogin = true
+                                            activeScreen = "STEP_1_ACCOUNT"
+                                            applyStatus(tr("Вы вышли из аккаунта.", "Signed out of your account."))
+                                        }
+                                    }
                                 }
                             }
 
@@ -1226,7 +1388,7 @@ private object AegisColors {
 }
 
 @Composable
-private fun WipedScreen(isRu: Boolean) {
+private fun WipedScreen(isRu: Boolean, onReset: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().padding(28.dp),
         verticalArrangement = Arrangement.Center,
@@ -1252,6 +1414,16 @@ private fun WipedScreen(isRu: Boolean) {
             textAlign = TextAlign.Center,
             lineHeight = 19.sp
         )
+        Spacer(Modifier.height(20.dp))
+        Button(
+            onClick = onReset,
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text(
+                if (isRu) "Создать новый профиль" else "Create new profile",
+                fontWeight = FontWeight.Bold
+            )
+        }
     }
 }
 

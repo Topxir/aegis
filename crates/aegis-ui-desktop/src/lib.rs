@@ -669,6 +669,14 @@ pub struct DesktopAppState {
     pub last_exported_backup_hex: Option<String>,
     /// Status banner message for user feedback.
     pub status_banner: String,
+    /// Whether mandatory authentication gate is enforced (enabled in interactive desktop GUI).
+    pub auth_gate_enabled: bool,
+    /// Whether the user has registered or signed into an account in the current session.
+    pub is_authenticated: bool,
+    /// Whether the onboarding card shows the Sign-In tab (`true`) or Register tab (`false`).
+    pub auth_tab_login: bool,
+    /// Local account password verifiers `(login_nickname, display_name, verifier_bytes)`.
+    pub account_verifiers: Vec<(String, String, [u8; 32])>,
 }
 
 impl Default for DesktopAppState {
@@ -873,6 +881,161 @@ impl DesktopAppState {
             key_change_warning: None,
             last_exported_backup_hex: None,
             status_banner: String::new(),
+            auth_gate_enabled: false,
+            is_authenticated: false,
+            auth_tab_login: false,
+            account_verifiers: Vec::new(),
+        }
+    }
+
+    /// Enables the mandatory authentication gate for the interactive desktop GUI
+    /// and loads any previously registered accounts and chats from disk.
+    pub fn enable_auth_gate(&mut self) {
+        self.auth_gate_enabled = true;
+        self.is_authenticated = false;
+        self.current_screen = Screen::Onboarding;
+        self.load_desktop_vault();
+        if !self.account_verifiers.is_empty() {
+            self.auth_tab_login = true;
+        }
+    }
+
+    fn vault_file_path() -> Option<std::path::PathBuf> {
+        std::env::var("USERPROFILE")
+            .ok()
+            .map(|p| std::path::PathBuf::from(p).join(".aegis-desktop-vault.tsv"))
+    }
+
+    /// Computes a 4096-round stretched password verifier for local account authentication.
+    #[must_use]
+    pub fn compute_password_verifier(nick: &str, pwd: &str) -> [u8; 32] {
+        let material = format!(
+            "aegis-account-auth-v1:{}:{}",
+            nick.trim().to_ascii_lowercase(),
+            pwd
+        );
+        let (_, key, _) = derive_channel_key_and_queue(&material);
+        key
+    }
+
+    /// Saves registered accounts and user chats to disk when `auth_gate_enabled` is active.
+    pub fn save_desktop_vault(&self) {
+        if !self.auth_gate_enabled {
+            return;
+        }
+        let Some(path) = Self::vault_file_path() else {
+            return;
+        };
+        let mut out = String::new();
+        for (nick, alias, verifier) in &self.account_verifiers {
+            out.push_str(&format!(
+                "ACC\t{}\t{}\t{}\n",
+                url_encode(nick),
+                url_encode(alias),
+                hex_encode_bytes(verifier)
+            ));
+        }
+        for chat in &self.chats {
+            if chat.is_local_saved_notes || chat.title == "nordic-falcon" {
+                continue;
+            }
+            out.push_str(&format!(
+                "CHAT\t{}\t{}\n",
+                url_encode(&chat.title),
+                url_encode(&chat.queue_tag)
+            ));
+            for m in &chat.messages {
+                out.push_str(&format!(
+                    "MSG\t{}\t{}\t{}\n",
+                    url_encode(&chat.queue_tag),
+                    if m.outgoing { "1" } else { "0" },
+                    url_encode(&m.text)
+                ));
+            }
+        }
+        let _ = std::fs::write(path, out);
+    }
+
+    /// Loads registered accounts and user chats from disk.
+    pub fn load_desktop_vault(&mut self) {
+        let Some(path) = Self::vault_file_path() else {
+            return;
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            match parts.first().copied() {
+                Some("ACC") if parts.len() >= 4 => {
+                    let nick = percent_decode(parts[1]);
+                    let alias = percent_decode(parts[2]);
+                    let hex_v = parts[3].trim();
+                    if hex_v.len() == 64 {
+                        let mut verifier = [0u8; 32];
+                        let mut ok = true;
+                        for (i, byte_out) in verifier.iter_mut().enumerate() {
+                            if let (Some(h), Some(l)) = (
+                                from_hex(hex_v.as_bytes()[i * 2]),
+                                from_hex(hex_v.as_bytes()[i * 2 + 1]),
+                            ) {
+                                *byte_out = (h << 4) | l;
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok
+                            && !self
+                                .account_verifiers
+                                .iter()
+                                .any(|(n, _, _)| n.eq_ignore_ascii_case(&nick))
+                        {
+                            let idx = (self.accounts.profiles.len() + 1) as u8;
+                            self.accounts.profiles.push(AccountProfileSummary {
+                                account_id: [idx; 16],
+                                login_nickname: nick.clone(),
+                                display_name: alias.clone(),
+                                password_score: 95,
+                            });
+                            self.account_verifiers.push((nick, alias, verifier));
+                        }
+                    }
+                }
+                Some("CHAT") if parts.len() >= 3 => {
+                    let title = percent_decode(parts[1]);
+                    let q_tag = percent_decode(parts[2]);
+                    if !self.chats.iter().any(|c| c.queue_tag == q_tag) {
+                        let id_byte = (self.chats.len() as u8).wrapping_add(10);
+                        self.chats.push(ChatView {
+                            chat_id: [id_byte; 16],
+                            title,
+                            queue_tag: q_tag,
+                            is_local_saved_notes: false,
+                            verified_support_badge: false,
+                            per_chat_pin: None,
+                            is_locked: false,
+                            default_disappearing_ttl_secs: Some(3600),
+                            messages: Vec::new(),
+                        });
+                    }
+                }
+                Some("MSG") if parts.len() >= 4 => {
+                    let q_tag = percent_decode(parts[1]);
+                    let outgoing = parts[2] == "1";
+                    let text = percent_decode(parts[3]);
+                    if let Some(chat) = self.chats.iter_mut().find(|c| c.queue_tag == q_tag) {
+                        chat.messages.push(ChatMessageView {
+                            outgoing,
+                            text,
+                            padded_bucket_bytes: 256,
+                            disappearing_ttl_secs: Some(3600),
+                            attachment: None,
+                        });
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1300,14 +1463,14 @@ impl DesktopAppState {
                 &queue_id,
                 &channel_key,
                 &capsule,
-                800,
+                3_500,
             )
             .is_ok()
         } else if let Some(proxy_ep) = self.socks5_proxy_endpoint.clone() {
-            send_capsule_via_socks5(&proxy_ep, &server_ep, &queue_id, &channel_key, &capsule, 800)
+            send_capsule_via_socks5(&proxy_ep, &server_ep, &queue_id, &channel_key, &capsule, 3_500)
                 .is_ok()
         } else {
-            send_capsule_over_tcp(&server_ep, &queue_id, &channel_key, &capsule, 400).is_ok()
+            send_capsule_over_tcp(&server_ep, &queue_id, &channel_key, &capsule, 3_500).is_ok()
         };
         channel_key.fill(0);
         ok
@@ -2498,10 +2661,14 @@ impl DesktopGuiServer {
             return self.render_html_legacy();
         }
 
-        let body = match self.state.current_screen {
-            Screen::Onboarding => self.render_onboarding_page(),
-            Screen::ServerLauncher => self.render_servers_page(),
-            _ => self.render_workspace_page(),
+        let body = if self.state.auth_gate_enabled && !self.state.is_authenticated {
+            self.render_onboarding_page()
+        } else {
+            match self.state.current_screen {
+                Screen::Onboarding => self.render_onboarding_page(),
+                Screen::ServerLauncher => self.render_servers_page(),
+                _ => self.render_workspace_page(),
+            }
         };
         let s = self.state.strings();
         let lang = if self.state.locale == Locale::En { "en" } else { "ru" };
@@ -2567,6 +2734,61 @@ impl DesktopGuiServer {
 
     fn render_onboarding_page(&self) -> String {
         let s = self.state.strings();
+        let is_login = self.state.auth_tab_login;
+        let reg_active = if !is_login { "active" } else { "" };
+        let login_active = if is_login { "active" } else { "" };
+        let form_html = if is_login {
+            let saved_nick = self
+                .state
+                .account_verifiers
+                .last()
+                .map_or(self.state.onboarding_nickname.as_str(), |(n, _, _)| n.as_str());
+            format!(
+                "<form class='form-stack' action='/action' method='get'>
+        <input type='hidden' name='cmd' value='signin_account'>
+        <label for='nick'>{login_lbl}</label>
+        <input id='nick' type='text' name='nick' value='{nick}' autocomplete='off' spellcheck='false'>
+        <label for='pwd'>{pwd_lbl}</label>
+        <input id='pwd' type='password' name='pwd' value='' placeholder='{pwd_ph}' autocomplete='current-password'>
+        <button class='btn primary wide' type='submit'>{signin_btn}</button>
+      </form>",
+                login_lbl = self.tr("Логин", "Username"),
+                nick = html_escape(saved_nick),
+                pwd_lbl = self.tr("Пароль", "Password"),
+                pwd_ph = self.tr("Введите ваш пароль", "Enter your password"),
+                signin_btn = self.tr("Войти в аккаунт", "Sign in"),
+            )
+        } else {
+            format!(
+                "<form class='form-stack' action='/action' method='get'>
+        <input type='hidden' name='cmd' value='login_account'>
+        <label for='nick'>{login_lbl}</label>
+        <div class='input-row'>
+          <input id='nick' type='text' name='nick' value='{nick}' autocomplete='off' spellcheck='false'>
+          <a class='btn ghost' href='/action?cmd=gen_nick'>{gen_nick}</a>
+        </div>
+        <label for='alias'>{name_lbl}</label>
+        <input id='alias' type='text' name='alias' value='{default_alias}' autocomplete='off'>
+        <label for='pwd'>{pwd_lbl}</label>
+        <input id='pwd' type='password' name='pwd' value='' placeholder='{pwd_ph}' autocomplete='new-password'>
+        <label for='pwd2'>{pwd2_lbl}</label>
+        <input id='pwd2' type='password' name='pwd2' value='' placeholder='{pwd2_ph}' autocomplete='new-password'>
+        <div class='hint'>{password_hint}</div>
+        <button class='btn primary wide' type='submit'>{register_btn}</button>
+      </form>",
+                login_lbl = self.tr("Логин", "Username"),
+                nick = html_escape(&self.state.onboarding_nickname),
+                gen_nick = html_escape(s.nickname_generate_btn),
+                name_lbl = self.tr("Отображаемое имя", "Display name"),
+                default_alias = self.tr("Призрак Сети", "Network Ghost"),
+                pwd_lbl = self.tr("Пароль", "Password"),
+                pwd_ph = self.tr("Придумайте пароль", "Create password"),
+                pwd2_lbl = self.tr("Повторите пароль", "Confirm password"),
+                pwd2_ph = self.tr("Введите пароль ещё раз", "Repeat password"),
+                password_hint = html_escape(s.password_policy_hint),
+                register_btn = self.tr("Зарегистрироваться", "Create account"),
+            )
+        };
         format!(
             "<div class='auth-page'>
   <section class='auth-brand'>
@@ -2588,24 +2810,12 @@ impl DesktopGuiServer {
       <div class='eyebrow'>{step_label}</div>
       <h2>{heading}</h2>
       <p class='lead'>{lead}</p>
-      {status}
-      <form class='form-stack' action='/action' method='get'>
-        <input type='hidden' name='cmd' value='login_account'>
-        <label for='nick'>{login_lbl}</label>
-        <div class='input-row'>
-          <input id='nick' type='text' name='nick' value='{nick}' autocomplete='off' spellcheck='false'>
-          <a class='btn ghost' href='/action?cmd=gen_nick'>{gen_nick}</a>
-        </div>
-        <label for='alias'>{name_lbl}</label>
-        <input id='alias' type='text' name='alias' value='{default_alias}' autocomplete='off'>
-        <label for='pwd'>{pwd_lbl}</label>
-        <input id='pwd' type='password' name='pwd' value='' placeholder='{pwd_ph}' autocomplete='new-password'>
-        <div class='hint'>{password_hint}</div>
-        <button class='btn primary wide' type='submit'>{continue_btn}</button>
-      </form>
-      <div class='auth-links'>
-        <a href='/action?cmd=step_servers'>{choose_srv}</a>
+      <div class='seg-row' style='grid-template-columns:repeat(2,1fr);margin-bottom:12px;'>
+        <a class='seg {reg_active}' href='/action?cmd=auth_mode_register'>{tab_reg}</a>
+        <a class='seg {login_active}' href='/action?cmd=auth_mode_login'>{tab_login}</a>
       </div>
+      {status}
+      {form_html}
     </div>
   </section>
 </div>",
@@ -2613,25 +2823,24 @@ impl DesktopGuiServer {
                 "Мессенджер без номера телефона и почты.",
                 "Messenger with no phone number or email required."
             ),
-            pt1 = self.tr("Локальный профиль на устройстве", "Local profile on your device"),
-            pt2 = self.tr("Обмен сообщениями через выбранный узел", "Messaging over your chosen server"),
-            pt3 = self.tr("Без рекламы и аналитики", "No ads and no analytics"),
+            pt1 = self.tr("Регистрация и вход только по логину и паролю", "Register and sign in with username and password only"),
+            pt2 = self.tr("Доступ к чатам только после авторизации", "Chat access requires an authenticated account"),
+            pt3 = self.tr("Скрытый Anycast-туннель без раскрытия IP вашего ПК", "Hidden Anycast tunnel without exposing your PC's IP"),
             steps = Self::render_step_dots(1),
             actions = self.render_top_actions(),
             step_label = self.tr("Шаг 1 из 3", "Step 1 of 3"),
             heading = self.tr("① Сейф Аккаунта", "① Account Vault"),
-            lead = self.tr("Создайте локальный профиль.", "Create a local profile."),
+            lead = if is_login {
+                self.tr("Войдите в свой аккаунт Aegis.", "Sign in to your Aegis account.")
+            } else {
+                self.tr("Зарегистрируйте аккаунт для доступа к чатам.", "Register an account to access chats.")
+            },
+            reg_active = reg_active,
+            login_active = login_active,
+            tab_reg = self.tr("Регистрация", "Register"),
+            tab_login = self.tr("Вход", "Sign in"),
             status = self.render_status_banner(),
-            login_lbl = self.tr("Логин", "Username"),
-            nick = html_escape(&self.state.onboarding_nickname),
-            gen_nick = html_escape(s.nickname_generate_btn),
-            name_lbl = self.tr("Имя", "Display name"),
-            default_alias = self.tr("Призрак Сети", "Network Ghost"),
-            pwd_lbl = self.tr("Пароль", "Password"),
-            pwd_ph = self.tr("Введите пароль", "Enter password"),
-            password_hint = html_escape(s.password_policy_hint),
-            continue_btn = self.tr("Продолжить", "Continue"),
-            choose_srv = self.tr("Выбрать сервер →", "Choose server →"),
+            form_html = form_html,
         )
     }
 
@@ -2916,10 +3125,11 @@ impl DesktopGuiServer {
                 .enumerate()
                 .map(|(idx, acc)| {
                     format!(
-                        "<div class='account-row'>
+                        "<a class='account-row' href='/action?cmd=switch_account&amp;idx={idx}'>
   <span class='status-dot {dot}'></span>
   <div class='account-meta'><b>{name}</b><div class='muted'>@{nick}</div></div>
-</div>",
+</a>",
+                        idx = idx,
                         dot = if idx == self.state.accounts.active_index {
                             "online"
                         } else {
@@ -3027,6 +3237,9 @@ impl DesktopGuiServer {
     <div class='panel'>
       <div class='section-title'>{profiles_sum}</div>
       {accounts}
+      <div class='actions-row wrap'>
+        <a class='btn ghost small' href='/action?cmd=logout'>{logout_btn}</a>
+      </div>
     </div>
     <div class='panel'>
       <div class='section-title'>{theme_sum}</div>
@@ -3075,6 +3288,7 @@ impl DesktopGuiServer {
             ttl_1h_lbl = self.tr("1 час", "1 hour"),
             profiles_sum = self.tr("Профили", "Profiles"),
             accounts = accounts_html,
+            logout_btn = self.tr("Выйти из аккаунта", "Log out"),
             theme_sum = self.tr("Язык и управление", "Language & Controls"),
             wipe_btn = self.tr("Стереть данные", "Wipe data"),
         )
@@ -3093,8 +3307,100 @@ impl DesktopGuiServer {
         {
             return;
         }
+        if self.state.auth_gate_enabled
+            && !self.state.is_authenticated
+            && !matches!(
+                cmd.as_str(),
+                "lang_ru"
+                    | "lang_en"
+                    | "gen_nick"
+                    | "auth_mode_register"
+                    | "auth_mode_login"
+                    | "login_account"
+                    | "signin_account"
+                    | "panic"
+            )
+        {
+            self.state.current_screen = Screen::Onboarding;
+            self.state.status_banner = self
+                .tr(
+                    "Сначала зарегистрируйтесь или войдите в аккаунт.",
+                    "Please register or sign in to an account first.",
+                )
+                .to_owned();
+            return;
+        }
         let is_en = self.state.locale == Locale::En;
         match cmd.as_str() {
+            "auth_mode_register" => {
+                self.state.auth_tab_login = false;
+                self.state.current_screen = Screen::Onboarding;
+                self.state.status_banner.clear();
+            }
+            "auth_mode_login" => {
+                self.state.auth_tab_login = true;
+                self.state.current_screen = Screen::Onboarding;
+                self.state.status_banner.clear();
+            }
+            "logout" => {
+                self.state.is_authenticated = false;
+                self.state.auth_tab_login = true;
+                self.state.current_screen = Screen::Onboarding;
+                self.state.status_banner = self
+                    .tr("Вы вышли из аккаунта.", "Signed out of your account.")
+                    .to_owned();
+            }
+            "switch_account" => {
+                if let Some(idx_str) = extract_query_param(query, "idx") {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        if idx < self.state.accounts.profiles.len() {
+                            self.state.accounts.active_index = idx;
+                            let name = self.state.accounts.profiles[idx].display_name.clone();
+                            self.state.status_banner = if is_en {
+                                format!("Active profile: {name}.")
+                            } else {
+                                format!("Активный профиль: {name}.")
+                            };
+                        }
+                    }
+                }
+            }
+            "signin_account" => {
+                let nick = extract_query_param(query, "nick")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase();
+                let pwd = extract_query_param(query, "pwd").unwrap_or_default();
+                if nick.is_empty() || pwd.is_empty() {
+                    self.state.status_banner = self
+                        .tr("Введите логин и пароль.", "Enter your username and password.")
+                        .to_owned();
+                    return;
+                }
+                let candidate = DesktopAppState::compute_password_verifier(&nick, &pwd);
+                let matched_idx = self
+                    .state
+                    .account_verifiers
+                    .iter()
+                    .position(|(n, _, v)| {
+                        n.eq_ignore_ascii_case(&nick) && constant_time_eq(v, &candidate)
+                    });
+                if let Some(idx) = matched_idx {
+                    if idx < self.state.accounts.profiles.len() {
+                        self.state.accounts.active_index = idx;
+                    }
+                    self.state.is_authenticated = true;
+                    self.state.current_screen = Screen::ChatWorkspace;
+                    self.state.status_banner.clear();
+                } else {
+                    self.state.status_banner = self
+                        .tr(
+                            "Неверный логин или пароль.",
+                            "Invalid username or password.",
+                        )
+                        .to_owned();
+                }
+            }
             "step_account" => {
                 self.state.current_screen = Screen::Onboarding;
                 self.state.status_banner.clear();
@@ -3318,6 +3624,14 @@ impl DesktopGuiServer {
                         .to_owned();
                     return;
                 };
+                if let Some(pwd2) = extract_query_param(query, "pwd2").filter(|s| !s.is_empty()) {
+                    if !constant_time_eq(pwd.as_bytes(), pwd2.as_bytes()) {
+                        self.state.status_banner = self
+                            .tr("Пароли не совпадают.", "Passwords do not match.")
+                            .to_owned();
+                        return;
+                    }
+                }
                 let next_idx = (self.state.accounts.profiles.len() + 1) as u8;
                 match self.state.accounts.create_account(
                     [next_idx; 16],
@@ -3326,8 +3640,19 @@ impl DesktopGuiServer {
                     &pwd,
                 ) {
                     Ok(_) => {
+                        let verifier =
+                            DesktopAppState::compute_password_verifier(nick.trim(), &pwd);
+                        self.state.account_verifiers.push((
+                            nick.trim().to_ascii_lowercase(),
+                            alias.trim().to_owned(),
+                            verifier,
+                        ));
+                        self.state.accounts.active_index =
+                            self.state.accounts.profiles.len().saturating_sub(1);
+                        self.state.is_authenticated = true;
                         self.state.recovery_phrase_preview = None;
                         self.state.current_screen = Screen::ServerLauncher;
+                        self.state.save_desktop_vault();
                         self.state.status_banner = if is_en {
                             format!("Signed in as {} ({}).", alias.trim(), nick.trim())
                         } else {
@@ -3362,7 +3687,14 @@ impl DesktopGuiServer {
                     .map(|s| s.trim().to_owned())
                     .filter(|s| !s.is_empty());
                 let code = extract_query_param(query, "code")
-                    .map(|s| s.trim().to_owned())
+                    .map(|s| {
+                        s.trim()
+                            .strip_prefix("queue://")
+                            .or_else(|| s.trim().strip_prefix("aegis://"))
+                            .unwrap_or(s.trim())
+                            .trim()
+                            .to_owned()
+                    })
                     .filter(|s| !s.is_empty());
                 if let (Some(t), Some(c)) = (title, code) {
                     if self.state.chats.len() < 64 {
@@ -3388,6 +3720,7 @@ impl DesktopGuiServer {
                         self.state.active_chat_index = self.state.chats.len() - 1;
                         self.state.leak_guard_modal = None;
                         self.state.current_screen = Screen::ChatWorkspace;
+                        self.state.save_desktop_vault();
                         self.state.status_banner = if is_en {
                             format!("Chat with {t} opened.")
                         } else {
@@ -4768,12 +5101,42 @@ mod tests {
         gui.handle_command("cmd=step_account");
         let ob_html = gui.render_html();
         assert!(ob_html.contains("① Account Vault"));
-        assert!(ob_html.contains("Create a local profile."));
+        assert!(ob_html.contains("Register an account to access chats."));
 
         gui.handle_command("cmd=step_servers");
         let srv_html = gui.render_html();
         assert!(srv_html.contains("② Servers & Relays"));
         assert!(srv_html.contains("Network Lock (Kill Switch)"));
+
+        // Verify mandatory authentication gate: unauthenticated user cannot enter chats or servers
+        let mut gated = DesktopAppState::new(Locale::Ru);
+        gated.enable_auth_gate();
+        let mut gated_gui = DesktopGuiServer::new(0, gated);
+        gated_gui.handle_command("cmd=step_chats");
+        assert_eq!(gated_gui.state.current_screen, Screen::Onboarding);
+        assert!(!gated_gui.state.is_authenticated);
+
+        // Register account with matching passwords -> authenticates and opens ServerLauncher
+        gated_gui.handle_command(
+            "cmd=login_account&nick=shadow-fox-1024&alias=Shadow&pwd=AEGis%23StrongPass99!&pwd2=AEGis%23StrongPass99!",
+        );
+        assert!(gated_gui.state.is_authenticated);
+        assert_eq!(gated_gui.state.current_screen, Screen::ServerLauncher);
+
+        // Log out -> locks session back to Onboarding (Sign In tab)
+        gated_gui.handle_command("cmd=logout");
+        assert!(!gated_gui.state.is_authenticated);
+        assert_eq!(gated_gui.state.current_screen, Screen::Onboarding);
+        assert!(gated_gui.state.auth_tab_login);
+
+        // Wrong password rejected
+        gated_gui.handle_command("cmd=signin_account&nick=shadow-fox-1024&pwd=WrongPassword");
+        assert!(!gated_gui.state.is_authenticated);
+
+        // Correct password signs in and opens ChatWorkspace
+        gated_gui.handle_command("cmd=signin_account&nick=shadow-fox-1024&pwd=AEGis%23StrongPass99!");
+        assert!(gated_gui.state.is_authenticated);
+        assert_eq!(gated_gui.state.current_screen, Screen::ChatWorkspace);
     }
 
     #[test]

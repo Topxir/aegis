@@ -7,7 +7,7 @@
 
 use aegis_ffi::Locale;
 use aegis_ui_desktop::{
-    run_automated_demo_walkthrough, DesktopAppState, DesktopGuiServer, DesktopUiError, Screen,
+    run_automated_demo_walkthrough, DesktopAppState, DesktopGuiServer, DesktopUiError,
 };
 use std::env;
 use std::net::{TcpListener, TcpStream};
@@ -104,7 +104,7 @@ fn launch_gui_server(
         preferred_port
     };
     let mut state = DesktopAppState::new(Locale::Ru);
-    state.current_screen = Screen::Onboarding;
+    state.enable_auth_gate();
     let url = format!("http://127.0.0.1:{port}");
 
     let mut server = DesktopGuiServer::new(port, state);
