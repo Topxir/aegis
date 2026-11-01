@@ -90,7 +90,13 @@ class AegisRustBridge(private val context: Context) {
         val messages: MutableList<ChatMessageUi>,
         var peerVerified: Boolean = true,
         var keyChangeWarning: String? = null,
-        var defaultTtlSeconds: Int? = 3600
+        var defaultTtlSeconds: Int? = null
+    )
+
+    data class DirectoryEntryUi(
+        val kind: String,
+        val slug: String,
+        val title: String
     )
 
     var locale: AppLocale = AppLocale.RU
@@ -173,6 +179,13 @@ class AegisRustBridge(private val context: Context) {
     val chats = mutableListOf<ChatItemUi>()
     private val redeemedSupporterTokens = mutableSetOf<String>()
     private val seenCapsuleHexPrefixes = mutableSetOf<String>()
+    val seenAccountMsgIds = mutableSetOf<String>()
+    var outboundCapsuleSeq: Long = (System.currentTimeMillis() % 100000L)
+    var lastPingMs: Int? = 38
+    val directoryResults = mutableListOf(
+        DirectoryEntryUi("channel", "aegis_news", "Новости Aegis"),
+        DirectoryEntryUi("group", "aegis_lobby", "Общий чат Aegis")
+    )
     var blindRelayEndpoint: String = ""
     var socks5ProxyEndpoint: String = ""
 
@@ -209,11 +222,26 @@ class AegisRustBridge(private val context: Context) {
     private fun tr(ru: String, en: String): String = if (locale == AppLocale.EN) en else ru
 
     fun computePasswordVerifierHex(loginNickname: String, password: String): String {
-        val material = "aegis-account-auth-v1:${loginNickname.trim().lowercase()}:$password"
+        val material = "aegis-account-auth-v1:${loginNickname.trim().trimStart('@').lowercase()}:$password"
         val (_, key, _) = deriveChannelKeyAndQueue(material)
         val hex = bytesToHex(key)
         key.fill(0)
         return hex
+    }
+
+    fun dmPairTag(userA: String, userB: String): String {
+        val a = userA.trim().trimStart('@').lowercase()
+        val b = userB.trim().trimStart('@').lowercase()
+        return if (a <= b) "dm://$a:$b" else "dm://$b:$a"
+    }
+
+    fun activeAccountIdentity(): Pair<String, String> {
+        val acc = accounts.getOrNull(activeAccountIndex)
+        return if (acc != null) {
+            acc.loginNickname.trim().trimStart('@').lowercase() to acc.displayName.trim()
+        } else {
+            "user" to tr("Пользователь", "User")
+        }
     }
 
     fun saveWorkspaceToPrefs() {
@@ -237,6 +265,7 @@ class AegisRustBridge(private val context: Context) {
                 .edit()
                 .putString("saved_accounts_v2", accSerialized)
                 .putString("saved_chats_v2", chatLines.joinToString("\n"))
+                .putString("seen_msg_ids_v2", synchronized(seenAccountMsgIds) { seenAccountMsgIds.joinToString("\n") })
                 .putInt("active_account_idx", activeAccountIndex)
                 .putBoolean("is_authenticated", isAuthenticated)
                 .putInt("active_server_idx", activeServerIndex)
@@ -277,9 +306,16 @@ class AegisRustBridge(private val context: Context) {
             }
             activeAccountIndex = prefs.getInt("active_account_idx", 0).coerceIn(0, (accounts.size - 1).coerceAtLeast(0))
             isAuthenticated = prefs.getBoolean("is_authenticated", false) && accounts.isNotEmpty()
+            val seenRaw = prefs.getString("seen_msg_ids_v2", "") ?: ""
+            if (seenRaw.isNotBlank()) {
+                synchronized(seenAccountMsgIds) {
+                    seenRaw.lines().filter { it.isNotBlank() }.forEach { seenAccountMsgIds.add(it) }
+                }
+            }
 
             val chatsRaw = prefs.getString("saved_chats_v2", "") ?: ""
             if (chatsRaw.isNotBlank()) {
+                val clearedSeedTags = mutableSetOf<String>()
                 chatsRaw.lines().forEach { line ->
                     val parts = line.split('\t')
                     if (parts.firstOrNull() == "C" && parts.size >= 4) {
@@ -293,7 +329,7 @@ class AegisRustBridge(private val context: Context) {
                                     title = title,
                                     queueTag = qTag,
                                     isSavedNotes = false,
-                                    verifiedSupportBadge = false,
+                                    verifiedSupportBadge = qTag.startsWith("channel://"),
                                     perChatPin = null,
                                     isLocked = false,
                                     messages = mutableListOf()
@@ -304,14 +340,19 @@ class AegisRustBridge(private val context: Context) {
                         val qTag = parts[1]
                         val outgoing = parts[2] == "1"
                         val text = String(android.util.Base64.decode(parts[3], android.util.Base64.NO_WRAP), Charsets.UTF_8)
-                        chats.find { it.queueTag == qTag }?.messages?.add(
-                            ChatMessageUi(
-                                outgoing = outgoing,
-                                text = text,
-                                paddedBucketBytes = 256,
-                                ttlSeconds = 3600
+                        chats.find { it.queueTag == qTag }?.let { chat ->
+                            if (clearedSeedTags.add(qTag)) {
+                                chat.messages.clear()
+                            }
+                            chat.messages.add(
+                                ChatMessageUi(
+                                    outgoing = outgoing,
+                                    text = text,
+                                    paddedBucketBytes = 256,
+                                    ttlSeconds = null
+                                )
                             )
-                        )
+                        }
                     }
                 }
             }
@@ -835,7 +876,7 @@ class AegisRustBridge(private val context: Context) {
     }
 
     /**
-     * Registers an isolated local account profile and signs the user in.
+     * Registers an isolated local account profile, saves the session on disk, and registers `@username` in the server directory.
      */
     fun registerAccount(
         loginNickname: String,
@@ -843,9 +884,15 @@ class AegisRustBridge(private val context: Context) {
         password: String,
         confirmPassword: String? = null
     ): Result<AccountSlotUi> {
-        val cleanNick = validateNickname(loginNickname.trim().lowercase()).getOrElse {
-            return Result.failure(it)
+        val rawNick = loginNickname.trim().trimStart('@').lowercase()
+        if (rawNick.length < 2 || rawNick.length > 32 || rawNick.any { it.isWhitespace() }) {
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Введите логин (от 2 до 32 символов без пробелов)", "Enter a username (2..32 chars, no spaces)")
+                )
+            )
         }
+        val cleanNick = rawNick
         if (displayName.isBlank()) {
             return Result.failure(
                 IllegalArgumentException(
@@ -853,7 +900,14 @@ class AegisRustBridge(private val context: Context) {
                 )
             )
         }
-        if (confirmPassword != null && !constantTimeEquals(password, confirmPassword)) {
+        if (password.length < 4) {
+            return Result.failure(
+                IllegalArgumentException(
+                    tr("Пароль должен быть не короче 4 символов", "Password must be at least 4 characters")
+                )
+            )
+        }
+        if (confirmPassword != null && confirmPassword.isNotEmpty() && !constantTimeEquals(password, confirmPassword)) {
             return Result.failure(
                 IllegalArgumentException(
                     tr("Пароли не совпадают", "Passwords do not match")
@@ -874,9 +928,7 @@ class AegisRustBridge(private val context: Context) {
                 )
             )
         }
-        val score = validateStrictPassword(password, cleanNick).getOrElse {
-            return Result.failure(it)
-        }
+        val score = validateStrictPassword(password, cleanNick).getOrDefault(85)
         val verifierHex = computePasswordVerifierHex(cleanNick, password)
         val slot = AccountSlotUi(
             slotIndex = accounts.size + 1,
@@ -889,6 +941,7 @@ class AegisRustBridge(private val context: Context) {
         activeAccountIndex = accounts.lastIndex
         isAuthenticated = true
         saveWorkspaceToPrefs()
+        registerInServerDirectoryAsync("user", cleanNick, displayName.trim())
         return Result.success(slot)
     }
 
@@ -896,7 +949,7 @@ class AegisRustBridge(private val context: Context) {
      * Authenticates an existing account by username and password.
      */
     fun loginAccount(loginNickname: String, password: String): Result<AccountSlotUi> {
-        val cleanNick = loginNickname.trim().lowercase()
+        val cleanNick = loginNickname.trim().trimStart('@').lowercase()
         if (cleanNick.isEmpty() || password.isEmpty()) {
             return Result.failure(
                 IllegalArgumentException(
@@ -928,46 +981,185 @@ class AegisRustBridge(private val context: Context) {
     }
 
     /**
-     * Creates a new cross-border E2EE chat channel with a shared channel code so two users in any countries can message each other.
+     * Opens or creates a 1:1 direct message chat with `@peerUsername` without requiring a manual channel code.
      */
-    fun createCustomChannelChat(contactTitle: String, channelCode: String): Result<Int> {
-        val cleanTitle = contactTitle.trim()
-        val cleanCode = normalizeChannelCode(channelCode)
-        if (cleanTitle.isEmpty() || cleanCode.isEmpty()) {
+    fun openDmChat(peerUsername: String, peerDisplayName: String? = null): Result<Int> {
+        val peer = peerUsername.trim().trimStart('@').lowercase()
+        if (peer.isEmpty()) {
             return Result.failure(
-                IllegalArgumentException(
-                    tr("Укажите имя собеседника и код канала", "Enter contact name and channel code")
-                )
+                IllegalArgumentException(tr("Укажите @логин собеседника", "Enter @username"))
             )
+        }
+        val (myNick, _) = activeAccountIdentity()
+        val tag = dmPairTag(myNick, peer)
+        val existingIdx = chats.indexOfFirst { it.queueTag == tag }
+        if (existingIdx >= 0) {
+            return Result.success(existingIdx)
         }
         if (chats.size >= 64) {
-            return Result.failure(
-                IllegalStateException(
-                    tr("Достигнут лимит открытых чатов", "Chat limit reached")
-                )
-            )
+            return Result.failure(IllegalStateException(tr("Достигнут лимит чатов", "Chat limit reached")))
         }
-        val tag = "queue://$cleanCode"
-        val newChat = ChatItemUi(
-            chatIdHex = "ch-${chats.size + 10}",
-            title = cleanTitle,
-            queueTag = tag,
-            isSavedNotes = false,
-            verifiedSupportBadge = false,
-            perChatPin = null,
-            isLocked = false,
-            messages = mutableListOf(
-                ChatMessageUi(
-                    outgoing = false,
-                    text = tr("Чат создан.", "Chat created."),
-                    paddedBucketBytes = 256,
-                    ttlSeconds = 3600
-                )
+        val label = if (!peerDisplayName.isNullOrBlank() && !peerDisplayName.equals(peer, ignoreCase = true)) {
+            "💬 ${peerDisplayName.trim()} (@$peer)"
+        } else {
+            "💬 @$peer"
+        }
+        chats.add(
+            ChatItemUi(
+                chatIdHex = "dm-${chats.size + 10}",
+                title = label,
+                queueTag = tag,
+                isSavedNotes = false,
+                verifiedSupportBadge = false,
+                perChatPin = null,
+                isLocked = false,
+                messages = mutableListOf()
             )
         )
-        chats.add(newChat)
         saveWorkspaceToPrefs()
         return Result.success(chats.lastIndex)
+    }
+
+    /**
+     * Creates a group chat and invites `@members` automatically via their personal discovery inboxes.
+     */
+    fun createGroupEasy(groupTitle: String, membersCsv: String): Result<Int> {
+        val t = groupTitle.trim()
+        if (t.isEmpty()) {
+            return Result.failure(IllegalArgumentException(tr("Введите название группы", "Enter a group name")))
+        }
+        val rawSlug = t.lowercase().map { if (it in 'a'..'z' || it in '0'..'9') it else '_' }.joinToString("").trim('_')
+        val cleanSlug = if (rawSlug.length >= 2) rawSlug else "grp_${chats.size + 1}"
+        val tag = "group://$cleanSlug"
+        val existingIdx = chats.indexOfFirst { it.queueTag == tag }
+        val targetIdx = if (existingIdx >= 0) {
+            existingIdx
+        } else {
+            if (chats.size >= 64) {
+                return Result.failure(IllegalStateException(tr("Достигнут лимит чатов", "Chat limit reached")))
+            }
+            chats.add(
+                ChatItemUi(
+                    chatIdHex = "grp-${chats.size + 15}",
+                    title = "👥 $t (@$cleanSlug)",
+                    queueTag = tag,
+                    isSavedNotes = false,
+                    verifiedSupportBadge = false,
+                    perChatPin = null,
+                    isLocked = false,
+                    messages = mutableListOf()
+                )
+            )
+            chats.lastIndex
+        }
+        registerInServerDirectoryAsync("group", cleanSlug, t)
+        val (myNick, myName) = activeAccountIdentity()
+        val members = membersCsv.split(',', ' ', ';').map { it.trim().trimStart('@').lowercase() }.filter { it.isNotEmpty() && it != myNick }
+        if (members.isNotEmpty()) {
+            Thread {
+                for (mNick in members) {
+                    outboundCapsuleSeq++
+                    val msgId = "inv_${myNick}_$outboundCapsuleSeq"
+                    val inviteTxt = tr("Добавил(а) вас в группу «$t»", "Added you to group \"$t\"")
+                    val wire = "AEGMSG1\t$msgId\t$myNick\t$myName\tgroup\t$cleanSlug\t$t\t$inviteTxt"
+                    sendRawCapsuleSync("inbox://$mNick", wire)
+                }
+            }.start()
+        }
+        saveWorkspaceToPrefs()
+        return Result.success(targetIdx)
+    }
+
+    /**
+     * Creates a public channel (`channel://<slug>`) and registers it in the server directory.
+     */
+    fun createChannelEasy(channelTitle: String, channelSlug: String): Result<Int> {
+        val t = channelTitle.trim()
+        if (t.isEmpty()) {
+            return Result.failure(IllegalArgumentException(tr("Введите название канала", "Enter a channel title")))
+        }
+        val sRaw = channelSlug.trim().trimStart('@').lowercase().filter { it in 'a'..'z' || it in '0'..'9' || it == '_' || it == '-' }
+        val cleanSlug = if (sRaw.length >= 2) sRaw else "ch_${chats.size + 1}"
+        val tag = "channel://$cleanSlug"
+        val existingIdx = chats.indexOfFirst { it.queueTag == tag }
+        val targetIdx = if (existingIdx >= 0) {
+            existingIdx
+        } else {
+            if (chats.size >= 64) {
+                return Result.failure(IllegalStateException(tr("Достигнут лимит чатов", "Chat limit reached")))
+            }
+            chats.add(
+                ChatItemUi(
+                    chatIdHex = "ch-${chats.size + 25}",
+                    title = "📢 $t (@$cleanSlug)",
+                    queueTag = tag,
+                    isSavedNotes = false,
+                    verifiedSupportBadge = true,
+                    perChatPin = null,
+                    isLocked = false,
+                    messages = mutableListOf()
+                )
+            )
+            chats.lastIndex
+        }
+        registerInServerDirectoryAsync("channel", cleanSlug, t)
+        saveWorkspaceToPrefs()
+        return Result.success(targetIdx)
+    }
+
+    /**
+     * Opens a user, group, or channel from the server directory.
+     */
+    fun openDirectoryItem(kind: String, slug: String, title: String): Result<Int> {
+        val cleanSlug = slug.trim().trimStart('@').lowercase()
+        return when (kind) {
+            "group" -> {
+                val tag = "group://$cleanSlug"
+                val idx = chats.indexOfFirst { it.queueTag == tag }
+                if (idx >= 0) Result.success(idx) else {
+                    chats.add(
+                        ChatItemUi(
+                            chatIdHex = "grp-${chats.size + 30}",
+                            title = "👥 $title (@$cleanSlug)",
+                            queueTag = tag,
+                            isSavedNotes = false,
+                            verifiedSupportBadge = false,
+                            perChatPin = null,
+                            isLocked = false,
+                            messages = mutableListOf()
+                        )
+                    )
+                    saveWorkspaceToPrefs()
+                    Result.success(chats.lastIndex)
+                }
+            }
+            "channel" -> {
+                val tag = "channel://$cleanSlug"
+                val idx = chats.indexOfFirst { it.queueTag == tag }
+                if (idx >= 0) Result.success(idx) else {
+                    chats.add(
+                        ChatItemUi(
+                            chatIdHex = "ch-${chats.size + 30}",
+                            title = "📢 $title (@$cleanSlug)",
+                            queueTag = tag,
+                            isSavedNotes = false,
+                            verifiedSupportBadge = true,
+                            perChatPin = null,
+                            isLocked = false,
+                            messages = mutableListOf()
+                        )
+                    )
+                    saveWorkspaceToPrefs()
+                    Result.success(chats.lastIndex)
+                }
+            }
+            else -> openDmChat(cleanSlug, title)
+        }
+    }
+
+    fun createCustomChannelChat(contactTitle: String, channelCode: String): Result<Int> {
+        val peer = channelCode.trim().ifEmpty { contactTitle.trim() }
+        return openDmChat(peer, contactTitle.trim().ifEmpty { null })
     }
 
     /**
@@ -1454,24 +1646,110 @@ class AegisRustBridge(private val context: Context) {
         return sock
     }
 
-    fun sendCapsuleOverNetworkAsync(
-        channelCode: String,
-        plaintext: String,
-        onResult: (Boolean, String) -> Unit
-    ) {
+    private fun serverHostHeader(host: String, port: Int): String {
+        return if (host == "104.21.53.92" || host == "172.67.211.53" || host.equals("freeoasis.space", ignoreCase = true)) {
+            "freeoasis.space"
+        } else {
+            "$host:$port"
+        }
+    }
+
+    fun measureServerPingSync(): Int? {
+        if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) {
+            lastPingMs = null
+            return null
+        }
         val srv = activeServer
-        val frame = sealCrossBorderCapsule(channelCode, plaintext) ?: run {
-            onResult(false, "Ошибка запечатывания капсулы")
-            return
-        }
-        val fpHex = bytesToHex(frame.copyOfRange(0, 32))
-        synchronized(seenCapsuleHexPrefixes) {
-            if (seenCapsuleHexPrefixes.size >= 4096) {
-                seenCapsuleHexPrefixes.firstOrNull()?.let { seenCapsuleHexPrefixes.remove(it) }
+        val t0 = System.nanoTime()
+        return try {
+            Socket().use { sock ->
+                sock.connect(InetSocketAddress(srv.staticIpOrHost, srv.port), 2200)
+                sock.soTimeout = 2200
+                val hostHdr = serverHostHeader(srv.staticIpOrHost, srv.port)
+                val req = "GET /health HTTP/1.1\r\nHost: $hostHdr\r\nUser-Agent: Aegis/0.1\r\nConnection: close\r\n\r\n"
+                sock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+                sock.getOutputStream().flush()
+                val resp = readBoundedHttpResponse(sock, 1024)
+                if (resp.startsWith("HTTP/1.1 200")) {
+                    val ms = ((System.nanoTime() - t0) / 1_000_000L).toInt().coerceAtLeast(1)
+                    lastPingMs = ms
+                    ms
+                } else {
+                    lastPingMs = null
+                    null
+                }
             }
-            seenCapsuleHexPrefixes.add(fpHex)
+        } catch (_: Exception) {
+            lastPingMs = null
+            null
         }
-        val (queueIdBytes, queueKeyCleanup, queueHex) = deriveChannelKeyAndQueue(channelCode)
+    }
+
+    fun registerInServerDirectoryAsync(kind: String, slug: String, title: String) {
+        if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) return
+        val srv = activeServer
+        Thread {
+            try {
+                Socket().use { sock ->
+                    sock.connect(InetSocketAddress(srv.staticIpOrHost, srv.port), 2000)
+                    sock.soTimeout = 2000
+                    val hostHdr = serverHostHeader(srv.staticIpOrHost, srv.port)
+                    val kEnc = java.net.URLEncoder.encode(kind, "UTF-8")
+                    val sEnc = java.net.URLEncoder.encode(slug.trim().trimStart('@').lowercase(), "UTF-8")
+                    val tEnc = java.net.URLEncoder.encode(title.trim(), "UTF-8")
+                    val req = "POST /api/v1/dir/register?kind=$kEnc&slug=$sEnc&title=$tEnc HTTP/1.1\r\n" +
+                        "Host: $hostHdr\r\nUser-Agent: Aegis/0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    sock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+                    sock.getOutputStream().flush()
+                }
+            } catch (_: Exception) {
+            }
+        }.start()
+    }
+
+    fun searchServerDirectoryAsync(query: String, onDone: () -> Unit = {}) {
+        if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) return
+        val srv = activeServer
+        val mainHandler = Handler(Looper.getMainLooper())
+        Thread {
+            try {
+                Socket().use { sock ->
+                    sock.connect(InetSocketAddress(srv.staticIpOrHost, srv.port), 2000)
+                    sock.soTimeout = 2000
+                    val hostHdr = serverHostHeader(srv.staticIpOrHost, srv.port)
+                    val qEnc = java.net.URLEncoder.encode(query.trim().trimStart('@'), "UTF-8")
+                    val req = "GET /api/v1/dir/search?q=$qEnc HTTP/1.1\r\nHost: $hostHdr\r\nUser-Agent: Aegis/0.1\r\nConnection: close\r\n\r\n"
+                    sock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+                    sock.getOutputStream().flush()
+                    val resp = readBoundedHttpResponse(sock, 32768)
+                    if (resp.startsWith("HTTP/1.1 200")) {
+                        val body = resp.substringAfter("\r\n\r\n", "")
+                        val parsed = mutableListOf<DirectoryEntryUi>()
+                        body.lines().forEach { line ->
+                            val parts = line.split('\t')
+                            if (parts.size >= 3) {
+                                parsed.add(DirectoryEntryUi(parts[0], parts[1], parts[2]))
+                            }
+                        }
+                        if (parsed.isNotEmpty()) {
+                            mainHandler.post {
+                                directoryResults.clear()
+                                directoryResults.addAll(parsed)
+                                onDone()
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }.start()
+    }
+
+    fun sendRawCapsuleSync(queueTag: String, wireText: String): Boolean {
+        if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) return false
+        val srv = activeServer
+        val frame = sealCrossBorderCapsule(queueTag, wireText) ?: return false
+        val (queueIdBytes, queueKeyCleanup, queueHex) = deriveChannelKeyAndQueue(queueTag)
         val readTokBytes = deriveQueueReadTokenBytes(queueIdBytes, queueKeyCleanup)
         val authHashHex = computeInboxAuthHashHex(readTokBytes)
         readTokBytes.fill(0)
@@ -1480,80 +1758,269 @@ class AegisRustBridge(private val context: Context) {
         val bodyHex = bytesToHex(frame)
         val relayClean = blindRelayEndpoint.trim().removePrefix("aegis://")
         val socksClean = socks5ProxyEndpoint.trim().removePrefix("socks5://").removePrefix("socks5h://")
-        val mainHandler = Handler(Looper.getMainLooper())
+        return try {
+            val connectHost: String
+            val connectPort: Int
+            val pathAndQuery: String
+            val expectMarker: String
+            if (relayClean.isNotEmpty() && relayClean.contains(':')) {
+                val idx = relayClean.lastIndexOf(':')
+                connectHost = relayClean.substring(0, idx).trim()
+                connectPort = relayClean.substring(idx + 1).trim().toIntOrNull() ?: 8443
+                pathAndQuery = "/api/v1/queue/relay?target=${srv.staticIpOrHost}:${srv.port}&queue=$queueHex&auth_hash=$authHashHex"
+                expectMarker = "\"relayed\""
+            } else {
+                connectHost = srv.staticIpOrHost
+                connectPort = srv.port
+                pathAndQuery = "/api/v1/queue/send?queue=$queueHex&auth_hash=$authHashHex"
+                expectMarker = "\"queued\""
+            }
+            val sock = if (socksClean.isNotEmpty() && socksClean.contains(':')) {
+                val sIdx = socksClean.lastIndexOf(':')
+                val pHost = socksClean.substring(0, sIdx).trim()
+                val pPort = socksClean.substring(sIdx + 1).trim().toIntOrNull() ?: 9050
+                connectViaSocks5h(pHost, pPort, connectHost, connectPort, queueHex)
+            } else {
+                Socket().apply {
+                    connect(InetSocketAddress(connectHost, connectPort), 2500)
+                    soTimeout = 2500
+                }
+            }
+            sock.use { activeSock ->
+                val hostHdr = serverHostHeader(connectHost, connectPort)
+                val req = "POST $pathAndQuery HTTP/1.1\r\n" +
+                    "Host: $hostHdr\r\n" +
+                    "User-Agent: Aegis/0.1\r\n" +
+                    "Content-Type: text/plain\r\n" +
+                    "Content-Length: ${bodyHex.length}\r\n" +
+                    "Connection: close\r\n\r\n$bodyHex"
+                activeSock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+                activeSock.getOutputStream().flush()
+                val resp = readBoundedHttpResponse(activeSock)
+                resp.startsWith("HTTP/1.1 200") && resp.contains(expectMarker)
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
 
-        Thread {
-            try {
-                if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) {
-                    mainHandler.post {
-                        onResult(false, "⛔ Отправка заблокирована Kill Switch")
-                    }
-                    return@Thread
+    private fun pollRawCapsulesSync(queueTag: String): List<Pair<String, Int>> {
+        if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) return emptyList()
+        val srv = activeServer
+        val (queueIdBytes, queueKeyCleanup, queueHex) = deriveChannelKeyAndQueue(queueTag)
+        val readTokBytes = deriveQueueReadTokenBytes(queueIdBytes, queueKeyCleanup)
+        val readTokHex = bytesToHex(readTokBytes)
+        readTokBytes.fill(0)
+        queueIdBytes.fill(0)
+        queueKeyCleanup.fill(0)
+        val relayClean = blindRelayEndpoint.trim().removePrefix("aegis://")
+        val socksClean = socks5ProxyEndpoint.trim().removePrefix("socks5://").removePrefix("socks5h://")
+        return try {
+            val connectHost: String
+            val connectPort: Int
+            val pathAndQuery: String
+            if (relayClean.isNotEmpty() && relayClean.contains(':')) {
+                val idx = relayClean.lastIndexOf(':')
+                connectHost = relayClean.substring(0, idx).trim()
+                connectPort = relayClean.substring(idx + 1).trim().toIntOrNull() ?: 8443
+                pathAndQuery = "/api/v1/queue/relay_poll?target=${srv.staticIpOrHost}:${srv.port}&queue=$queueHex&read_token=$readTokHex"
+            } else {
+                connectHost = srv.staticIpOrHost
+                connectPort = srv.port
+                pathAndQuery = "/api/v1/queue/poll?queue=$queueHex&read_token=$readTokHex"
+            }
+            val sock = if (socksClean.isNotEmpty() && socksClean.contains(':')) {
+                val sIdx = socksClean.lastIndexOf(':')
+                val pHost = socksClean.substring(0, sIdx).trim()
+                val pPort = socksClean.substring(sIdx + 1).trim().toIntOrNull() ?: 9050
+                connectViaSocks5h(pHost, pPort, connectHost, connectPort, queueHex)
+            } else {
+                Socket().apply {
+                    connect(InetSocketAddress(connectHost, connectPort), 2500)
+                    soTimeout = 2500
                 }
-                if (srv.isTorOnion && relayClean.isEmpty() && socksClean.isEmpty()) {
-                    mainHandler.post {
-                        onResult(false, "Капсула запечатана (для .onion укажите Blind Relay или SOCKS5h/Orbot)")
-                    }
-                    return@Thread
-                }
-                val connectHost: String
-                val connectPort: Int
-                val pathAndQuery: String
-                val expectMarker: String
-                if (relayClean.isNotEmpty() && relayClean.contains(':')) {
-                    val idx = relayClean.lastIndexOf(':')
-                    connectHost = relayClean.substring(0, idx).trim()
-                    connectPort = relayClean.substring(idx + 1).trim().toIntOrNull() ?: 8443
-                    pathAndQuery = "/api/v1/queue/relay?target=${srv.staticIpOrHost}:${srv.port}&queue=$queueHex&auth_hash=$authHashHex"
-                    expectMarker = "\"relayed\""
-                } else {
-                    connectHost = srv.staticIpOrHost
-                    connectPort = srv.port
-                    pathAndQuery = "/api/v1/queue/send?queue=$queueHex&auth_hash=$authHashHex"
-                    expectMarker = "\"queued\""
-                }
-                val sock = if (socksClean.isNotEmpty() && socksClean.contains(':')) {
-                    val sIdx = socksClean.lastIndexOf(':')
-                    val pHost = socksClean.substring(0, sIdx).trim()
-                    val pPort = socksClean.substring(sIdx + 1).trim().toIntOrNull() ?: 9050
-                    connectViaSocks5h(pHost, pPort, connectHost, connectPort, queueHex)
-                } else {
-                    Socket().apply {
-                        connect(InetSocketAddress(connectHost, connectPort), 2500)
-                        soTimeout = 2500
-                    }
-                }
-                sock.use { activeSock ->
-                    val hostHdr = if (connectHost == "104.21.53.92" || connectHost == "172.67.211.53" || connectHost.equals("freeoasis.space", ignoreCase = true)) {
-                        "freeoasis.space"
-                    } else {
-                        "$connectHost:$connectPort"
-                    }
-                    val req = "POST $pathAndQuery HTTP/1.1\r\n" +
-                        "Host: $hostHdr\r\n" +
-                        "User-Agent: Aegis/0.1\r\n" +
-                        "Content-Type: text/plain\r\n" +
-                        "Content-Length: ${bodyHex.length}\r\n" +
-                        "Connection: close\r\n\r\n$bodyHex"
-                    activeSock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
-                    activeSock.getOutputStream().flush()
-                    val resp = readBoundedHttpResponse(activeSock)
-                    val ok = resp.startsWith("HTTP/1.1 200") && resp.contains(expectMarker)
-                    mainHandler.post {
-                        if (wipedByPanicOrDuress) return@post
-                        if (ok) {
-                            onResult(true, "")
-                        } else {
-                            onResult(false, "Сервер отклонил отправку")
+            }
+            sock.use { activeSock ->
+                val hostHdr = serverHostHeader(connectHost, connectPort)
+                val req = "POST $pathAndQuery HTTP/1.1\r\n" +
+                    "Host: $hostHdr\r\n" +
+                    "User-Agent: Aegis/0.1\r\n" +
+                    "Content-Length: 0\r\n" +
+                    "Connection: close\r\n\r\n"
+                activeSock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+                activeSock.getOutputStream().flush()
+                val resp = readBoundedHttpResponse(activeSock)
+                val decoded = mutableListOf<Pair<String, Int>>()
+                if (resp.startsWith("HTTP/1.1 200")) {
+                    val marker = "\"frames_hex\":["
+                    val idx = resp.indexOf(marker)
+                    if (idx >= 0) {
+                        val after = resp.substring(idx + marker.length)
+                        val endIdx = after.indexOf(']')
+                        if (endIdx >= 0) {
+                            val listStr = after.substring(0, endIdx).trim()
+                            if (listStr.isNotEmpty()) {
+                                listStr.split(',').forEach { token ->
+                                    val hexItem = token.trim().trim('"')
+                                    val raw = hexToBytes(hexItem)
+                                    if (raw != null && raw.size >= 32) {
+                                        val pt = openCrossBorderCapsule(queueTag, raw)
+                                        if (pt != null) {
+                                            decoded.add(pt to raw.size)
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-            } catch (_: Exception) {
+                decoded
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun sendCapsuleOverNetworkAsync(
+        channelCode: String,
+        plaintext: String,
+        onResult: (Boolean, String) -> Unit
+    ) {
+        val (myNick, myName) = activeAccountIdentity()
+        val chatTitle = chats.find { it.queueTag == channelCode }?.title ?: channelCode
+        outboundCapsuleSeq++
+        val msgId = "m_${myNick}_$outboundCapsuleSeq"
+        synchronized(seenAccountMsgIds) {
+            seenAccountMsgIds.add("$myNick:$msgId")
+        }
+        val (kind, slug) = when {
+            channelCode.startsWith("dm://") -> {
+                val rest = channelCode.removePrefix("dm://")
+                val peer = rest.split(':').firstOrNull { it != myNick } ?: rest
+                "dm" to peer
+            }
+            channelCode.startsWith("group://") -> "group" to channelCode.removePrefix("group://")
+            channelCode.startsWith("channel://") -> "channel" to channelCode.removePrefix("channel://")
+            else -> "dm" to channelCode
+        }
+        val wire = "AEGMSG1\t$msgId\t$myNick\t$myName\t$kind\t$slug\t$chatTitle\t$plaintext"
+        saveWorkspaceToPrefs()
+        val mainHandler = Handler(Looper.getMainLooper())
+        Thread {
+            val ok = sendRawCapsuleSync(channelCode, wire)
+            if (kind == "dm" && slug.isNotEmpty() && !slug.contains(':')) {
+                sendRawCapsuleSync("inbox://$slug", wire)
+            }
+            mainHandler.post {
+                if (!wipedByPanicOrDuress) {
+                    onResult(ok, if (ok) "" else tr("Сохранено локально (сервер недоступен)", "Saved locally (server unreachable)"))
+                }
+            }
+        }.start()
+    }
+
+    fun syncAllChatsAndInboxAsync(onResult: (Int, Int?) -> Unit) {
+        val mainHandler = Handler(Looper.getMainLooper())
+        val (myNick, _) = activeAccountIdentity()
+        val openTags = chats.filter { !it.isSavedNotes && !it.isLocked }.map { it.queueTag }
+        Thread {
+            val ping = measureServerPingSync()
+            if (ping == null) {
                 mainHandler.post {
-                    if (!wipedByPanicOrDuress) {
-                        onResult(false, "")
+                    if (!wipedByPanicOrDuress) onResult(0, null)
+                }
+                return@Thread
+            }
+            val inboxItems = if (myNick.isNotEmpty()) {
+                pollRawCapsulesSync("inbox://$myNick")
+            } else {
+                emptyList()
+            }
+            val tagItems = openTags.associateWith { tag -> pollRawCapsulesSync(tag) }
+            mainHandler.post {
+                if (wipedByPanicOrDuress) return@post
+                var totalNew = 0
+                for ((pt, sz) in inboxItems) {
+                    val parts = pt.split('\t', limit = 8)
+                    if (parts.size == 8 && parts[0] == "AEGMSG1") {
+                        val msgId = parts[1]
+                        val senderNick = parts[2].trim().trimStart('@').lowercase()
+                        val senderName = parts[3].trim()
+                        val kind = parts[4]
+                        val roomSlug = parts[5].trim()
+                        val roomTitle = parts[6].trim()
+                        val bodyText = parts[7]
+                        if (senderNick == myNick) continue
+                        val dedupKey = "$myNick:$msgId"
+                        val (targetTag, targetTitle) = when (kind) {
+                            "dm" -> dmPairTag(myNick, senderNick) to "💬 $senderName (@$senderNick)"
+                            "group" -> "group://$roomSlug" to "👥 $roomTitle (@$roomSlug)"
+                            else -> "channel://$roomSlug" to "📢 $roomTitle (@$roomSlug)"
+                        }
+                        if (chats.none { it.queueTag == targetTag }) {
+                            chats.add(
+                                ChatItemUi(
+                                    chatIdHex = "in-${chats.size + 20}",
+                                    title = targetTitle,
+                                    queueTag = targetTag,
+                                    isSavedNotes = false,
+                                    verifiedSupportBadge = kind == "channel",
+                                    perChatPin = null,
+                                    isLocked = false,
+                                    messages = mutableListOf()
+                                )
+                            )
+                        }
+                        val isNew = synchronized(seenAccountMsgIds) { seenAccountMsgIds.add(dedupKey) }
+                        if (isNew) {
+                            chats.find { it.queueTag == targetTag }?.let { chat ->
+                                val disp = if (kind == "dm") bodyText else "$senderName (@$senderNick): $bodyText"
+                                chat.messages.add(
+                                    ChatMessageUi(
+                                        outgoing = false,
+                                        text = disp,
+                                        paddedBucketBytes = sz,
+                                        ttlSeconds = chat.defaultTtlSeconds
+                                    )
+                                )
+                                totalNew++
+                            }
+                        }
                     }
                 }
+                for ((tag, items) in tagItems) {
+                    for ((pt, sz) in items) {
+                        val parts = pt.split('\t', limit = 8)
+                        if (parts.size == 8 && parts[0] == "AEGMSG1") {
+                            val msgId = parts[1]
+                            val senderNick = parts[2].trim().trimStart('@').lowercase()
+                            val senderName = parts[3].trim()
+                            val kind = parts[4]
+                            val bodyText = parts[7]
+                            if (senderNick == myNick) continue
+                            val dedupKey = "$myNick:$msgId"
+                            val isNew = synchronized(seenAccountMsgIds) { seenAccountMsgIds.add(dedupKey) }
+                            if (isNew) {
+                                chats.find { it.queueTag == tag }?.let { chat ->
+                                    val disp = if (kind == "dm") bodyText else "$senderName (@$senderNick): $bodyText"
+                                    chat.messages.add(
+                                        ChatMessageUi(
+                                            outgoing = false,
+                                            text = disp,
+                                            paddedBucketBytes = sz,
+                                            ttlSeconds = chat.defaultTtlSeconds
+                                        )
+                                    )
+                                    totalNew++
+                                }
+                            }
+                        }
+                    }
+                }
+                if (totalNew > 0) {
+                    saveWorkspaceToPrefs()
+                }
+                onResult(totalNew, ping)
             }
         }.start()
     }
@@ -1563,136 +2030,14 @@ class AegisRustBridge(private val context: Context) {
         channelCode: String,
         onResult: (Int, String) -> Unit
     ) {
-        val srv = activeServer
-        val (queueIdBytes, queueKeyCleanup, queueHex) = deriveChannelKeyAndQueue(channelCode)
-        val readTokBytes = deriveQueueReadTokenBytes(queueIdBytes, queueKeyCleanup)
-        val readTokHex = bytesToHex(readTokBytes)
-        readTokBytes.fill(0)
-        queueIdBytes.fill(0)
-        queueKeyCleanup.fill(0)
-        val relayClean = blindRelayEndpoint.trim().removePrefix("aegis://")
-        val socksClean = socks5ProxyEndpoint.trim().removePrefix("socks5://").removePrefix("socks5h://")
-        val mainHandler = Handler(Looper.getMainLooper())
-
-        Thread {
-            try {
-                if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) {
-                    mainHandler.post {
-                        onResult(0, "⛔ Опрос заблокирован Kill Switch")
-                    }
-                    return@Thread
-                }
-                if (srv.isTorOnion && relayClean.isEmpty() && socksClean.isEmpty()) {
-                    mainHandler.post {
-                        onResult(0, "Для опроса .onion узла укажите Blind Relay или SOCKS5h/Orbot")
-                    }
-                    return@Thread
-                }
-                val connectHost: String
-                val connectPort: Int
-                val pathAndQuery: String
-                if (relayClean.isNotEmpty() && relayClean.contains(':')) {
-                    val idx = relayClean.lastIndexOf(':')
-                    connectHost = relayClean.substring(0, idx).trim()
-                    connectPort = relayClean.substring(idx + 1).trim().toIntOrNull() ?: 8443
-                    pathAndQuery = "/api/v1/queue/relay_poll?target=${srv.staticIpOrHost}:${srv.port}&queue=$queueHex&read_token=$readTokHex"
-                } else {
-                    connectHost = srv.staticIpOrHost
-                    connectPort = srv.port
-                    pathAndQuery = "/api/v1/queue/poll?queue=$queueHex&read_token=$readTokHex"
-                }
-                val sock = if (socksClean.isNotEmpty() && socksClean.contains(':')) {
-                    val sIdx = socksClean.lastIndexOf(':')
-                    val pHost = socksClean.substring(0, sIdx).trim()
-                    val pPort = socksClean.substring(sIdx + 1).trim().toIntOrNull() ?: 9050
-                    connectViaSocks5h(pHost, pPort, connectHost, connectPort, queueHex)
-                } else {
-                    Socket().apply {
-                        connect(InetSocketAddress(connectHost, connectPort), 2500)
-                        soTimeout = 2500
-                    }
-                }
-                sock.use { activeSock ->
-                    val hostHdr = if (connectHost == "104.21.53.92" || connectHost == "172.67.211.53" || connectHost.equals("freeoasis.space", ignoreCase = true)) {
-                        "freeoasis.space"
-                    } else {
-                        "$connectHost:$connectPort"
-                    }
-                    val req = "POST $pathAndQuery HTTP/1.1\r\n" +
-                        "Host: $hostHdr\r\n" +
-                        "User-Agent: Aegis/0.1\r\n" +
-                        "Content-Length: 0\r\n" +
-                        "Connection: close\r\n\r\n"
-                    activeSock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
-                    activeSock.getOutputStream().flush()
-                    val resp = readBoundedHttpResponse(activeSock)
-                    val decodedMessages = mutableListOf<Pair<String, Int>>()
-                    if (resp.startsWith("HTTP/1.1 200")) {
-                        val marker = "\"frames_hex\":["
-                        val idx = resp.indexOf(marker)
-                        if (idx >= 0) {
-                            val after = resp.substring(idx + marker.length)
-                            val endIdx = after.indexOf(']')
-                            if (endIdx >= 0) {
-                                val listStr = after.substring(0, endIdx).trim()
-                                if (listStr.isNotEmpty()) {
-                                    listStr.split(',').forEach { token ->
-                                        val hexItem = token.trim().trim('"')
-                                        val raw = hexToBytes(hexItem)
-                                        if (raw != null && raw.size >= 32) {
-                                            val fpHex = bytesToHex(raw.copyOfRange(0, 32))
-                                            val alreadySeen = synchronized(seenCapsuleHexPrefixes) {
-                                                if (seenCapsuleHexPrefixes.contains(fpHex)) {
-                                                    true
-                                                } else {
-                                                    if (seenCapsuleHexPrefixes.size >= 4096) {
-                                                        seenCapsuleHexPrefixes.firstOrNull()?.let { seenCapsuleHexPrefixes.remove(it) }
-                                                    }
-                                                    seenCapsuleHexPrefixes.add(fpHex)
-                                                    false
-                                                }
-                                            }
-                                            if (!alreadySeen) {
-                                                val pt = openCrossBorderCapsule(channelCode, raw)
-                                                if (pt != null) {
-                                                    decodedMessages.add(pt to raw.size)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    mainHandler.post {
-                        if (wipedByPanicOrDuress) return@post
-                        val chat = chats.getOrNull(chatIndex)
-                        if (chat != null && !chat.isLocked && !chat.isSavedNotes) {
-                            decodedMessages.forEach { (pt, sz) ->
-                                chat.messages.add(
-                                    ChatMessageUi(
-                                        outgoing = false,
-                                        text = pt,
-                                        paddedBucketBytes = sz,
-                                        ttlSeconds = chat.defaultTtlSeconds
-                                    )
-                                )
-                            }
-                        }
-                        onResult(
-                            decodedMessages.size,
-                            if (decodedMessages.isNotEmpty()) "Новых сообщений: ${decodedMessages.size}" else "Новых сообщений нет"
-                        )
-                    }
-                }
-            } catch (_: Exception) {
-                mainHandler.post {
-                    if (!wipedByPanicOrDuress) {
-                        onResult(0, "Сервер сейчас недоступен")
-                    }
-                }
+        syncAllChatsAndInboxAsync { newCount, ping ->
+            val msg = when {
+                ping == null -> tr("Сервер сейчас недоступен", "Server is currently offline")
+                newCount > 0 -> tr("Новых сообщений: $newCount", "New messages: $newCount")
+                else -> ""
             }
-        }.start()
+            onResult(newCount, msg)
+        }
     }
 
     private fun ensureHardwareKeystoreWrapperKey(): SecretKey? {
@@ -1773,6 +2118,44 @@ class AegisRustBridge(private val context: Context) {
                     ChatMessageUi(
                         outgoing = true,
                         text = "Заметки хранятся только на этом устройстве.",
+                        paddedBucketBytes = 256,
+                        ttlSeconds = null
+                    )
+                )
+            )
+        )
+        chats.add(
+            ChatItemUi(
+                chatIdHex = "02020202",
+                title = "📢 Новости Aegis (@aegis_news)",
+                queueTag = "channel://aegis_news",
+                isSavedNotes = false,
+                verifiedSupportBadge = true,
+                perChatPin = null,
+                isLocked = false,
+                messages = mutableListOf(
+                    ChatMessageUi(
+                        outgoing = false,
+                        text = "Официальный канал новостей Aegis. Через поиск сверху можно найти людей по @логину, группы и каналы.",
+                        paddedBucketBytes = 256,
+                        ttlSeconds = null
+                    )
+                )
+            )
+        )
+        chats.add(
+            ChatItemUi(
+                chatIdHex = "03030303",
+                title = "👥 Общий чат Aegis (@aegis_lobby)",
+                queueTag = "group://aegis_lobby",
+                isSavedNotes = false,
+                verifiedSupportBadge = false,
+                perChatPin = null,
+                isLocked = false,
+                messages = mutableListOf(
+                    ChatMessageUi(
+                        outgoing = false,
+                        text = "Общая группа Aegis. Напишите сообщение — его увидят все участники.",
                         paddedBucketBytes = 256,
                         ttlSeconds = null
                     )

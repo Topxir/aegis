@@ -103,6 +103,11 @@ fn launch_gui_server(
     } else {
         preferred_port
     };
+    #[cfg(target_os = "windows")]
+    if max_requests.is_none() {
+        ensure_background_tunnel_server();
+    }
+
     let mut state = DesktopAppState::new(Locale::Ru);
     state.enable_auth_gate();
     let url = format!("http://127.0.0.1:{port}");
@@ -114,7 +119,6 @@ fn launch_gui_server(
 
     #[cfg(target_os = "windows")]
     {
-        ensure_background_tunnel_server();
         let server_thread = thread::spawn(move || server.serve_blocking(None));
         if !wait_for_local_port(port, Duration::from_secs(5)) {
             return Err(DesktopUiError::IoError(

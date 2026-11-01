@@ -148,6 +148,7 @@ pub struct FederationServerState {
     queue_auth_hashes: BTreeMap<[u8; 32], [u8; 32]>,
     seen_tunnel_nonces: Vec<[u8; 44]>,
     opaque_records: BTreeMap<[u8; 32], Vec<u8>>,
+    directory_entries: BTreeMap<String, (String, String)>,
     requests_in_window: u32,
     suspicious_burst: bool,
     window_started_unix_secs: u64,
@@ -201,6 +202,15 @@ impl FederationServerState {
         } else {
             server_blinding_salt
         };
+        let mut directory_entries = BTreeMap::new();
+        directory_entries.insert(
+            "channel:aegis_news".to_owned(),
+            ("channel".to_owned(), "Новости Aegis".to_owned()),
+        );
+        directory_entries.insert(
+            "group:aegis_lobby".to_owned(),
+            ("group".to_owned(), "Общий чат Aegis".to_owned()),
+        );
         Self {
             server_blinding_salt: salt,
             queues: BTreeMap::new(),
@@ -208,6 +218,7 @@ impl FederationServerState {
             queue_auth_hashes: BTreeMap::new(),
             seen_tunnel_nonces: Vec::new(),
             opaque_records: BTreeMap::new(),
+            directory_entries,
             requests_in_window: 0,
             suspicious_burst: false,
             window_started_unix_secs: current_unix_seconds(),
@@ -764,6 +775,54 @@ footer {{ margin-top: 2rem; font-size: 0.8rem; color: var(--muted); text-align: 
 </html>"#,
         lang = if is_ru { "ru" } else { "en" }
     )
+}
+
+fn extract_simple_param(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        if k.trim() == key {
+            return Some(percent_decode_param(v.trim()));
+        }
+    }
+    None
+}
+
+fn percent_decode_param(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = match bytes[i + 1] {
+                b'0'..=b'9' => Some(bytes[i + 1] - b'0'),
+                b'a'..=b'f' => Some(bytes[i + 1] - b'a' + 10),
+                b'A'..=b'F' => Some(bytes[i + 1] - b'A' + 10),
+                _ => None,
+            };
+            let lo = match bytes[i + 2] {
+                b'0'..=b'9' => Some(bytes[i + 2] - b'0'),
+                b'a'..=b'f' => Some(bytes[i + 2] - b'a' + 10),
+                b'A'..=b'F' => Some(bytes[i + 2] - b'A' + 10),
+                _ => None,
+            };
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+            out.push(bytes[i]);
+            i += 1;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn parse_queue_id_from_query(query: Option<&str>) -> Option<[u8; 32]> {
@@ -1331,6 +1390,53 @@ pub fn handle_http_request(
                     r#"{"error":"invalid_queue"}"#.to_owned(),
                 ),
             }
+        }
+        ("POST", "/api/v1/dir/register") => {
+            let q = query_opt.unwrap_or("");
+            let kind = extract_simple_param(q, "kind").unwrap_or_else(|| "user".to_owned());
+            let slug = extract_simple_param(q, "slug")
+                .unwrap_or_default()
+                .trim()
+                .trim_start_matches('@')
+                .to_ascii_lowercase();
+            let title = extract_simple_param(q, "title").unwrap_or_else(|| slug.clone());
+            if (kind == "user" || kind == "group" || kind == "channel")
+                && slug.len() >= 2
+                && slug.len() <= 48
+                && slug
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+                && server.directory_entries.len() < 8_192
+            {
+                server.directory_entries.insert(
+                    format!("{kind}:{slug}"),
+                    (kind, title.trim().chars().take(64).collect()),
+                );
+                (200, "application/json", r#"{"status":"registered"}"#.to_owned())
+            } else {
+                (400, "application/json", r#"{"error":"invalid_dir_entry"}"#.to_owned())
+            }
+        }
+        ("GET", "/api/v1/dir/search") => {
+            let q = query_opt
+                .and_then(|qs| extract_simple_param(qs, "q"))
+                .unwrap_or_default()
+                .trim()
+                .trim_start_matches('@')
+                .to_lowercase();
+            let mut out = String::new();
+            let mut count = 0usize;
+            for (key, (kind, title)) in &server.directory_entries {
+                let slug = key.split_once(':').map_or(key.as_str(), |(_, s)| s);
+                if q.is_empty() || slug.contains(&q) || title.to_lowercase().contains(&q) {
+                    out.push_str(&format!("{kind}\t{slug}\t{title}\n"));
+                    count += 1;
+                    if count >= 50 {
+                        break;
+                    }
+                }
+            }
+            (200, "text/plain; charset=utf-8", out)
         }
         ("POST", "/api/v1/tunnel/sealed") => {
             let Ok(wire) = hex_decode_bytes(body.trim()) else {

@@ -58,12 +58,29 @@ fun AegisComposeApp(
     var showAdvancedNetwork by remember { mutableStateOf(false) }
 
     var showNewChatDialog by remember { mutableStateOf(false) }
+    var newChatMode by remember { mutableStateOf("dm") }
     var newChatPeerName by remember { mutableStateOf("") }
     var newChatChannelCode by remember { mutableStateOf("") }
     var searchQuery by remember { mutableStateOf("") }
     var showMenu by remember { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(false) }
     var showPanicConfirm by remember { mutableStateOf(false) }
+
+    LaunchedEffect(bridge.isAuthenticated, activeScreen) {
+        if (bridge.isAuthenticated) {
+            bridge.searchServerDirectoryAsync("") { uiTick++ }
+            while (bridge.isAuthenticated) {
+                bridge.syncAllChatsAndInboxAsync { newCount, _ ->
+                    if (newCount > 0) {
+                        uiTick++
+                    } else {
+                        uiTick++
+                    }
+                }
+                kotlinx.coroutines.delay(2500L)
+            }
+        }
+    }
 
     val currentTick = uiTick
     val isRu = bridge.locale == AegisRustBridge.AppLocale.RU
@@ -382,8 +399,8 @@ fun AegisComposeApp(
                                 )
                                 Text(
                                     tr(
-                                        "Минимум 12 символов, 3 заглавные, цифра и спецсимвол.",
-                                        "At least 12 characters, 3 uppercase letters, a digit and a symbol."
+                                        "Пароль защищает ваш аккаунт (от 4 символов).",
+                                        "Password protects your account (4+ characters)."
                                     ),
                                     color = AegisColors.muted,
                                     fontSize = 11.sp
@@ -400,11 +417,12 @@ fun AegisComposeApp(
                                         ).onSuccess { slot ->
                                             onboardingPassword = ""
                                             confirmPassword = ""
-                                            activeScreen = "STEP_2_SERVERS"
+                                            activeScreen = "STEP_3_CHAT_LIST"
+                                            bridge.syncAllChatsAndInboxAsync { _, _ -> uiTick++ }
                                             applyStatus(
                                                 tr(
-                                                    "Аккаунт ${slot.displayName} зарегистрирован. Выберите сервер.",
-                                                    "Account ${slot.displayName} registered. Select a server."
+                                                    "Вы вошли как ${slot.displayName} (@${slot.loginNickname}).",
+                                                    "Signed in as ${slot.displayName} (@${slot.loginNickname})."
                                                 )
                                             )
                                         }.onFailure { error ->
@@ -803,7 +821,9 @@ fun AegisComposeApp(
                             currentChat.isSavedNotes -> tr("Локальные заметки", "Local notes")
                             bridge.shieldState == AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED ->
                                 tr("Сеть заблокирована", "Network locked")
-                            else -> tr("Канал сообщений", "Message channel")
+                            currentChat.queueTag.startsWith("group://") -> tr("Группа", "Group")
+                            currentChat.queueTag.startsWith("channel://") -> tr("Публичный канал", "Public channel")
+                            else -> tr("Личный чат", "Direct chat")
                         }
                         Column(Modifier.fillMaxSize().imePadding()) {
                             AppTopBar(
@@ -815,29 +835,41 @@ fun AegisComposeApp(
                                 },
                                 onMenu = { showChatMenu = true },
                                 trailing = {
-                                    Text(
-                                        "⟳",
-                                        color = AegisColors.info,
-                                        fontSize = 22.sp,
-                                        modifier = Modifier
-                                            .clickable {
-                                                if (!currentChat.isSavedNotes &&
-                                                    bridge.shieldState ==
-                                                    AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED
-                                                ) {
-                                                    applyStatus(tr("Сеть заблокирована.", "Network is locked."))
-                                                } else {
-                                                    bridge.pollCapsulesOverNetworkAsync(
-                                                        safeIndex,
-                                                        currentChat.queueTag
-                                                    ) { _, syncStatus ->
-                                                        statusBanner = syncStatus
-                                                        uiTick++
-                                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        PingBadge(
+                                            pingMs = if (bridge.shieldState == AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED) null else bridge.lastPingMs,
+                                            isRu = isRu,
+                                            onClick = {
+                                                bridge.syncAllChatsAndInboxAsync { newCount, _ ->
+                                                    if (newCount > 0) statusBanner = tr("Новых сообщений: $newCount", "New messages: $newCount")
+                                                    uiTick++
                                                 }
                                             }
-                                            .padding(8.dp)
-                                    )
+                                        )
+                                        Text(
+                                            "⟳",
+                                            color = AegisColors.info,
+                                            fontSize = 22.sp,
+                                            modifier = Modifier
+                                                .clickable {
+                                                    if (!currentChat.isSavedNotes &&
+                                                        bridge.shieldState ==
+                                                        AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED
+                                                    ) {
+                                                        applyStatus(tr("Сеть заблокирована.", "Network is locked."))
+                                                    } else {
+                                                        bridge.pollCapsulesOverNetworkAsync(
+                                                            safeIndex,
+                                                            currentChat.queueTag
+                                                        ) { _, syncStatus ->
+                                                            statusBanner = syncStatus
+                                                            uiTick++
+                                                        }
+                                                    }
+                                                }
+                                                .padding(8.dp)
+                                        )
+                                    }
                                 }
                             )
                             StatusBanner(statusBanner)
@@ -1122,21 +1154,39 @@ fun AegisComposeApp(
                             subtitle = tr("Мессенджер", "Messenger"),
                             onMenu = { showMenu = true },
                             trailing = {
-                                Text(
-                                    "＋",
-                                    color = AegisColors.accent,
-                                    fontSize = 26.sp,
-                                    modifier = Modifier
-                                        .clickable { showNewChatDialog = true }
-                                        .padding(horizontal = 8.dp, vertical = 2.dp)
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    PingBadge(
+                                        pingMs = if (bridge.shieldState == AegisRustBridge.NetworkShieldState.KILL_SWITCH_BLOCKED) null else bridge.lastPingMs,
+                                        isRu = isRu,
+                                        onClick = {
+                                            bridge.syncAllChatsAndInboxAsync { newCount, _ ->
+                                                if (newCount > 0) statusBanner = tr("Новых сообщений: $newCount", "New messages: $newCount")
+                                                uiTick++
+                                            }
+                                        }
+                                    )
+                                    Text(
+                                        "＋",
+                                        color = AegisColors.accent,
+                                        fontSize = 26.sp,
+                                        modifier = Modifier
+                                            .clickable {
+                                                newChatMode = "dm"
+                                                showNewChatDialog = true
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                                    )
+                                }
                             }
                         )
                         StatusBanner(statusBanner)
                         OutlinedTextField(
                             value = searchQuery,
-                            onValueChange = { searchQuery = it },
-                            placeholder = { Text(tr("Поиск по чатам", "Search chats")) },
+                            onValueChange = {
+                                searchQuery = it
+                                bridge.searchServerDirectoryAsync(it) { uiTick++ }
+                            },
+                            placeholder = { Text(tr("Поиск: @логин, группа, канал...", "Search: @username, group, channel...")) },
                             singleLine = true,
                             keyboardOptions = incognitoKeyboardOptions,
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)
@@ -1149,99 +1199,183 @@ fun AegisComposeApp(
                                 .padding(horizontal = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            SmallChoice(tr("+ Новый чат", "+ New chat")) { showNewChatDialog = true }
+                            SmallChoice(tr("💬 Написать @логин", "💬 Message @user")) {
+                                newChatMode = "dm"
+                                showNewChatDialog = true
+                            }
+                            SmallChoice(tr("👥 Новая группа", "👥 New group")) {
+                                newChatMode = "group"
+                                showNewChatDialog = true
+                            }
+                            SmallChoice(tr("📢 Новый канал", "📢 New channel")) {
+                                newChatMode = "channel"
+                                showNewChatDialog = true
+                            }
                             SmallChoice(if (isRu) "EN" else "RU") { toggleLanguage() }
                         }
 
                         val filter = searchQuery.trim().lowercase()
+                        val cleanFilter = filter.trimStart('@')
                         fun chatMatches(chat: AegisRustBridge.ChatItemUi): Boolean {
                             if (filter.isEmpty()) return true
                             return chat.title.lowercase().contains(filter) ||
+                                chat.queueTag.lowercase().contains(cleanFilter) ||
                                 (!chat.isLocked && chat.messages.any { it.text.lowercase().contains(filter) })
                         }
-                        val hasVisibleChats = bridge.chats.any(::chatMatches)
-
-                        if (!hasVisibleChats) {
-                            Column(
-                                modifier = Modifier.weight(1f).fillMaxWidth(),
-                                verticalArrangement = Arrangement.Center,
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Text("⌕", fontSize = 40.sp, color = AegisColors.muted)
-                                Text(
-                                    tr("Ничего не найдено", "Nothing found"),
-                                    color = AegisColors.text,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    tr("Измените запрос или создайте новый чат.", "Try a different query or create a new chat."),
-                                    color = AegisColors.muted,
-                                    fontSize = 12.sp
-                                )
+                        val dirMatches = if (cleanFilter.isNotEmpty()) {
+                            bridge.directoryResults.filter {
+                                it.slug.lowercase().contains(cleanFilter) || it.title.lowercase().contains(filter)
                             }
                         } else {
-                            LazyColumn(
-                                modifier = Modifier.weight(1f),
-                                contentPadding = PaddingValues(vertical = 4.dp)
-                            ) {
-                                itemsIndexed(bridge.chats) { actualIndex, chat ->
-                                    if (!chatMatches(chat)) return@itemsIndexed
-                                    val preview = if (chat.isLocked) {
-                                        tr("Закрыто PIN-кодом", "Locked with PIN")
-                                    } else {
-                                        chat.messages.lastOrNull()?.text ?: tr("Нет сообщений", "No messages")
-                                    }
+                            emptyList()
+                        }
+
+                        LazyColumn(
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(vertical = 4.dp)
+                        ) {
+                            if (cleanFilter.isNotEmpty()) {
+                                item {
                                     Surface(
-                                        color = Color.Transparent,
+                                        color = AegisColors.panel2.copy(alpha = 0.65f),
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
-                                                activeChatIndex = actualIndex
-                                                pendingLeakWarning = null
-                                                activeScreen = "STEP_3_CONVERSATION"
-                                                uiTick++
+                                                bridge.openDmChat(cleanFilter).onSuccess { idx ->
+                                                    searchQuery = ""
+                                                    activeChatIndex = idx
+                                                    activeScreen = "STEP_3_CONVERSATION"
+                                                    bridge.syncAllChatsAndInboxAsync { _, _ -> uiTick++ }
+                                                    uiTick++
+                                                }
                                             }
                                     ) {
                                         Row(
                                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Avatar(chat.title, size = 50.dp)
+                                            Avatar("@$cleanFilter", size = 46.dp)
                                             Spacer(Modifier.width(12.dp))
                                             Column(modifier = Modifier.weight(1f)) {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    Text(
-                                                        chat.title,
-                                                        color = AegisColors.text,
-                                                        fontSize = 15.sp,
-                                                        fontWeight = FontWeight.SemiBold,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                        modifier = Modifier.weight(1f)
-                                                    )
-                                                    if (chat.isLocked) {
-                                                        Text("🔒", fontSize = 12.sp)
-                                                    }
-                                                }
                                                 Text(
-                                                    preview,
+                                                    tr("💬 Написать @$cleanFilter", "💬 Message @$cleanFilter"),
+                                                    color = AegisColors.accent,
+                                                    fontSize = 15.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    tr("Открыть личный чат по @логину", "Open direct chat by @username"),
                                                     color = AegisColors.muted,
-                                                    fontSize = 12.sp,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
+                                                    fontSize = 12.sp
                                                 )
                                             }
                                         }
                                     }
-                                    Box(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .padding(start = 74.dp)
-                                            .height(1.dp)
-                                            .background(AegisColors.line.copy(alpha = 0.55f))
-                                    )
                                 }
+                                items(dirMatches) { entry ->
+                                    val kindIcon = when (entry.kind) {
+                                        "group" -> "👥"
+                                        "channel" -> "📢"
+                                        else -> "👤"
+                                    }
+                                    val kindLabel = when (entry.kind) {
+                                        "group" -> tr("Группа", "Group")
+                                        "channel" -> tr("Канал", "Channel")
+                                        else -> tr("Пользователь", "User")
+                                    }
+                                    Surface(
+                                        color = Color.Transparent,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                bridge.openDirectoryItem(entry.kind, entry.slug, entry.title).onSuccess { idx ->
+                                                    searchQuery = ""
+                                                    activeChatIndex = idx
+                                                    activeScreen = "STEP_3_CONVERSATION"
+                                                    bridge.syncAllChatsAndInboxAsync { _, _ -> uiTick++ }
+                                                    uiTick++
+                                                }
+                                            }
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Avatar(entry.title, size = 46.dp)
+                                            Spacer(Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    "$kindIcon ${entry.title} (@${entry.slug})",
+                                                    color = AegisColors.text,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                                Text(
+                                                    kindLabel,
+                                                    color = AegisColors.muted,
+                                                    fontSize = 11.sp
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            itemsIndexed(bridge.chats) { actualIndex, chat ->
+                                if (!chatMatches(chat)) return@itemsIndexed
+                                val preview = if (chat.isLocked) {
+                                    tr("Закрыто PIN-кодом", "Locked with PIN")
+                                } else {
+                                    chat.messages.lastOrNull()?.text ?: tr("Нет сообщений", "No messages")
+                                }
+                                Surface(
+                                    color = Color.Transparent,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            activeChatIndex = actualIndex
+                                            pendingLeakWarning = null
+                                            activeScreen = "STEP_3_CONVERSATION"
+                                            uiTick++
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Avatar(chat.title, size = 50.dp)
+                                        Spacer(Modifier.width(12.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    chat.title,
+                                                    color = AegisColors.text,
+                                                    fontSize = 15.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                if (chat.isLocked) {
+                                                    Text("🔒", fontSize = 12.sp)
+                                                }
+                                            }
+                                            Text(
+                                                preview,
+                                                color = AegisColors.muted,
+                                                fontSize = 12.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                }
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 74.dp)
+                                        .height(1.dp)
+                                        .background(AegisColors.line.copy(alpha = 0.55f))
+                                )
                             }
                         }
 
@@ -1290,52 +1424,97 @@ fun AegisComposeApp(
             if (showNewChatDialog) {
                 AlertDialog(
                     onDismissRequest = { showNewChatDialog = false },
-                    title = { Text(tr("Новый чат", "New chat")) },
+                    title = {
+                        Text(
+                            when (newChatMode) {
+                                "group" -> tr("Создать группу", "Create group")
+                                "channel" -> tr("Создать канал", "Create channel")
+                                else -> tr("Написать человеку (@логин)", "New direct message (@username)")
+                            }
+                        )
+                    },
                     text = {
                         Column {
-                            Text(
-                                tr(
-                                    "Договоритесь с собеседником об общем коде канала.",
-                                    "Agree on a shared channel code with your contact."
-                                ),
-                                color = AegisColors.muted,
-                                fontSize = 12.sp
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                SmallChoice(tr("💬 Чат", "💬 Chat")) { newChatMode = "dm" }
+                                SmallChoice(tr("👥 Группа", "👥 Group")) { newChatMode = "group" }
+                                SmallChoice(tr("📢 Канал", "📢 Channel")) { newChatMode = "channel" }
+                            }
                             Spacer(Modifier.height(10.dp))
-                            OutlinedTextField(
-                                value = newChatPeerName,
-                                onValueChange = { newChatPeerName = it },
-                                label = { Text(tr("Имя собеседника", "Contact name")) },
-                                singleLine = true,
-                                keyboardOptions = incognitoKeyboardOptions,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            OutlinedTextField(
-                                value = newChatChannelCode,
-                                onValueChange = { newChatChannelCode = it },
-                                label = { Text(tr("Код канала", "Channel code")) },
-                                singleLine = true,
-                                keyboardOptions = incognitoKeyboardOptions,
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            when (newChatMode) {
+                                "group" -> {
+                                    OutlinedTextField(
+                                        value = newChatPeerName,
+                                        onValueChange = { newChatPeerName = it },
+                                        label = { Text(tr("Название группы", "Group name")) },
+                                        singleLine = true,
+                                        keyboardOptions = incognitoKeyboardOptions,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    OutlinedTextField(
+                                        value = newChatChannelCode,
+                                        onValueChange = { newChatChannelCode = it },
+                                        label = { Text(tr("Участники (@user1, @user2)", "Members (@user1, @user2)")) },
+                                        singleLine = true,
+                                        keyboardOptions = incognitoKeyboardOptions,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                "channel" -> {
+                                    OutlinedTextField(
+                                        value = newChatPeerName,
+                                        onValueChange = { newChatPeerName = it },
+                                        label = { Text(tr("Название канала", "Channel title")) },
+                                        singleLine = true,
+                                        keyboardOptions = incognitoKeyboardOptions,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    OutlinedTextField(
+                                        value = newChatChannelCode,
+                                        onValueChange = { newChatChannelCode = it },
+                                        label = { Text(tr("@тег канала (напр. @news)", "@channel_tag (e.g. @news)")) },
+                                        singleLine = true,
+                                        keyboardOptions = incognitoKeyboardOptions,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                                else -> {
+                                    OutlinedTextField(
+                                        value = newChatChannelCode,
+                                        onValueChange = { newChatChannelCode = it },
+                                        label = { Text(tr("@логин собеседника (напр. @alex)", "@username (e.g. @alex)")) },
+                                        singleLine = true,
+                                        keyboardOptions = incognitoKeyboardOptions,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
                         }
                     },
                     confirmButton = {
                         TextButton(onClick = {
-                            bridge.createCustomChannelChat(newChatPeerName, newChatChannelCode)
-                                .onSuccess { index ->
-                                    newChatPeerName = ""
-                                    newChatChannelCode = ""
-                                    showNewChatDialog = false
-                                    activeChatIndex = index
-                                    activeScreen = "STEP_3_CONVERSATION"
-                                    applyStatus(tr("Чат создан.", "Chat created."))
-                                }
-                                .onFailure { error ->
-                                    applyStatus(tr("Чат не создан: ${error.message}", "Chat not created: ${error.message}"))
-                                }
-                        }) { Text(tr("Создать", "Create")) }
+                            val res = when (newChatMode) {
+                                "group" -> bridge.createGroupEasy(newChatPeerName, newChatChannelCode)
+                                "channel" -> bridge.createChannelEasy(newChatPeerName, newChatChannelCode)
+                                else -> bridge.openDmChat(newChatChannelCode.ifBlank { newChatPeerName })
+                            }
+                            res.onSuccess { index ->
+                                newChatPeerName = ""
+                                newChatChannelCode = ""
+                                showNewChatDialog = false
+                                activeChatIndex = index
+                                activeScreen = "STEP_3_CONVERSATION"
+                                bridge.syncAllChatsAndInboxAsync { _, _ -> uiTick++ }
+                                applyStatus(tr("Готово.", "Ready."))
+                            }.onFailure { error ->
+                                applyStatus("${error.message}")
+                            }
+                        }) { Text(tr("Открыть", "Open")) }
                     },
                     dismissButton = {
                         TextButton(onClick = { showNewChatDialog = false }) { Text(tr("Отмена", "Cancel")) }
@@ -1607,6 +1786,46 @@ private fun SectionLabel(text: String) {
         fontWeight = FontWeight.Bold,
         modifier = Modifier.padding(top = 14.dp, bottom = 6.dp)
     )
+}
+
+@Composable
+private fun PingBadge(pingMs: Int?, isRu: Boolean, onClick: () -> Unit) {
+    val dotColor = when {
+        pingMs == null -> AegisColors.danger
+        pingMs < 180 -> AegisColors.accent
+        else -> AegisColors.warning
+    }
+    val label = when {
+        pingMs == null -> if (isRu) "Офлайн" else "Offline"
+        isRu -> "$pingMs мс"
+        else -> "$pingMs ms"
+    }
+    Surface(
+        color = dotColor.copy(alpha = 0.14f),
+        shape = RoundedCornerShape(999.dp),
+        border = BorderStroke(1.dp, dotColor.copy(alpha = 0.45f)),
+        modifier = Modifier
+            .padding(end = 6.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .background(dotColor, CircleShape)
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                label,
+                color = dotColor,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
 }
 
 @Composable

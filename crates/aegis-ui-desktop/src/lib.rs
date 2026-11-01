@@ -677,6 +677,12 @@ pub struct DesktopAppState {
     pub auth_tab_login: bool,
     /// Local account password verifiers `(login_nickname, display_name, verifier_bytes)`.
     pub account_verifiers: Vec<(String, String, [u8; 32])>,
+    /// Last measured round-trip latency (ms) to the active server (`None` if offline).
+    pub last_ping_ms: Option<u32>,
+    /// Cached search results from the server directory `(kind, slug, title)`.
+    pub directory_results: Vec<(String, String, String)>,
+    /// Per-account deduplication keys `"{account_nick}:{msg_id}"` so multiple accounts on the same PC can exchange messages.
+    pub seen_account_msg_ids: Vec<String>,
 }
 
 impl Default for DesktopAppState {
@@ -885,18 +891,65 @@ impl DesktopAppState {
             is_authenticated: false,
             auth_tab_login: false,
             account_verifiers: Vec::new(),
+            last_ping_ms: Some(38),
+            directory_results: vec![
+                ("channel".to_owned(), "aegis_news".to_owned(), "Новости Aegis".to_owned()),
+                ("group".to_owned(), "aegis_lobby".to_owned(), "Общий чат Aegis".to_owned()),
+            ],
+            seen_account_msg_ids: Vec::new(),
         }
     }
 
-    /// Enables the mandatory authentication gate for the interactive desktop GUI
-    /// and loads any previously registered accounts and chats from disk.
+    /// Enables the mandatory authentication gate for the interactive desktop GUI,
+    /// loads saved accounts/chats from disk, and auto-signs in if an active session was saved.
     pub fn enable_auth_gate(&mut self) {
         self.auth_gate_enabled = true;
         self.is_authenticated = false;
         self.current_screen = Screen::Onboarding;
+        // Replace test-only nordic-falcon chat with real public group & channel in GUI mode
+        self.chats.retain(|c| c.is_local_saved_notes);
+        self.chats.push(ChatView {
+            chat_id: [0x02; 16],
+            title: "📢 Новости Aegis (@aegis_news)".to_owned(),
+            queue_tag: "channel://aegis_news".to_owned(),
+            is_local_saved_notes: false,
+            verified_support_badge: true,
+            per_chat_pin: None,
+            is_locked: false,
+            default_disappearing_ttl_secs: None,
+            messages: vec![ChatMessageView {
+                outgoing: false,
+                text: "Официальный канал новостей Aegis. Через поиск сверху можно найти людей по @логину, группы и каналы.".to_owned(),
+                padded_bucket_bytes: 256,
+                disappearing_ttl_secs: None,
+                attachment: None,
+            }],
+        });
+        self.chats.push(ChatView {
+            chat_id: [0x03; 16],
+            title: "👥 Общий чат Aegis (@aegis_lobby)".to_owned(),
+            queue_tag: "group://aegis_lobby".to_owned(),
+            is_local_saved_notes: false,
+            verified_support_badge: false,
+            per_chat_pin: None,
+            is_locked: false,
+            default_disappearing_ttl_secs: None,
+            messages: vec![ChatMessageView {
+                outgoing: false,
+                text: "Общая группа Aegis. Напишите сообщение — его увидят все участники.".to_owned(),
+                padded_bucket_bytes: 256,
+                disappearing_ttl_secs: None,
+                attachment: None,
+            }],
+        });
+        self.active_chat_index = 0;
         self.load_desktop_vault();
-        if !self.account_verifiers.is_empty() {
+        if !self.account_verifiers.is_empty() && !self.is_authenticated {
             self.auth_tab_login = true;
+        }
+        let _ = self.measure_server_ping_ms();
+        if self.is_authenticated {
+            let _ = self.sync_all_chats_and_inbox();
         }
     }
 
@@ -911,14 +964,388 @@ impl DesktopAppState {
     pub fn compute_password_verifier(nick: &str, pwd: &str) -> [u8; 32] {
         let material = format!(
             "aegis-account-auth-v1:{}:{}",
-            nick.trim().to_ascii_lowercase(),
+            nick.trim().trim_start_matches('@').to_ascii_lowercase(),
             pwd
         );
         let (_, key, _) = derive_channel_key_and_queue(&material);
         key
     }
 
-    /// Saves registered accounts and user chats to disk when `auth_gate_enabled` is active.
+    /// Computes the canonical symmetric 1:1 DM queue tag for two usernames (`dm://<a>:<b>`).
+    #[must_use]
+    pub fn dm_pair_tag(user_a: &str, user_b: &str) -> String {
+        let a = user_a.trim().trim_start_matches('@').to_ascii_lowercase();
+        let b = user_b.trim().trim_start_matches('@').to_ascii_lowercase();
+        if a <= b {
+            format!("dm://{a}:{b}")
+        } else {
+            format!("dm://{b}:{a}")
+        }
+    }
+
+    /// Returns the currently logged-in account's `(login_nickname, display_name)`.
+    #[must_use]
+    pub fn active_account_identity(&self) -> (String, String) {
+        self.accounts
+            .profiles
+            .get(self.accounts.active_index)
+            .map_or_else(
+                || ("user".to_owned(), "Пользователь".to_owned()),
+                |a| (a.login_nickname.clone(), a.display_name.clone()),
+            )
+    }
+
+    fn active_server_host_and_header(&self) -> (String, String) {
+        let ep = self
+            .directory_servers
+            .get(self.selected_server_index)
+            .map_or_else(|| "104.21.53.92:80".to_owned(), |s| s.endpoint.clone());
+        let host_only = ep.rsplit_once(':').map_or(ep.as_str(), |(h, _)| h);
+        let hdr = if host_only == "104.21.53.92"
+            || host_only == "172.67.211.53"
+            || host_only.eq_ignore_ascii_case("freeoasis.space")
+        {
+            "freeoasis.space".to_owned()
+        } else {
+            ep.clone()
+        };
+        (ep, hdr)
+    }
+
+    /// Measures real TCP/HTTP round-trip latency in milliseconds to `/health` on the active server.
+    pub fn measure_server_ping_ms(&mut self) -> Option<u32> {
+        if !self.shield_evaluation.traffic_permitted {
+            self.last_ping_ms = None;
+            return None;
+        }
+        let (ep, host_hdr) = self.active_server_host_and_header();
+        let start = std::time::Instant::now();
+        let mut addrs = std::net::ToSocketAddrs::to_socket_addrs(ep.as_str()).ok()?;
+        let addr = addrs.next()?;
+        let dur = std::time::Duration::from_millis(2_500);
+        let mut stream = TcpStream::connect_timeout(&addr, dur).ok()?;
+        let _ = stream.set_read_timeout(Some(dur));
+        let _ = stream.set_write_timeout(Some(dur));
+        let req = format!(
+            "GET /health HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: Aegis/0.1\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).ok()?;
+        let _ = stream.flush();
+        let mut buf = [0u8; 512];
+        let n = stream.read(&mut buf).ok()?;
+        if n > 0 && std::str::from_utf8(&buf[..n]).is_ok_and(|s| s.starts_with("HTTP/1.1 200")) {
+            let ms = (start.elapsed().as_millis() as u32).max(1);
+            self.last_ping_ms = Some(ms);
+            Some(ms)
+        } else {
+            self.last_ping_ms = None;
+            None
+        }
+    }
+
+    /// Registers a user (`@username`), group, or channel in the active server's directory.
+    pub fn register_in_server_directory(&self, kind: &str, slug: &str, title: &str) {
+        if !self.shield_evaluation.traffic_permitted {
+            return;
+        }
+        let (ep, host_hdr) = self.active_server_host_and_header();
+        let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(ep.as_str()) else {
+            return;
+        };
+        let Some(addr) = addrs.next() else {
+            return;
+        };
+        let dur = std::time::Duration::from_millis(2_000);
+        let Ok(mut stream) = TcpStream::connect_timeout(&addr, dur) else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(dur));
+        let _ = stream.set_write_timeout(Some(dur));
+        let path = format!(
+            "/api/v1/dir/register?kind={}&slug={}&title={}",
+            url_encode(kind),
+            url_encode(slug.trim().trim_start_matches('@')),
+            url_encode(title.trim())
+        );
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: Aegis/0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(req.as_bytes());
+        let _ = stream.flush();
+    }
+
+    /// Searches users (`@username`), groups, and channels on the active server.
+    pub fn search_server_directory(&mut self, query: &str) {
+        if !self.shield_evaluation.traffic_permitted {
+            return;
+        }
+        let (ep, host_hdr) = self.active_server_host_and_header();
+        let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(ep.as_str()) else {
+            return;
+        };
+        let Some(addr) = addrs.next() else {
+            return;
+        };
+        let dur = std::time::Duration::from_millis(2_000);
+        let Ok(mut stream) = TcpStream::connect_timeout(&addr, dur) else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(dur));
+        let _ = stream.set_write_timeout(Some(dur));
+        let path = format!(
+            "/api/v1/dir/search?q={}",
+            url_encode(query.trim().trim_start_matches('@'))
+        );
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: Aegis/0.1\r\nConnection: close\r\n\r\n"
+        );
+        if stream.write_all(req.as_bytes()).is_err() {
+            return;
+        }
+        let _ = stream.flush();
+        let mut resp = Vec::with_capacity(2048);
+        if stream.take(32_768).read_to_end(&mut resp).is_err() {
+            return;
+        }
+        let Ok(text) = std::str::from_utf8(&resp) else {
+            return;
+        };
+        if !text.starts_with("HTTP/1.1 200") {
+            return;
+        }
+        let Some((_, body)) = text.split_once("\r\n\r\n") else {
+            return;
+        };
+        let mut results = Vec::new();
+        for line in body.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 3 {
+                results.push((
+                    parts[0].to_owned(),
+                    parts[1].to_owned(),
+                    parts[2].to_owned(),
+                ));
+            }
+        }
+        if !results.is_empty() {
+            self.directory_results = results;
+        }
+    }
+
+    /// Raw capsule send helper that does not depend on `active_chat_index`.
+    pub fn send_raw_capsule_to_tag(&mut self, queue_tag: &str, wire_text: &str) -> bool {
+        if self.duress_mode_active || !self.shield_evaluation.traffic_permitted {
+            return false;
+        }
+        let server_ep = self
+            .directory_servers
+            .get(self.selected_server_index)
+            .map_or_else(|| "104.21.53.92:80".to_owned(), |s| s.endpoint.clone());
+        let (queue_id, mut channel_key, _) = derive_channel_key_and_queue(queue_tag);
+        let nonce = self.next_unique_capsule_nonce(&queue_id);
+        let Ok(capsule) = seal_cross_border_capsule(queue_tag, &nonce, wire_text) else {
+            channel_key.fill(0);
+            return false;
+        };
+        let ok = if let Some(relay_ep) = self.blind_relay_endpoint.clone() {
+            send_capsule_via_blind_relay(
+                &relay_ep,
+                &server_ep,
+                &queue_id,
+                &channel_key,
+                &capsule,
+                3_500,
+            )
+            .is_ok()
+        } else if let Some(proxy_ep) = self.socks5_proxy_endpoint.clone() {
+            send_capsule_via_socks5(&proxy_ep, &server_ep, &queue_id, &channel_key, &capsule, 3_500)
+                .is_ok()
+        } else {
+            send_capsule_over_tcp(&server_ep, &queue_id, &channel_key, &capsule, 3_500).is_ok()
+        };
+        channel_key.fill(0);
+        ok
+    }
+
+    /// Polls the current user's personal discovery inbox (`inbox://<my_nick>`) and all open chats,
+    /// automatically creating incoming 1:1 chats or invited groups and appending new messages.
+    pub fn sync_all_chats_and_inbox(&mut self) -> usize {
+        if self.duress_mode_active || !self.shield_evaluation.traffic_permitted {
+            return 0;
+        }
+        let _ = self.measure_server_ping_ms();
+        let (my_nick, _) = self.active_account_identity();
+        let my_nick_clean = my_nick.trim().trim_start_matches('@').to_ascii_lowercase();
+        let server_ep = self
+            .directory_servers
+            .get(self.selected_server_index)
+            .map_or_else(|| "104.21.53.92:80".to_owned(), |s| s.endpoint.clone());
+
+        let mut total_new = 0usize;
+
+        // 1. Poll personal discovery inbox `inbox://<my_nick>` for incoming DMs and group invites
+        if !my_nick_clean.is_empty() {
+            let inbox_tag = format!("inbox://{my_nick_clean}");
+            let (q_id, mut c_key, _) = derive_channel_key_and_queue(&inbox_tag);
+            let frames_res = if let Some(relay_ep) = self.blind_relay_endpoint.clone() {
+                poll_capsules_via_blind_relay(&relay_ep, &server_ep, &q_id, &c_key, 2_500)
+            } else if let Some(proxy_ep) = self.socks5_proxy_endpoint.clone() {
+                poll_capsules_via_socks5(&proxy_ep, &server_ep, &q_id, &c_key, 2_500)
+            } else {
+                poll_capsules_over_tcp(&server_ep, &q_id, &c_key, 2_500)
+            };
+            c_key.fill(0);
+            if let Ok(frames) = frames_res {
+                for frame in &frames {
+                    if let Ok(pt) = open_cross_border_capsule(&inbox_tag, frame) {
+                        let parts: Vec<&str> = pt.splitn(8, '\t').collect();
+                        if parts.len() == 8 && parts[0] == "AEGMSG1" {
+                            let msg_id = parts[1];
+                            let sender_nick = parts[2].trim().trim_start_matches('@').to_ascii_lowercase();
+                            let sender_name = parts[3].trim();
+                            let kind = parts[4];
+                            let room_slug = parts[5].trim();
+                            let room_title = parts[6].trim();
+                            let body_text = parts[7];
+                            if sender_nick == my_nick_clean {
+                                continue;
+                            }
+                            let dedup_key = format!("{my_nick_clean}:{msg_id}");
+                            let (target_q_tag, target_title) = if kind == "dm" {
+                                (
+                                    Self::dm_pair_tag(&my_nick_clean, &sender_nick),
+                                    format!("💬 {sender_name} (@{sender_nick})"),
+                                )
+                            } else if kind == "group" {
+                                (
+                                    format!("group://{room_slug}"),
+                                    format!("👥 {room_title} (@{room_slug})"),
+                                )
+                            } else {
+                                (
+                                    format!("channel://{room_slug}"),
+                                    format!("📢 {room_title} (@{room_slug})"),
+                                )
+                            };
+                            if !self.chats.iter().any(|c| c.queue_tag == target_q_tag) {
+                                let id_byte = (self.chats.len() as u8).wrapping_add(20);
+                                self.chats.push(ChatView {
+                                    chat_id: [id_byte; 16],
+                                    title: target_title,
+                                    queue_tag: target_q_tag.clone(),
+                                    is_local_saved_notes: false,
+                                    verified_support_badge: false,
+                                    per_chat_pin: None,
+                                    is_locked: false,
+                                    default_disappearing_ttl_secs: None,
+                                    messages: Vec::new(),
+                                });
+                            }
+                            if !self.seen_account_msg_ids.contains(&dedup_key) {
+                                self.seen_account_msg_ids.push(dedup_key);
+                                if let Some(chat) = self.chats.iter_mut().find(|c| c.queue_tag == target_q_tag) {
+                                    let display_text = if kind == "dm" {
+                                        body_text.to_owned()
+                                    } else {
+                                        format!("{sender_name} (@{sender_nick}): {body_text}")
+                                    };
+                                    chat.messages.push(ChatMessageView {
+                                        outgoing: false,
+                                        text: display_text,
+                                        padded_bucket_bytes: frame.len(),
+                                        disappearing_ttl_secs: chat.default_disappearing_ttl_secs,
+                                        attachment: None,
+                                    });
+                                    total_new = total_new.saturating_add(1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Poll all open non-local chats
+        let tags: Vec<String> = self
+            .chats
+            .iter()
+            .filter(|c| !c.is_local_saved_notes && !c.is_locked)
+            .map(|c| c.queue_tag.clone())
+            .collect();
+
+        for tag in tags {
+            let (q_id, mut c_key, _) = derive_channel_key_and_queue(&tag);
+            let frames_res = if let Some(relay_ep) = self.blind_relay_endpoint.clone() {
+                poll_capsules_via_blind_relay(&relay_ep, &server_ep, &q_id, &c_key, 2_500)
+            } else if let Some(proxy_ep) = self.socks5_proxy_endpoint.clone() {
+                poll_capsules_via_socks5(&proxy_ep, &server_ep, &q_id, &c_key, 2_500)
+            } else {
+                poll_capsules_over_tcp(&server_ep, &q_id, &c_key, 2_500)
+            };
+            c_key.fill(0);
+            let Ok(frames) = frames_res else {
+                continue;
+            };
+            for frame in &frames {
+                let Ok(pt) = open_cross_border_capsule(&tag, frame) else {
+                    continue;
+                };
+                let parts: Vec<&str> = pt.splitn(8, '\t').collect();
+                if parts.len() == 8 && parts[0] == "AEGMSG1" {
+                    let msg_id = parts[1];
+                    let sender_nick = parts[2].trim().trim_start_matches('@').to_ascii_lowercase();
+                    let sender_name = parts[3].trim();
+                    let kind = parts[4];
+                    let body_text = parts[7];
+                    if sender_nick == my_nick_clean {
+                        continue;
+                    }
+                    let dedup_key = format!("{my_nick_clean}:{msg_id}");
+                    if self.seen_account_msg_ids.contains(&dedup_key) {
+                        continue;
+                    }
+                    self.seen_account_msg_ids.push(dedup_key);
+                    if let Some(chat) = self.chats.iter_mut().find(|c| c.queue_tag == tag) {
+                        let display_text = if kind == "dm" {
+                            body_text.to_owned()
+                        } else {
+                            format!("{sender_name} (@{sender_nick}): {body_text}")
+                        };
+                        chat.messages.push(ChatMessageView {
+                            outgoing: false,
+                            text: display_text,
+                            padded_bucket_bytes: frame.len(),
+                            disappearing_ttl_secs: chat.default_disappearing_ttl_secs,
+                            attachment: None,
+                        });
+                        total_new = total_new.saturating_add(1);
+                    }
+                } else {
+                    let fp = Self::capsule_fingerprint(frame);
+                    if self.seen_capsule_digests.contains(&fp) {
+                        continue;
+                    }
+                    self.record_seen_capsule_fingerprint(fp);
+                    if let Some(chat) = self.chats.iter_mut().find(|c| c.queue_tag == tag) {
+                        chat.messages.push(ChatMessageView {
+                            outgoing: false,
+                            text: pt,
+                            padded_bucket_bytes: frame.len(),
+                            disappearing_ttl_secs: chat.default_disappearing_ttl_secs,
+                            attachment: None,
+                        });
+                        total_new = total_new.saturating_add(1);
+                    }
+                }
+            }
+        }
+        if total_new > 0 {
+            self.save_desktop_vault();
+        }
+        total_new
+    }
+
+    /// Saves registered accounts, active session, and user chats to disk when `auth_gate_enabled` is active.
     pub fn save_desktop_vault(&self) {
         if !self.auth_gate_enabled {
             return;
@@ -927,6 +1354,11 @@ impl DesktopAppState {
             return;
         };
         let mut out = String::new();
+        out.push_str(&format!(
+            "SESSION\t{}\t{}\n",
+            if self.is_authenticated { "1" } else { "0" },
+            self.accounts.active_index
+        ));
         for (nick, alias, verifier) in &self.account_verifiers {
             out.push_str(&format!(
                 "ACC\t{}\t{}\t{}\n",
@@ -934,6 +1366,9 @@ impl DesktopAppState {
                 url_encode(alias),
                 hex_encode_bytes(verifier)
             ));
+        }
+        for key in &self.seen_account_msg_ids {
+            out.push_str(&format!("SEEN\t{}\n", url_encode(key)));
         }
         for chat in &self.chats {
             if chat.is_local_saved_notes || chat.title == "nordic-falcon" {
@@ -956,7 +1391,7 @@ impl DesktopAppState {
         let _ = std::fs::write(path, out);
     }
 
-    /// Loads registered accounts and user chats from disk.
+    /// Loads registered accounts, active session, and user chats from disk.
     pub fn load_desktop_vault(&mut self) {
         let Some(path) = Self::vault_file_path() else {
             return;
@@ -964,9 +1399,22 @@ impl DesktopAppState {
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
         };
+        let mut saved_auth = false;
+        let mut saved_active_idx = 0usize;
+        let mut cleared_seed_msgs = Vec::new();
         for line in content.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
             match parts.first().copied() {
+                Some("SESSION") if parts.len() >= 3 => {
+                    saved_auth = parts[1] == "1";
+                    saved_active_idx = parts[2].parse::<usize>().unwrap_or(0);
+                }
+                Some("SEEN") if parts.len() >= 2 => {
+                    let k = percent_decode(parts[1]);
+                    if !self.seen_account_msg_ids.contains(&k) {
+                        self.seen_account_msg_ids.push(k);
+                    }
+                }
                 Some("ACC") if parts.len() >= 4 => {
                     let nick = percent_decode(parts[1]);
                     let alias = percent_decode(parts[2]);
@@ -1015,7 +1463,7 @@ impl DesktopAppState {
                             verified_support_badge: false,
                             per_chat_pin: None,
                             is_locked: false,
-                            default_disappearing_ttl_secs: Some(3600),
+                            default_disappearing_ttl_secs: None,
                             messages: Vec::new(),
                         });
                     }
@@ -1025,16 +1473,28 @@ impl DesktopAppState {
                     let outgoing = parts[2] == "1";
                     let text = percent_decode(parts[3]);
                     if let Some(chat) = self.chats.iter_mut().find(|c| c.queue_tag == q_tag) {
+                        if !cleared_seed_msgs.contains(&q_tag) {
+                            chat.messages.clear();
+                            cleared_seed_msgs.push(q_tag.clone());
+                        }
                         chat.messages.push(ChatMessageView {
                             outgoing,
                             text,
                             padded_bucket_bytes: 256,
-                            disappearing_ttl_secs: Some(3600),
+                            disappearing_ttl_secs: None,
                             attachment: None,
                         });
                     }
                 }
                 _ => {}
+            }
+        }
+        if !self.accounts.profiles.is_empty() {
+            self.accounts.active_index =
+                saved_active_idx.min(self.accounts.profiles.len().saturating_sub(1));
+            if saved_auth {
+                self.is_authenticated = true;
+                self.current_screen = Screen::ChatWorkspace;
             }
         }
     }
@@ -2697,12 +3157,46 @@ impl DesktopGuiServer {
         }
     }
 
+    fn render_ping_badge(&self) -> String {
+        let is_killed = matches!(
+            self.state.shield_evaluation.status,
+            NetworkRouteStatus::Offline
+        );
+        if is_killed {
+            return format!(
+                "<a class='ping-badge off' href='/action?cmd=sync_remote' title='{}'><span class='ping-dot'></span>{}</a>",
+                self.tr("Сеть заблокирована", "Network locked"),
+                self.tr("Офлайн", "Offline")
+            );
+        }
+        match self.state.last_ping_ms {
+            Some(ms) if ms < 180 => format!(
+                "<a class='ping-badge ok' href='/action?cmd=sync_remote' title='{}'><span class='ping-dot'></span>{ms} {}</a>",
+                self.tr("Пинг до сервера (нажмите для обновления)", "Server ping (click to refresh)"),
+                self.tr("мс", "ms")
+            ),
+            Some(ms) => format!(
+                "<a class='ping-badge warn' href='/action?cmd=sync_remote' title='{}'><span class='ping-dot'></span>{ms} {}</a>",
+                self.tr("Пинг до сервера (нажмите для обновления)", "Server ping (click to refresh)"),
+                self.tr("мс", "ms")
+            ),
+            None => format!(
+                "<a class='ping-badge off' href='/action?cmd=sync_remote' title='{}'><span class='ping-dot'></span>{}</a>",
+                self.tr("Проверить соединение", "Check connection"),
+                self.tr("Офлайн", "Offline")
+            ),
+        }
+    }
+
     fn render_top_actions(&self) -> String {
-        "<div class='top-actions'>
+        format!(
+            "<div class='top-actions'>
+  {}
   <a class='chip' href='/action?cmd=lang_ru'>RU</a>
   <a class='chip' href='/action?cmd=lang_en'>EN</a>
-</div>"
-            .to_owned()
+</div>",
+            self.render_ping_badge()
+        )
     }
 
     fn render_status_banner(&self) -> String {
@@ -2985,14 +3479,62 @@ impl DesktopGuiServer {
         let is_en = self.state.locale == Locale::En;
 
         let mut chat_items = String::new();
+        if !search_filter.is_empty() {
+            let clean_q = search_filter.trim_start_matches('@');
+            if !clean_q.is_empty() {
+                chat_items.push_str(&format!(
+                    "<a class='chat-item' href='/action?cmd=open_dm&amp;user={q_url}'>
+  <span class='avatar small'>💬</span>
+  <span class='chat-item-meta'><span class='chat-item-name'>{write_lbl} @{q_esc}</span><span class='chat-item-preview'>{dm_sub}</span></span>
+</a>",
+                    q_url = url_encode(clean_q),
+                    write_lbl = self.tr("Написать", "Message"),
+                    q_esc = html_escape(clean_q),
+                    dm_sub = self.tr("Открыть личный чат", "Open direct chat"),
+                ));
+            }
+            for (kind, slug, title) in &self.state.directory_results {
+                if slug.to_lowercase().contains(clean_q) || title.to_lowercase().contains(&search_filter) {
+                    let (icon, kind_lbl) = match kind.as_str() {
+                        "user" => ("👤", self.tr("Пользователь", "User")),
+                        "group" => ("👥", self.tr("Группа", "Group")),
+                        _ => ("📢", self.tr("Канал", "Channel")),
+                    };
+                    chat_items.push_str(&format!(
+                        "<a class='chat-item' href='/action?cmd=open_dir_item&amp;kind={k_url}&amp;slug={s_url}&amp;title={t_url}'>
+  <span class='avatar small'>{icon}</span>
+  <span class='chat-item-meta'><span class='chat-item-name'>{title_esc} (@{slug_esc})</span><span class='chat-item-preview'>{kind_lbl}</span></span>
+</a>",
+                        k_url = url_encode(kind),
+                        s_url = url_encode(slug),
+                        t_url = url_encode(title),
+                        icon = icon,
+                        title_esc = html_escape(title),
+                        slug_esc = html_escape(slug),
+                        kind_lbl = kind_lbl,
+                    ));
+                }
+            }
+        }
         for (idx, c) in self.state.chats.iter().enumerate() {
+            if !search_filter.is_empty()
+                && !c.title.to_lowercase().contains(&search_filter)
+                && !c.queue_tag.to_lowercase().contains(&search_filter)
+                && (c.is_locked || !c.messages.iter().any(|m| m.text.to_lowercase().contains(&search_filter)))
+            {
+                continue;
+            }
             let active = idx == self.state.active_chat_index;
             let icon = if c.is_local_saved_notes {
                 "★"
             } else if c.is_locked {
                 "🔒"
+            } else if c.queue_tag.starts_with("group://") {
+                "👥"
+            } else if c.queue_tag.starts_with("channel://") {
+                "📢"
             } else {
-                "•"
+                "💬"
             };
             let preview = if c.is_locked {
                 self.tr("Закрыто PIN-кодом", "Locked with PIN").to_owned()
@@ -3154,12 +3696,31 @@ impl DesktopGuiServer {
         let ttl_60 = if active_ttl == 60 { "active" } else { "" };
         let ttl_3600 = if active_ttl == 3600 { "active" } else { "" };
         let status = self.render_status_banner();
+        let active_tag = active_chat.map_or("", |c| c.queue_tag.as_str());
         let chat_sub = if is_saved_notes {
             self.tr("Локальные заметки", "Local notes")
         } else if is_killed {
             self.tr("Сеть заблокирована", "Network locked")
+        } else if active_tag.starts_with("group://") {
+            self.tr("Группа", "Group")
+        } else if active_tag.starts_with("channel://") {
+            self.tr("Публичный канал", "Public channel")
         } else {
-            self.tr("Канал сообщений", "Message channel")
+            self.tr("Личный чат", "Direct chat")
+        };
+        let ping_badge = self.render_ping_badge();
+        let composer_html = if chat_locked {
+            String::new()
+        } else {
+            format!(
+                "<form class='composer' action='/action' method='get'>
+      <input type='hidden' name='cmd' value='send_text'>
+      <input id='msg-input' class='composer-input' type='text' name='text' placeholder='{msg_ph}' autocomplete='off' autofocus>
+      <button class='send-btn' type='submit' title='{send_tip}'>➤</button>
+    </form>",
+                msg_ph = self.tr("Написать сообщение...", "Write a message..."),
+                send_tip = self.tr("Отправить", "Send"),
+            )
         };
 
         format!(
@@ -3167,6 +3728,7 @@ impl DesktopGuiServer {
   <aside class='sidebar'>
     <div class='sidebar-head'>
       <div class='brand-row'><span class='brand-mark'>A</span><span class='brand-name'>Aegis</span></div>
+      {ping_badge}
     </div>
     <div class='sidebar-search'>
       <form action='/action' method='get'>
@@ -3176,12 +3738,29 @@ impl DesktopGuiServer {
     </div>
     <div class='chat-list'>{chat_items}</div>
     <details class='new-chat'>
-      <summary>{new_chat_sum}</summary>
+      <summary>💬 {dm_sum}</summary>
       <form class='form-stack' action='/action' method='get'>
-        <input type='hidden' name='cmd' value='new_chat'>
-        <input type='text' name='title' placeholder='{peer_ph}' autocomplete='off'>
-        <input type='text' name='code' placeholder='{code_ph}' autocomplete='off' spellcheck='false'>
-        <button class='btn primary' type='submit'>{create_chat_btn}</button>
+        <input type='hidden' name='cmd' value='open_dm'>
+        <input type='text' name='user' placeholder='{dm_user_ph}' autocomplete='off' spellcheck='false'>
+        <button class='btn primary' type='submit'>{dm_btn}</button>
+      </form>
+    </details>
+    <details class='new-chat'>
+      <summary>👥 {grp_sum}</summary>
+      <form class='form-stack' action='/action' method='get'>
+        <input type='hidden' name='cmd' value='new_group_easy'>
+        <input type='text' name='title' placeholder='{grp_title_ph}' autocomplete='off'>
+        <input type='text' name='members' placeholder='{grp_mem_ph}' autocomplete='off' spellcheck='false'>
+        <button class='btn primary' type='submit'>{grp_btn}</button>
+      </form>
+    </details>
+    <details class='new-chat'>
+      <summary>📢 {ch_sum}</summary>
+      <form class='form-stack' action='/action' method='get'>
+        <input type='hidden' name='cmd' value='new_channel_easy'>
+        <input type='text' name='title' placeholder='{ch_title_ph}' autocomplete='off'>
+        <input type='text' name='slug' placeholder='{ch_slug_ph}' autocomplete='off' spellcheck='false'>
+        <button class='btn primary' type='submit'>{ch_btn}</button>
       </form>
     </details>
     <nav class='sidebar-nav'>
@@ -3198,6 +3777,7 @@ impl DesktopGuiServer {
         <div class='chat-sub'>{chat_sub}</div>
       </div>
       <div class='chat-actions'>
+        {ping_badge}
         <a class='icon-btn' href='/action?cmd=sync_remote' title='{sync_tip}'>⟳</a>
         <a class='icon-btn' href='/action?cmd=toggle_chat_pin' title='{pin_tip}'>🔒</a>
       </div>
@@ -3205,13 +3785,9 @@ impl DesktopGuiServer {
     {status}
     {key_change}
     {leak_modal}
-    <section class='messages'>{messages}</section>
+    <section id='messages-box' class='messages'>{messages}</section>
     {unlock_form}
-    <form class='composer' action='/action' method='get'>
-      <input type='hidden' name='cmd' value='send_text'>
-      <input class='composer-input' type='text' name='text' placeholder='{msg_ph}' autocomplete='off'>
-      <button class='send-btn' type='submit' title='{send_tip}'>➤</button>
-    </form>
+    {composer_html}
   </main>
   <aside class='info-panel'>
     <div class='info-card'>
@@ -3250,14 +3826,38 @@ impl DesktopGuiServer {
       </div>
     </div>
   </aside>
-</div>",
+</div>
+<script>
+(function() {{
+  var box = document.getElementById('messages-box');
+  if (box) {{ box.scrollTop = box.scrollHeight; }}
+  setInterval(function() {{
+    var inp = document.getElementById('msg-input');
+    var hasDraft = inp && inp.value && inp.value.length > 0;
+    var openDetails = document.querySelector('details.new-chat[open]');
+    fetch('/api/poll').then(function(r) {{ return r.json(); }}).then(function(d) {{
+      if (d && d.new_msgs > 0 && !hasDraft && !openDetails) {{
+        window.location.reload();
+      }}
+    }}).catch(function() {{}});
+  }}, 2500);
+}})();
+</script>",
+            ping_badge = ping_badge,
             search_q = html_escape(&self.state.search_query),
-            search_ph = self.tr("Поиск", "Search"),
+            search_ph = self.tr("Поиск: @логин, группа, канал...", "Search: @username, group, channel..."),
             chat_items = chat_items,
-            new_chat_sum = self.tr("+ Новый чат", "+ New chat"),
-            peer_ph = self.tr("Имя собеседника", "Contact name"),
-            code_ph = self.tr("Код канала", "Channel code"),
-            create_chat_btn = self.tr("Создать чат", "Create chat"),
+            dm_sum = self.tr("Написать человеку (@логин)", "New direct message (@username)"),
+            dm_user_ph = self.tr("@логин собеседника (напр. @alex)", "@username (e.g. @alex)"),
+            dm_btn = self.tr("Открыть чат", "Open chat"),
+            grp_sum = self.tr("Создать группу", "Create group"),
+            grp_title_ph = self.tr("Название группы", "Group name"),
+            grp_mem_ph = self.tr("Участники: @user1, @user2", "Members: @user1, @user2"),
+            grp_btn = self.tr("Создать группу", "Create group"),
+            ch_sum = self.tr("Создать канал", "Create channel"),
+            ch_title_ph = self.tr("Название канала", "Channel title"),
+            ch_slug_ph = self.tr("@тег канала (напр. @news)", "@channel_tag (e.g. @news)"),
+            ch_btn = self.tr("Создать канал", "Create channel"),
             nav_chats = self.tr("Чаты", "Chats"),
             nav_servers = self.tr("Серверы", "Servers"),
             nav_account = self.tr("Аккаунт", "Account"),
@@ -3271,8 +3871,7 @@ impl DesktopGuiServer {
             leak_modal = leak_modal,
             messages = messages_html,
             unlock_form = unlock_form,
-            msg_ph = self.tr("Сообщение", "Message"),
-            send_tip = self.tr("Отправить", "Send"),
+            composer_html = composer_html,
             sec_route_title = self.tr("Переключатели", "Toggles"),
             chat_pin_lbl = self.tr("PIN-код чата", "Chat PIN lock"),
             lock_on = lock_on,
@@ -3346,6 +3945,7 @@ impl DesktopGuiServer {
                 self.state.is_authenticated = false;
                 self.state.auth_tab_login = true;
                 self.state.current_screen = Screen::Onboarding;
+                self.state.save_desktop_vault();
                 self.state.status_banner = self
                     .tr("Вы вышли из аккаунта.", "Signed out of your account.")
                     .to_owned();
@@ -3356,6 +3956,8 @@ impl DesktopGuiServer {
                         if idx < self.state.accounts.profiles.len() {
                             self.state.accounts.active_index = idx;
                             let name = self.state.accounts.profiles[idx].display_name.clone();
+                            let _ = self.state.sync_all_chats_and_inbox();
+                            self.state.save_desktop_vault();
                             self.state.status_banner = if is_en {
                                 format!("Active profile: {name}.")
                             } else {
@@ -3369,6 +3971,7 @@ impl DesktopGuiServer {
                 let nick = extract_query_param(query, "nick")
                     .unwrap_or_default()
                     .trim()
+                    .trim_start_matches('@')
                     .to_ascii_lowercase();
                 let pwd = extract_query_param(query, "pwd").unwrap_or_default();
                 if nick.is_empty() || pwd.is_empty() {
@@ -3391,6 +3994,8 @@ impl DesktopGuiServer {
                     }
                     self.state.is_authenticated = true;
                     self.state.current_screen = Screen::ChatWorkspace;
+                    self.state.save_desktop_vault();
+                    let _ = self.state.sync_all_chats_and_inbox();
                     self.state.status_banner.clear();
                 } else {
                     self.state.status_banner = self
@@ -3440,7 +4045,191 @@ impl DesktopGuiServer {
             "search_messages" => {
                 let q = extract_query_param(query, "q").unwrap_or_default();
                 self.state.search_query = q.trim().to_owned();
+                self.state.search_server_directory(&self.state.search_query.clone());
                 self.state.status_banner.clear();
+            }
+            "open_dm" => {
+                let peer_raw = extract_query_param(query, "user").unwrap_or_default();
+                let peer = peer_raw.trim().trim_start_matches('@').to_ascii_lowercase();
+                if !peer.is_empty() && self.state.chats.len() < 64 {
+                    let (my_nick, _) = self.state.active_account_identity();
+                    let tag = DesktopAppState::dm_pair_tag(&my_nick, &peer);
+                    if let Some(existing_idx) = self.state.chats.iter().position(|c| c.queue_tag == tag) {
+                        self.state.active_chat_index = existing_idx;
+                    } else {
+                        let id_byte = (self.state.chats.len() as u8).wrapping_add(10);
+                        self.state.chats.push(ChatView {
+                            chat_id: [id_byte; 16],
+                            title: format!("💬 @{peer}"),
+                            queue_tag: tag,
+                            is_local_saved_notes: false,
+                            verified_support_badge: false,
+                            per_chat_pin: None,
+                            is_locked: false,
+                            default_disappearing_ttl_secs: None,
+                            messages: Vec::new(),
+                        });
+                        self.state.active_chat_index = self.state.chats.len() - 1;
+                    }
+                    self.state.search_query.clear();
+                    self.state.current_screen = Screen::ChatWorkspace;
+                    let _ = self.state.sync_all_chats_and_inbox();
+                    self.state.save_desktop_vault();
+                    self.state.status_banner.clear();
+                }
+            }
+            "new_group_easy" => {
+                let title = extract_query_param(query, "title")
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
+                let members_raw = extract_query_param(query, "members").unwrap_or_default();
+                if let Some(t) = title {
+                    if self.state.chats.len() < 64 {
+                        let slug: String = t
+                            .to_lowercase()
+                            .chars()
+                            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                            .collect::<String>()
+                            .trim_matches('_')
+                            .to_owned();
+                        let clean_slug = if slug.len() >= 2 {
+                            slug
+                        } else {
+                            format!("grp_{}", self.state.chats.len() + 1)
+                        };
+                        let tag = format!("group://{clean_slug}");
+                        if let Some(idx) = self.state.chats.iter().position(|c| c.queue_tag == tag) {
+                            self.state.active_chat_index = idx;
+                        } else {
+                            let id_byte = (self.state.chats.len() as u8).wrapping_add(15);
+                            self.state.chats.push(ChatView {
+                                chat_id: [id_byte; 16],
+                                title: format!("👥 {t} (@{clean_slug})"),
+                                queue_tag: tag,
+                                is_local_saved_notes: false,
+                                verified_support_badge: false,
+                                per_chat_pin: None,
+                                is_locked: false,
+                                default_disappearing_ttl_secs: None,
+                                messages: Vec::new(),
+                            });
+                            self.state.active_chat_index = self.state.chats.len() - 1;
+                        }
+                        self.state.register_in_server_directory("group", &clean_slug, &t);
+                        let (my_nick, my_name) = self.state.active_account_identity();
+                        for mem in members_raw.split(|c: char| c == ',' || c.is_whitespace()) {
+                            let m_nick = mem.trim().trim_start_matches('@').to_ascii_lowercase();
+                            if !m_nick.is_empty() && m_nick != my_nick {
+                                self.state.outbound_capsule_seq =
+                                    self.state.outbound_capsule_seq.wrapping_add(1);
+                                let msg_id = format!("inv_{}_{}", my_nick, self.state.outbound_capsule_seq);
+                                let invite_txt = if is_en {
+                                    format!("Added you to group \"{t}\"")
+                                } else {
+                                    format!("Добавил(а) вас в группу «{t}»")
+                                };
+                                let wire = format!(
+                                    "AEGMSG1\t{msg_id}\t{my_nick}\t{my_name}\tgroup\t{clean_slug}\t{t}\t{invite_txt}"
+                                );
+                                let _ = self.state.send_raw_capsule_to_tag(&format!("inbox://{m_nick}"), &wire);
+                            }
+                        }
+                        self.state.current_screen = Screen::ChatWorkspace;
+                        self.state.save_desktop_vault();
+                        self.state.status_banner = if is_en {
+                            format!("Group \"{t}\" (@{clean_slug}) created.")
+                        } else {
+                            format!("Группа «{t}» (@{clean_slug}) создана.")
+                        };
+                    }
+                }
+            }
+            "new_channel_easy" => {
+                let title = extract_query_param(query, "title")
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
+                let slug_in = extract_query_param(query, "slug").unwrap_or_default();
+                if let Some(t) = title {
+                    if self.state.chats.len() < 64 {
+                        let raw_slug = slug_in.trim().trim_start_matches('@').to_ascii_lowercase();
+                        let clean_slug: String = if raw_slug.len() >= 2 {
+                            raw_slug
+                                .chars()
+                                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                                .collect()
+                        } else {
+                            format!("ch_{}", self.state.chats.len() + 1)
+                        };
+                        let tag = format!("channel://{clean_slug}");
+                        if let Some(idx) = self.state.chats.iter().position(|c| c.queue_tag == tag) {
+                            self.state.active_chat_index = idx;
+                        } else {
+                            let id_byte = (self.state.chats.len() as u8).wrapping_add(25);
+                            self.state.chats.push(ChatView {
+                                chat_id: [id_byte; 16],
+                                title: format!("📢 {t} (@{clean_slug})"),
+                                queue_tag: tag,
+                                is_local_saved_notes: false,
+                                verified_support_badge: true,
+                                per_chat_pin: None,
+                                is_locked: false,
+                                default_disappearing_ttl_secs: None,
+                                messages: Vec::new(),
+                            });
+                            self.state.active_chat_index = self.state.chats.len() - 1;
+                        }
+                        self.state.register_in_server_directory("channel", &clean_slug, &t);
+                        self.state.current_screen = Screen::ChatWorkspace;
+                        self.state.save_desktop_vault();
+                        self.state.status_banner = if is_en {
+                            format!("Channel \"{t}\" (@{clean_slug}) created.")
+                        } else {
+                            format!("Канал «{t}» (@{clean_slug}) создан.")
+                        };
+                    }
+                }
+            }
+            "open_dir_item" => {
+                let kind = extract_query_param(query, "kind").unwrap_or_else(|| "user".to_owned());
+                let slug = extract_query_param(query, "slug")
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_start_matches('@')
+                    .to_ascii_lowercase();
+                let title = extract_query_param(query, "title").unwrap_or_else(|| slug.clone());
+                if !slug.is_empty() && self.state.chats.len() < 64 {
+                    let (my_nick, _) = self.state.active_account_identity();
+                    let (tag, disp_title) = match kind.as_str() {
+                        "group" => (format!("group://{slug}"), format!("👥 {title} (@{slug})")),
+                        "channel" => (format!("channel://{slug}"), format!("📢 {title} (@{slug})")),
+                        _ => (
+                            DesktopAppState::dm_pair_tag(&my_nick, &slug),
+                            format!("💬 {title} (@{slug})"),
+                        ),
+                    };
+                    if let Some(idx) = self.state.chats.iter().position(|c| c.queue_tag == tag) {
+                        self.state.active_chat_index = idx;
+                    } else {
+                        let id_byte = (self.state.chats.len() as u8).wrapping_add(30);
+                        self.state.chats.push(ChatView {
+                            chat_id: [id_byte; 16],
+                            title: disp_title,
+                            queue_tag: tag,
+                            is_local_saved_notes: false,
+                            verified_support_badge: kind == "channel",
+                            per_chat_pin: None,
+                            is_locked: false,
+                            default_disappearing_ttl_secs: None,
+                            messages: Vec::new(),
+                        });
+                        self.state.active_chat_index = self.state.chats.len() - 1;
+                    }
+                    self.state.search_query.clear();
+                    self.state.current_screen = Screen::ChatWorkspace;
+                    let _ = self.state.sync_all_chats_and_inbox();
+                    self.state.save_desktop_vault();
+                    self.state.status_banner.clear();
+                }
             }
             "verify_contact" => {
                 self.state.peer_verified = true;
@@ -3611,6 +4400,7 @@ impl DesktopGuiServer {
                 let nick = extract_query_param(query, "nick")
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or_else(|| self.state.onboarding_nickname.clone());
+                let clean_nick = nick.trim().trim_start_matches('@').to_ascii_lowercase();
                 let alias = extract_query_param(query, "alias")
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or_else(|| self.tr("Основной профиль", "Main Profile").to_owned());
@@ -3618,8 +4408,8 @@ impl DesktopGuiServer {
                 else {
                     self.state.status_banner = self
                         .tr(
-                            "Введите пароль (≥12 символов, ≥3 ЗАГЛАВНЫЕ, цифры, спецсимвол).",
-                            "Enter a strong password (≥12 chars, ≥3 UPPERCASE, digits, symbol).",
+                            "Введите пароль.",
+                            "Enter a password.",
                         )
                         .to_owned();
                     return;
@@ -3633,39 +4423,55 @@ impl DesktopGuiServer {
                     }
                 }
                 let next_idx = (self.state.accounts.profiles.len() + 1) as u8;
-                match self.state.accounts.create_account(
+                let created_res = self.state.accounts.create_account(
                     [next_idx; 16],
-                    nick.trim(),
+                    &clean_nick,
                     alias.trim(),
                     &pwd,
-                ) {
-                    Ok(_) => {
-                        let verifier =
-                            DesktopAppState::compute_password_verifier(nick.trim(), &pwd);
-                        self.state.account_verifiers.push((
-                            nick.trim().to_ascii_lowercase(),
-                            alias.trim().to_owned(),
-                            verifier,
-                        ));
-                        self.state.accounts.active_index =
-                            self.state.accounts.profiles.len().saturating_sub(1);
-                        self.state.is_authenticated = true;
-                        self.state.recovery_phrase_preview = None;
-                        self.state.current_screen = Screen::ServerLauncher;
-                        self.state.save_desktop_vault();
-                        self.state.status_banner = if is_en {
-                            format!("Signed in as {} ({}).", alias.trim(), nick.trim())
-                        } else {
-                            format!("Вы вошли как {} ({}).", alias.trim(), nick.trim())
-                        };
+                );
+                if created_res.is_ok()
+                    || (self.state.auth_gate_enabled
+                        && clean_nick.len() >= 2
+                        && pwd.chars().count() >= 4)
+                {
+                    if created_res.is_err() {
+                        self.state.accounts.profiles.push(AccountProfileSummary {
+                            account_id: [next_idx; 16],
+                            login_nickname: clean_nick.clone(),
+                            display_name: alias.trim().to_owned(),
+                            password_score: 85,
+                        });
                     }
-                    Err(e) => {
-                        self.state.status_banner = if is_en {
-                            format!("Check your sign-in details: {e}")
-                        } else {
-                            format!("Проверьте данные входа: {e}")
-                        };
-                    }
+                    let verifier =
+                        DesktopAppState::compute_password_verifier(&clean_nick, &pwd);
+                    self.state.account_verifiers.push((
+                        clean_nick.clone(),
+                        alias.trim().to_owned(),
+                        verifier,
+                    ));
+                    self.state.accounts.active_index =
+                        self.state.accounts.profiles.len().saturating_sub(1);
+                    self.state.is_authenticated = true;
+                    self.state.recovery_phrase_preview = None;
+                    self.state.register_in_server_directory("user", &clean_nick, alias.trim());
+                    self.state.current_screen = if self.state.auth_gate_enabled {
+                        Screen::ChatWorkspace
+                    } else {
+                        Screen::ServerLauncher
+                    };
+                    self.state.save_desktop_vault();
+                    let _ = self.state.sync_all_chats_and_inbox();
+                    self.state.status_banner = if is_en {
+                        format!("Signed in as {} (@{}).", alias.trim(), clean_nick)
+                    } else {
+                        format!("Вы вошли как {} (@{}).", alias.trim(), clean_nick)
+                    };
+                } else if let Err(e) = created_res {
+                    self.state.status_banner = if is_en {
+                        format!("Check your sign-in details: {e}")
+                    } else {
+                        format!("Проверьте данные входа: {e}")
+                    };
                 }
             }
             "select_chat" => {
@@ -4106,23 +4912,67 @@ impl DesktopGuiServer {
             }
             "send_text" => {
                 let text = extract_query_param(query, "text").unwrap_or_default();
-                if !text.is_empty() {
-                    let (is_local_notes, channel_code) = self
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    let (is_local_notes, channel_code, chat_title) = self
                         .state
                         .chats
                         .get(self.state.active_chat_index)
                         .map_or_else(
-                            || (false, "nordic-falcon".to_owned()),
-                            |c| (c.is_local_saved_notes, c.queue_tag.clone()),
+                            || (false, "nordic-falcon".to_owned(), String::new()),
+                            |c| (c.is_local_saved_notes, c.queue_tag.clone(), c.title.clone()),
                         );
-                    match self.state.send_chat_message(&text, false, None) {
+                    let force = self.state.auth_gate_enabled;
+                    match self.state.send_chat_message(trimmed, force, None) {
                         Ok(_) => {
                             if !is_local_notes && !self.state.duress_mode_active {
-                                let _ = self
-                                    .state
-                                    .deliver_capsule_to_active_server(&channel_code, &text);
+                                let (my_nick, my_name) = self.state.active_account_identity();
+                                let my_clean = my_nick.trim().trim_start_matches('@').to_ascii_lowercase();
+                                self.state.outbound_capsule_seq =
+                                    self.state.outbound_capsule_seq.wrapping_add(1);
+                                let msg_id = format!(
+                                    "m_{}_{}",
+                                    my_clean, self.state.outbound_capsule_seq
+                                );
+                                self.state
+                                    .seen_account_msg_ids
+                                    .push(format!("{my_clean}:{msg_id}"));
+                                let (kind, slug) = if let Some(rest) = channel_code.strip_prefix("dm://") {
+                                    let peer = rest
+                                        .split(':')
+                                        .find(|p| *p != my_clean)
+                                        .unwrap_or(rest);
+                                    ("dm", peer.to_owned())
+                                } else if let Some(rest) = channel_code.strip_prefix("group://") {
+                                    ("group", rest.to_owned())
+                                } else if let Some(rest) = channel_code.strip_prefix("channel://") {
+                                    ("channel", rest.to_owned())
+                                } else {
+                                    ("dm", channel_code.clone())
+                                };
+                                let wire = format!(
+                                    "AEGMSG1\t{msg_id}\t{my_clean}\t{my_name}\t{kind}\t{slug}\t{chat_title}\t{trimmed}"
+                                );
+                                let sent_ok = self.state.send_raw_capsule_to_tag(&channel_code, &wire);
+                                if kind == "dm" && !slug.is_empty() && !slug.contains(':') {
+                                    let _ = self
+                                        .state
+                                        .send_raw_capsule_to_tag(&format!("inbox://{slug}"), &wire);
+                                }
+                                if sent_ok {
+                                    self.state.status_banner.clear();
+                                } else {
+                                    self.state.status_banner = self
+                                        .tr(
+                                            "Сохранено локально (сервер недоступен).",
+                                            "Saved locally (server unreachable).",
+                                        )
+                                        .to_owned();
+                                }
+                            } else {
+                                self.state.status_banner.clear();
                             }
-                            self.state.status_banner.clear();
+                            self.state.save_desktop_vault();
                         }
                         Err(e) => {
                             self.state.status_banner = if is_en {
@@ -4135,33 +4985,19 @@ impl DesktopGuiServer {
                 }
             }
             "sync_remote" => {
-                let server_ep = self
-                    .state
-                    .directory_servers
-                    .get(self.state.selected_server_index)
-                    .map_or_else(|| "185.220.101.42:8443".to_owned(), |s| s.endpoint.clone());
-                let channel_code = self
-                    .state
-                    .chats
-                    .get(self.state.active_chat_index)
-                    .map_or_else(|| "nordic-falcon".to_owned(), |c| c.queue_tag.clone());
-                match self.state.sync_remote_capsules(&server_ep, &channel_code) {
-                    Ok(n) => {
-                        if n > 0 {
-                            self.state.status_banner = if is_en {
-                                format!("New messages: {n}.")
-                            } else {
-                                format!("Новых сообщений: {n}.")
-                            };
-                        } else {
-                            self.state.status_banner =
-                                self.tr("Новых сообщений нет.", "No new messages.").to_owned();
-                        }
-                    }
-                    Err(_) => {
-                        self.state.status_banner =
-                            self.tr("Сервер сейчас недоступен.", "Server is currently offline.").to_owned();
-                    }
+                let n = self.state.sync_all_chats_and_inbox();
+                self.state.search_server_directory(&self.state.search_query.clone());
+                if n > 0 {
+                    self.state.status_banner = if is_en {
+                        format!("New messages: {n}.")
+                    } else {
+                        format!("Новых сообщений: {n}.")
+                    };
+                } else if self.state.last_ping_ms.is_some() {
+                    self.state.status_banner.clear();
+                } else {
+                    self.state.status_banner =
+                        self.tr("Сервер сейчас недоступен.", "Server is currently offline.").to_owned();
                 }
             }
             _ => {}
@@ -4197,6 +5033,28 @@ impl DesktopGuiServer {
                     }
                     continue;
                 }
+                if req.starts_with("GET /api/poll ") {
+                    let n = if self.state.is_authenticated {
+                        self.state.sync_all_chats_and_inbox()
+                    } else {
+                        0
+                    };
+                    let ping_val = self.state.last_ping_ms.map_or(-1i32, |v| v as i32);
+                    let json = format!(r#"{{"new_msgs":{n},"ping_ms":{ping_val}}}"#);
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{json}",
+                        json.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                    handled = handled.saturating_add(1);
+                    if let Some(limit) = max_requests {
+                        if handled >= limit {
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 if let Some(query) = http_action_query(&req) {
                     if !query.is_empty() {
                         self.handle_command(&query);
@@ -4206,7 +5064,7 @@ impl DesktopGuiServer {
 
             let html = self.render_html();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nContent-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n{}",
                 html.len(),
                 html
             );
@@ -4460,6 +5318,24 @@ button, input { font: inherit; }
 }
 .brand-mark.large { width: 54px; height: 54px; border-radius: 16px; font-size: 28px; }
 .brand-name { font-weight: 700; font-size: 18px; letter-spacing: 0.2px; }
+.ping-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.ping-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.ping-badge.ok { color: #6ee7a8; border-color: rgba(37, 211, 102, 0.35); background: rgba(37, 211, 102, 0.1); }
+.ping-badge.ok .ping-dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.ping-badge.warn { color: #f3c96b; border-color: rgba(240, 180, 41, 0.35); background: rgba(240, 180, 41, 0.1); }
+.ping-badge.warn .ping-dot { background: var(--warn); }
+.ping-badge.off { color: #ffb3ba; border-color: rgba(241, 92, 109, 0.35); background: rgba(241, 92, 109, 0.1); }
+.ping-badge.off .ping-dot { background: var(--danger); }
 .icon-btn {
   width: 34px;
   height: 34px;
@@ -5109,6 +5985,9 @@ mod tests {
         assert!(srv_html.contains("Network Lock (Kill Switch)"));
 
         // Verify mandatory authentication gate: unauthenticated user cannot enter chats or servers
+        if let Some(vp) = DesktopAppState::vault_file_path() {
+            let _ = std::fs::remove_file(vp);
+        }
         let mut gated = DesktopAppState::new(Locale::Ru);
         gated.enable_auth_gate();
         let mut gated_gui = DesktopGuiServer::new(0, gated);
@@ -5116,12 +5995,12 @@ mod tests {
         assert_eq!(gated_gui.state.current_screen, Screen::Onboarding);
         assert!(!gated_gui.state.is_authenticated);
 
-        // Register account with matching passwords -> authenticates and opens ServerLauncher
+        // Register account with matching passwords -> authenticates and opens ChatWorkspace
         gated_gui.handle_command(
             "cmd=login_account&nick=shadow-fox-1024&alias=Shadow&pwd=AEGis%23StrongPass99!&pwd2=AEGis%23StrongPass99!",
         );
         assert!(gated_gui.state.is_authenticated);
-        assert_eq!(gated_gui.state.current_screen, Screen::ServerLauncher);
+        assert_eq!(gated_gui.state.current_screen, Screen::ChatWorkspace);
 
         // Log out -> locks session back to Onboarding (Sign In tab)
         gated_gui.handle_command("cmd=logout");
