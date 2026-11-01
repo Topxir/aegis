@@ -65,19 +65,20 @@ fun AegisComposeApp(
     var showMenu by remember { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(false) }
     var showPanicConfirm by remember { mutableStateOf(false) }
+    var editNameInput by remember { mutableStateOf("") }
+    var editMainUzInput by remember { mutableStateOf("") }
+    var extraUzInput by remember { mutableStateOf("") }
+    var lookupProfileUzInput by remember { mutableStateOf("") }
 
     LaunchedEffect(bridge.isAuthenticated, activeScreen) {
         if (bridge.isAuthenticated) {
             bridge.searchServerDirectoryAsync("") { uiTick++ }
+            bridge.checkForUpdatesAsync(false) { uiTick++ }
             while (bridge.isAuthenticated) {
-                bridge.syncAllChatsAndInboxAsync { newCount, _ ->
-                    if (newCount > 0) {
-                        uiTick++
-                    } else {
-                        uiTick++
-                    }
+                bridge.syncAllChatsAndInboxAsync { _, _ ->
+                    uiTick++
                 }
-                kotlinx.coroutines.delay(2500L)
+                kotlinx.coroutines.delay(1800L)
             }
         }
     }
@@ -640,9 +641,10 @@ fun AegisComposeApp(
                     Column(Modifier.fillMaxSize()) {
                         AppTopBar(
                             title = tr("Профиль", "Profile"),
-                            subtitle = tr("Настройки", "Settings"),
+                            subtitle = tr("@юз и настройки", "@username & settings"),
                             onMenu = { showMenu = true }
                         )
+                        UpdateBanner(bridge = bridge, isRu = isRu) { uiTick++ }
                         StatusBanner(statusBanner)
                         Column(
                             modifier = Modifier
@@ -650,36 +652,195 @@ fun AegisComposeApp(
                                 .verticalScroll(rememberScrollState())
                                 .padding(horizontal = 14.dp, vertical = 8.dp)
                         ) {
+                            bridge.viewedUserProfile?.let { (peerName, peerUz, peerExtras) ->
+                                SectionLabel(tr("Профиль пользователя", "User Profile"))
+                                Surface(
+                                    color = AegisColors.panel,
+                                    shape = RoundedCornerShape(16.dp),
+                                    border = BorderStroke(1.dp, AegisColors.accent.copy(alpha = 0.5f)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(Modifier.padding(16.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Avatar(peerName, size = 56.dp)
+                                            Spacer(Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    bridge.stripUsernameSuffix(peerName),
+                                                    color = AegisColors.text,
+                                                    fontSize = 18.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Spacer(Modifier.height(4.dp))
+                                                val allUzs = (listOf("@$peerUz") + peerExtras.map { "@$it" }).joinToString(" · ")
+                                                Text(
+                                                    "${tr("Юзернейм", "Username")}: $allUzs",
+                                                    color = AegisColors.accent,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.height(12.dp))
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Button(
+                                                onClick = {
+                                                    bridge.openDmChat(peerUz, peerName).onSuccess { idx ->
+                                                        bridge.viewedUserProfile = null
+                                                        activeChatIndex = idx
+                                                        activeScreen = "STEP_3_CONVERSATION"
+                                                        uiTick++
+                                                    }
+                                                },
+                                                shape = RoundedCornerShape(10.dp)
+                                            ) {
+                                                Text(tr("💬 Написать", "💬 Message"), fontWeight = FontWeight.Bold)
+                                            }
+                                            TextButton(onClick = {
+                                                bridge.viewedUserProfile = null
+                                                uiTick++
+                                            }) {
+                                                Text(tr("Закрыть", "Close"), color = AegisColors.muted)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             val account = bridge.accounts.getOrNull(bridge.activeAccountIndex)
                             if (account != null) {
+                                val cleanMyName = bridge.stripUsernameSuffix(account.displayName)
+                                val myExtras = bridge.activeAccountExtraUsernames()
+                                SectionLabel(tr("Мой профиль", "My Profile"))
                                 Surface(
                                     color = AegisColors.panel,
                                     shape = RoundedCornerShape(16.dp),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Row(
-                                        modifier = Modifier.padding(16.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Avatar(account.displayName, size = 58.dp)
-                                        Spacer(Modifier.width(12.dp))
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                account.displayName,
-                                                color = AegisColors.text,
-                                                fontSize = 17.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                            Text(
-                                                "@${account.loginNickname}",
-                                                color = AegisColors.muted,
-                                                fontSize = 12.sp
-                                            )
+                                    Column(Modifier.padding(16.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Avatar(cleanMyName, size = 58.dp)
+                                            Spacer(Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    cleanMyName,
+                                                    color = AegisColors.text,
+                                                    fontSize = 18.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Spacer(Modifier.height(4.dp))
+                                                Text(
+                                                    "${tr("Основной @юз", "Primary @username")}: @${account.loginNickname}",
+                                                    color = AegisColors.accent,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            }
+                                        }
+                                        if (myExtras.isNotEmpty()) {
+                                            Spacer(Modifier.height(8.dp))
+                                            Row(
+                                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                myExtras.forEach { ex ->
+                                                    SmallChoice("@$ex ×") {
+                                                        bridge.removeExtraUsername(ex)
+                                                        uiTick++
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Spacer(Modifier.height(10.dp))
+                                        OutlinedTextField(
+                                            value = editNameInput,
+                                            onValueChange = { editNameInput = it },
+                                            label = { Text(tr("Изменить ник (без @юза)", "Change display name")) },
+                                            placeholder = { Text(cleanMyName) },
+                                            singleLine = true,
+                                            keyboardOptions = incognitoKeyboardOptions,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                        Spacer(Modifier.height(6.dp))
+                                        SmallChoice(tr("Сохранить ник", "Save display name")) {
+                                            bridge.setDisplayName(editNameInput.ifBlank { cleanMyName }).onSuccess {
+                                                editNameInput = ""
+                                                applyStatus(tr("Ник обновлён.", "Display name updated."))
+                                            }.onFailure { applyStatus("${it.message}") }
+                                        }
+
+                                        Spacer(Modifier.height(10.dp))
+                                        OutlinedTextField(
+                                            value = editMainUzInput,
+                                            onValueChange = { editMainUzInput = it },
+                                            label = { Text(tr("Основной @юз (любой от 3 букв)", "Primary @username (3+ chars)")) },
+                                            placeholder = { Text("@${account.loginNickname}") },
+                                            singleLine = true,
+                                            keyboardOptions = incognitoKeyboardOptions,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                        Spacer(Modifier.height(6.dp))
+                                        SmallChoice(tr("Изменить основной @юз", "Update primary @username")) {
+                                            bridge.setPrimaryUsername(editMainUzInput).onSuccess { newUz ->
+                                                editMainUzInput = ""
+                                                applyStatus(tr("Основной @юз: @$newUz", "Primary @username: @$newUz"))
+                                            }.onFailure { applyStatus("${it.message}") }
+                                        }
+
+                                        Spacer(Modifier.height(10.dp))
+                                        OutlinedTextField(
+                                            value = extraUzInput,
+                                            onValueChange = { extraUzInput = it },
+                                            label = { Text(tr("Дополнительный @юз (от 3 букв, можно несколько)", "Extra @username (3+ chars)")) },
+                                            singleLine = true,
+                                            keyboardOptions = incognitoKeyboardOptions,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                        Spacer(Modifier.height(6.dp))
+                                        SmallChoice(tr("+ Добавить ещё @юз", "+ Add extra @username")) {
+                                            bridge.addExtraUsername(extraUzInput).onSuccess { ex ->
+                                                extraUzInput = ""
+                                                applyStatus(tr("Добавлен @юз: @$ex", "Added @username: @$ex"))
+                                            }.onFailure { applyStatus("${it.message}") }
                                         }
                                     }
                                 }
                             } else {
                                 Text(tr("Профиль ещё не создан.", "No profile created yet."), color = AegisColors.muted)
+                            }
+
+                            SectionLabel(tr("Открыть профиль по @юзу", "Open profile by @username"))
+                            Surface(
+                                color = AegisColors.panel,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(Modifier.padding(12.dp)) {
+                                    OutlinedTextField(
+                                        value = lookupProfileUzInput,
+                                        onValueChange = { lookupProfileUzInput = it },
+                                        label = { Text(tr("Введите @юз (напр. @alex)", "Enter @username (e.g. @alex)")) },
+                                        singleLine = true,
+                                        keyboardOptions = incognitoKeyboardOptions,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    Button(
+                                        onClick = {
+                                            val q = lookupProfileUzInput.trim()
+                                            if (q.isNotEmpty()) {
+                                                bridge.openProfileByUzAsync(q) {
+                                                    lookupProfileUzInput = ""
+                                                    uiTick++
+                                                }
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(tr("Открыть профиль", "Open profile"))
+                                    }
+                                }
                             }
 
                             SectionLabel(tr("Аккаунты", "Accounts"))
@@ -699,8 +860,8 @@ fun AegisComposeApp(
                                                     bridge.saveWorkspaceToPrefs()
                                                     applyStatus(
                                                         tr(
-                                                            "Активный профиль: ${slot.displayName}",
-                                                            "Active profile: ${slot.displayName}"
+                                                            "Активный профиль: ${bridge.stripUsernameSuffix(slot.displayName)}",
+                                                            "Active profile: ${bridge.stripUsernameSuffix(slot.displayName)}"
                                                         )
                                                     )
                                                 }
@@ -717,8 +878,7 @@ fun AegisComposeApp(
                                             )
                                             Spacer(Modifier.width(10.dp))
                                             Column(modifier = Modifier.weight(1f)) {
-                                                Text(slot.displayName, color = AegisColors.text, fontSize = 13.sp)
-                                                Text("@${slot.loginNickname}", color = AegisColors.muted, fontSize = 11.sp)
+                                                Text(bridge.stripUsernameSuffix(slot.displayName), color = AegisColors.text, fontSize = 13.sp)
                                             }
                                         }
                                     }
@@ -740,13 +900,48 @@ fun AegisComposeApp(
                                 }
                             }
 
-                            SectionLabel(tr("Переключатели", "Toggles"))
+                            SectionLabel(tr("Обновления и переключатели", "Updates & Toggles"))
                             Surface(
                                 color = AegisColors.panel,
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            tr("Автоскачивание обновлений", "Auto-download updates"),
+                                            color = AegisColors.text,
+                                            fontSize = 13.sp,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Switch(
+                                            checked = bridge.autoDownloadUpdates,
+                                            onCheckedChange = { enabled ->
+                                                bridge.autoDownloadUpdates = enabled
+                                                bridge.saveWorkspaceToPrefs()
+                                                uiTick++
+                                            }
+                                        )
+                                    }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        SmallChoice(tr("🔄 Проверить обновления", "🔄 Check updates")) {
+                                            bridge.checkForUpdatesAsync(true) { ver ->
+                                                applyStatus(
+                                                    if (ver != null) tr("Найдена версия v$ver", "Found version v$ver")
+                                                    else tr("Установлена актуальная версия", "Up to date")
+                                                )
+                                            }
+                                        }
+                                        SmallChoice(tr("⬇ Скачать APK", "⬇ Download APK")) {
+                                            val v = bridge.latestAvailableVersion ?: "0.2.1"
+                                            bridge.downloadUpdateApkAsync(v) { path ->
+                                                if (path != null) {
+                                                    applyStatus(tr("Обновление скачано: $path", "Update downloaded: $path"))
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Spacer(Modifier.height(6.dp))
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
                                             tr("Блокировка сети (Kill Switch)", "Network Lock (Kill Switch)"),
@@ -827,13 +1022,28 @@ fun AegisComposeApp(
                         }
                         Column(Modifier.fillMaxSize().imePadding()) {
                             AppTopBar(
-                                title = currentChat.title,
+                                title = bridge.stripUsernameSuffix(currentChat.title),
                                 subtitle = chatSubtitle,
                                 onBack = {
                                     pendingLeakWarning = null
                                     go("STEP_3_CHAT_LIST")
                                 },
-                                onMenu = { showChatMenu = true },
+                                onMenu = {
+                                    if (currentChat.queueTag.startsWith("dm://")) {
+                                        val (myNick, _) = bridge.activeAccountIdentity()
+                                        val peer = currentChat.queueTag.removePrefix("dm://").split(':').firstOrNull { it != myNick } ?: ""
+                                        if (peer.isNotEmpty()) {
+                                            bridge.openProfileByUzAsync(peer) {
+                                                activeScreen = "PROFILE"
+                                                uiTick++
+                                            }
+                                        } else {
+                                            showChatMenu = true
+                                        }
+                                    } else {
+                                        showChatMenu = true
+                                    }
+                                },
                                 trailing = {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         PingBadge(
@@ -1179,6 +1389,7 @@ fun AegisComposeApp(
                                 }
                             }
                         )
+                        UpdateBanner(bridge = bridge, isRu = isRu) { uiTick++ }
                         StatusBanner(statusBanner)
                         OutlinedTextField(
                             value = searchQuery,
@@ -1186,7 +1397,7 @@ fun AegisComposeApp(
                                 searchQuery = it
                                 bridge.searchServerDirectoryAsync(it) { uiTick++ }
                             },
-                            placeholder = { Text(tr("Поиск: @логин, группа, канал...", "Search: @username, group, channel...")) },
+                            placeholder = { Text(tr("Поиск: @юз, группа, канал...", "Search: @username, group, channel...")) },
                             singleLine = true,
                             keyboardOptions = incognitoKeyboardOptions,
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)
@@ -1199,7 +1410,7 @@ fun AegisComposeApp(
                                 .padding(horizontal = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            SmallChoice(tr("💬 Написать @логин", "💬 Message @user")) {
+                            SmallChoice(tr("💬 Написать по @юзу", "💬 Message @user")) {
                                 newChatMode = "dm"
                                 showNewChatDialog = true
                             }
@@ -1241,6 +1452,41 @@ fun AegisComposeApp(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
+                                                bridge.openProfileByUzAsync(cleanFilter) {
+                                                    searchQuery = ""
+                                                    activeScreen = "PROFILE"
+                                                    uiTick++
+                                                }
+                                            }
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Avatar(cleanFilter, size = 46.dp)
+                                            Spacer(Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    tr("👤 Открыть профиль @$cleanFilter", "👤 Open profile @$cleanFilter"),
+                                                    color = AegisColors.info,
+                                                    fontSize = 15.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    tr("Посмотреть профиль и написать", "View profile and message"),
+                                                    color = AegisColors.muted,
+                                                    fontSize = 12.sp
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                                item {
+                                    Surface(
+                                        color = AegisColors.panel2.copy(alpha = 0.45f),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
                                                 bridge.openDmChat(cleanFilter).onSuccess { idx ->
                                                     searchQuery = ""
                                                     activeChatIndex = idx
@@ -1254,7 +1500,7 @@ fun AegisComposeApp(
                                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Avatar("@$cleanFilter", size = 46.dp)
+                                            Avatar(cleanFilter, size = 46.dp)
                                             Spacer(Modifier.width(12.dp))
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
@@ -1264,7 +1510,7 @@ fun AegisComposeApp(
                                                     fontWeight = FontWeight.Bold
                                                 )
                                                 Text(
-                                                    tr("Открыть личный чат по @логину", "Open direct chat by @username"),
+                                                    tr("Открыть личный чат по @юзу", "Open direct chat by @username"),
                                                     color = AegisColors.muted,
                                                     fontSize = 12.sp
                                                 )
@@ -1273,6 +1519,7 @@ fun AegisComposeApp(
                                     }
                                 }
                                 items(dirMatches) { entry ->
+                                    val cleanEntryTitle = bridge.stripUsernameSuffix(entry.title)
                                     val kindIcon = when (entry.kind) {
                                         "group" -> "👥"
                                         "channel" -> "📢"
@@ -1281,19 +1528,27 @@ fun AegisComposeApp(
                                     val kindLabel = when (entry.kind) {
                                         "group" -> tr("Группа", "Group")
                                         "channel" -> tr("Канал", "Channel")
-                                        else -> tr("Пользователь", "User")
+                                        else -> "${tr("Профиль", "Profile")} · @${entry.slug}"
                                     }
                                     Surface(
                                         color = Color.Transparent,
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
-                                                bridge.openDirectoryItem(entry.kind, entry.slug, entry.title).onSuccess { idx ->
-                                                    searchQuery = ""
-                                                    activeChatIndex = idx
-                                                    activeScreen = "STEP_3_CONVERSATION"
-                                                    bridge.syncAllChatsAndInboxAsync { _, _ -> uiTick++ }
-                                                    uiTick++
+                                                if (entry.kind == "user") {
+                                                    bridge.openProfileByUzAsync(entry.slug) {
+                                                        searchQuery = ""
+                                                        activeScreen = "PROFILE"
+                                                        uiTick++
+                                                    }
+                                                } else {
+                                                    bridge.openDirectoryItem(entry.kind, entry.slug, cleanEntryTitle).onSuccess { idx ->
+                                                        searchQuery = ""
+                                                        activeChatIndex = idx
+                                                        activeScreen = "STEP_3_CONVERSATION"
+                                                        bridge.syncAllChatsAndInboxAsync { _, _ -> uiTick++ }
+                                                        uiTick++
+                                                    }
                                                 }
                                             }
                                     ) {
@@ -1301,11 +1556,11 @@ fun AegisComposeApp(
                                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Avatar(entry.title, size = 46.dp)
+                                            Avatar(cleanEntryTitle, size = 46.dp)
                                             Spacer(Modifier.width(12.dp))
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
-                                                    "$kindIcon ${entry.title} (@${entry.slug})",
+                                                    "$kindIcon $cleanEntryTitle",
                                                     color = AegisColors.text,
                                                     fontSize = 14.sp,
                                                     fontWeight = FontWeight.SemiBold
@@ -1322,6 +1577,7 @@ fun AegisComposeApp(
                             }
                             itemsIndexed(bridge.chats) { actualIndex, chat ->
                                 if (!chatMatches(chat)) return@itemsIndexed
+                                val cleanChatTitle = bridge.stripUsernameSuffix(chat.title)
                                 val preview = if (chat.isLocked) {
                                     tr("Закрыто PIN-кодом", "Locked with PIN")
                                 } else {
@@ -1342,12 +1598,12 @@ fun AegisComposeApp(
                                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Avatar(chat.title, size = 50.dp)
+                                        Avatar(cleanChatTitle, size = 50.dp)
                                         Spacer(Modifier.width(12.dp))
                                         Column(modifier = Modifier.weight(1f)) {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 Text(
-                                                    chat.title,
+                                                    cleanChatTitle,
                                                     color = AegisColors.text,
                                                     fontSize = 15.sp,
                                                     fontWeight = FontWeight.SemiBold,
@@ -1634,6 +1890,62 @@ private fun AuthCard(content: @Composable ColumnScope.() -> Unit) {
             modifier = Modifier.padding(18.dp),
             content = content
         )
+    }
+}
+
+@Composable
+private fun UpdateBanner(
+    bridge: AegisRustBridge,
+    isRu: Boolean,
+    onChanged: () -> Unit
+) {
+    val dlPath = bridge.downloadedUpdatePath
+    val availVer = bridge.latestAvailableVersion
+    if (dlPath != null) {
+        Surface(
+            color = AegisColors.accent.copy(alpha = 0.16f),
+            shape = RoundedCornerShape(10.dp),
+            border = BorderStroke(1.dp, AegisColors.accent.copy(alpha = 0.5f)),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    if (isRu) "✅ Обновление скачано автоматически" else "✅ Update auto-downloaded",
+                    color = AegisColors.accent,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        return
+    }
+    if (availVer != null && availVer != AegisRustBridge.APP_VERSION) {
+        Surface(
+            color = AegisColors.info.copy(alpha = 0.16f),
+            shape = RoundedCornerShape(10.dp),
+            border = BorderStroke(1.dp, AegisColors.info.copy(alpha = 0.5f)),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    if (isRu) "🚀 Доступно обновление Aegis v$availVer" else "🚀 Update Aegis v$availVer available",
+                    color = AegisColors.info,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                SmallChoice(if (isRu) "⬇ Скачать" else "⬇ Download") {
+                    bridge.downloadUpdateApkAsync(availVer) { onChanged() }
+                }
+            }
+        }
     }
 }
 

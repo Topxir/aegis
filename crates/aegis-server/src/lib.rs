@@ -149,6 +149,7 @@ pub struct FederationServerState {
     seen_tunnel_nonces: Vec<[u8; 44]>,
     opaque_records: BTreeMap<[u8; 32], Vec<u8>>,
     directory_entries: BTreeMap<String, (String, String)>,
+    latest_app_version: String,
     requests_in_window: u32,
     suspicious_burst: bool,
     window_started_unix_secs: u64,
@@ -219,6 +220,7 @@ impl FederationServerState {
             seen_tunnel_nonces: Vec::new(),
             opaque_records: BTreeMap::new(),
             directory_entries,
+            latest_app_version: "0.2.0".to_owned(),
             requests_in_window: 0,
             suspicious_burst: false,
             window_started_unix_secs: current_unix_seconds(),
@@ -1400,18 +1402,35 @@ pub fn handle_http_request(
                 .trim_start_matches('@')
                 .to_ascii_lowercase();
             let title = extract_simple_param(q, "title").unwrap_or_else(|| slug.clone());
+            let aliases_raw = extract_simple_param(q, "aliases").unwrap_or_default();
             if (kind == "user" || kind == "group" || kind == "channel")
-                && slug.len() >= 2
+                && slug.len() >= 3
                 && slug.len() <= 48
                 && slug
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
                 && server.directory_entries.len() < 8_192
             {
+                let clean_title: String = title.trim().chars().take(64).collect();
                 server.directory_entries.insert(
                     format!("{kind}:{slug}"),
-                    (kind, title.trim().chars().take(64).collect()),
+                    (kind.clone(), clean_title.clone()),
                 );
+                for extra in aliases_raw.split(',') {
+                    let ex = extra.trim().trim_start_matches('@').to_ascii_lowercase();
+                    if ex.len() >= 3
+                        && ex.len() <= 48
+                        && ex
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+                        && server.directory_entries.len() < 8_192
+                    {
+                        server.directory_entries.insert(
+                            format!("{kind}:{ex}"),
+                            (kind.clone(), clean_title.clone()),
+                        );
+                    }
+                }
                 (200, "application/json", r#"{"status":"registered"}"#.to_owned())
             } else {
                 (400, "application/json", r#"{"error":"invalid_dir_entry"}"#.to_owned())
@@ -1437,6 +1456,32 @@ pub fn handle_http_request(
                 }
             }
             (200, "text/plain; charset=utf-8", out)
+        }
+        ("GET", "/api/v1/update/info") => {
+            let ver = &server.latest_app_version;
+            let body_json = format!(
+                r#"{{"version":"{ver}","desktop_url":"https://github.com/Topxir/aegis/raw/main/builds/desktop/aegis-desktop.exe","android_url":"https://github.com/Topxir/aegis/raw/main/builds/android-apk/aegis-messenger-release.apk"}}"#
+            );
+            (200, "application/json", body_json)
+        }
+        ("POST", "/api/v1/update/publish") => {
+            let q = query_opt.unwrap_or("");
+            if let Some(v) = extract_simple_param(q, "version") {
+                let clean: String = v
+                    .trim()
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+                    .take(24)
+                    .collect();
+                if !clean.is_empty() {
+                    server.latest_app_version = clean;
+                }
+            }
+            (
+                200,
+                "application/json",
+                format!(r#"{{"status":"published","version":"{}"}}"#, server.latest_app_version),
+            )
         }
         ("POST", "/api/v1/tunnel/sealed") => {
             let Ok(wire) = hex_decode_bytes(body.trim()) else {

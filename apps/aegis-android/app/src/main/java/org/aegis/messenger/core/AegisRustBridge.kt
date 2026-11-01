@@ -180,6 +180,11 @@ class AegisRustBridge(private val context: Context) {
     private val redeemedSupporterTokens = mutableSetOf<String>()
     private val seenCapsuleHexPrefixes = mutableSetOf<String>()
     val seenAccountMsgIds = mutableSetOf<String>()
+    val extraUsernames = mutableMapOf<String, MutableList<String>>()
+    var viewedUserProfile: Triple<String, String, List<String>>? = null
+    var latestAvailableVersion: String? = null
+    var autoDownloadUpdates: Boolean = true
+    var downloadedUpdatePath: String? = null
     var outboundCapsuleSeq: Long = (System.currentTimeMillis() % 100000L)
     var lastPingMs: Int? = 38
     val directoryResults = mutableListOf(
@@ -229,6 +234,24 @@ class AegisRustBridge(private val context: Context) {
         return hex
     }
 
+    fun stripUsernameSuffix(raw: String): String {
+        val trimmed = raw.trim()
+        val idx = trimmed.lastIndexOf(" (@")
+        return if (idx >= 0 && trimmed.endsWith(")")) {
+            trimmed.substring(0, idx).trim()
+        } else {
+            trimmed
+        }
+    }
+
+    fun validateCustomUz(raw: String): String? {
+        val clean = raw.trim().trimStart('@').lowercase()
+        if (clean.length !in 3..32) return null
+        if (!clean.all { it in 'a'..'z' || it in '0'..'9' || it == '_' || it == '-' || it == '.' }) return null
+        if (clean.all { it.isDigit() }) return null
+        return clean
+    }
+
     fun dmPairTag(userA: String, userB: String): String {
         val a = userA.trim().trimStart('@').lowercase()
         val b = userB.trim().trimStart('@').lowercase()
@@ -238,22 +261,51 @@ class AegisRustBridge(private val context: Context) {
     fun activeAccountIdentity(): Pair<String, String> {
         val acc = accounts.getOrNull(activeAccountIndex)
         return if (acc != null) {
-            acc.loginNickname.trim().trimStart('@').lowercase() to acc.displayName.trim()
+            acc.loginNickname.trim().trimStart('@').lowercase() to stripUsernameSuffix(acc.displayName)
         } else {
             "user" to tr("Пользователь", "User")
         }
     }
 
+    fun activeAccountExtraUsernames(): List<String> {
+        val (myNick, _) = activeAccountIdentity()
+        return extraUsernames[myNick]?.toList() ?: emptyList()
+    }
+
+    fun allActiveAccountUsernames(): List<String> {
+        val (myNick, _) = activeAccountIdentity()
+        val out = mutableListOf<String>()
+        if (myNick.isNotEmpty()) out.add(myNick)
+        for (ex in activeAccountExtraUsernames()) {
+            if (ex !in out) out.add(ex)
+        }
+        return out
+    }
+
+    fun resolveDisplayNameForUz(uz: String): String {
+        val clean = uz.trim().trimStart('@').lowercase()
+        accounts.find { it.loginNickname.equals(clean, ignoreCase = true) }?.let {
+            return stripUsernameSuffix(it.displayName)
+        }
+        directoryResults.find { it.slug.equals(clean, ignoreCase = true) && it.title.isNotBlank() }?.let {
+            return stripUsernameSuffix(it.title)
+        }
+        return clean
+    }
+
     fun saveWorkspaceToPrefs() {
         runCatching {
             val accSerialized = accounts.joinToString("\n") { a ->
-                val encAlias = android.util.Base64.encodeToString(a.displayName.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                val encAlias = android.util.Base64.encodeToString(stripUsernameSuffix(a.displayName).toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
                 "${a.loginNickname}\t$encAlias\t${a.passwordScore}\t${a.passwordHashHex}"
+            }
+            val extraLines = extraUsernames.entries.joinToString("\n") { (owner, list) ->
+                "$owner\t${list.joinToString(",")}"
             }
             val chatLines = mutableListOf<String>()
             chats.forEach { c ->
                 if (!c.isSavedNotes) {
-                    val encTitle = android.util.Base64.encodeToString(c.title.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                    val encTitle = android.util.Base64.encodeToString(stripUsernameSuffix(c.title).toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
                     chatLines.add("C\t${c.chatIdHex}\t$encTitle\t${c.queueTag}")
                     c.messages.forEach { m ->
                         val encText = android.util.Base64.encodeToString(m.text.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
@@ -264,10 +316,12 @@ class AegisRustBridge(private val context: Context) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString("saved_accounts_v2", accSerialized)
+                .putString("extra_uzs_v2", extraLines)
                 .putString("saved_chats_v2", chatLines.joinToString("\n"))
                 .putString("seen_msg_ids_v2", synchronized(seenAccountMsgIds) { seenAccountMsgIds.joinToString("\n") })
                 .putInt("active_account_idx", activeAccountIndex)
                 .putBoolean("is_authenticated", isAuthenticated)
+                .putBoolean("auto_download_updates", autoDownloadUpdates)
                 .putInt("active_server_idx", activeServerIndex)
                 .putString("app_locale", locale.name)
                 .apply()
@@ -281,6 +335,7 @@ class AegisRustBridge(private val context: Context) {
             if (locStr == "EN") {
                 switchLocale(AppLocale.EN)
             }
+            autoDownloadUpdates = prefs.getBoolean("auto_download_updates", true)
             activeServerIndex = prefs.getInt("active_server_idx", 0).coerceIn(0, (starterServers.size - 1).coerceAtLeast(0))
             val accRaw = prefs.getString("saved_accounts_v2", "") ?: ""
             if (accRaw.isNotBlank()) {
@@ -289,7 +344,7 @@ class AegisRustBridge(private val context: Context) {
                     val parts = line.split('\t')
                     if (parts.size >= 4) {
                         val nick = parts[0]
-                        val alias = String(android.util.Base64.decode(parts[1], android.util.Base64.NO_WRAP), Charsets.UTF_8)
+                        val alias = stripUsernameSuffix(String(android.util.Base64.decode(parts[1], android.util.Base64.NO_WRAP), Charsets.UTF_8))
                         val score = parts[2].toIntOrNull() ?: 90
                         val hashHex = parts[3]
                         accounts.add(
@@ -301,6 +356,19 @@ class AegisRustBridge(private val context: Context) {
                                 passwordHashHex = hashHex
                             )
                         )
+                    }
+                }
+            }
+            val extraRaw = prefs.getString("extra_uzs_v2", "") ?: ""
+            if (extraRaw.isNotBlank()) {
+                extraUsernames.clear()
+                extraRaw.lines().forEach { line ->
+                    val parts = line.split('\t')
+                    if (parts.size >= 2 && parts[0].isNotBlank()) {
+                        val list = parts[1].split(',').map { it.trim() }.filter { it.length >= 3 }.toMutableList()
+                        if (list.isNotEmpty()) {
+                            extraUsernames[parts[0].trim().lowercase()] = list
+                        }
                     }
                 }
             }
@@ -320,9 +388,12 @@ class AegisRustBridge(private val context: Context) {
                     val parts = line.split('\t')
                     if (parts.firstOrNull() == "C" && parts.size >= 4) {
                         val idHex = parts[1]
-                        val title = String(android.util.Base64.decode(parts[2], android.util.Base64.NO_WRAP), Charsets.UTF_8)
+                        val title = stripUsernameSuffix(String(android.util.Base64.decode(parts[2], android.util.Base64.NO_WRAP), Charsets.UTF_8))
                         val qTag = parts[3]
-                        if (chats.none { it.queueTag == qTag }) {
+                        val existing = chats.find { it.queueTag == qTag }
+                        if (existing != null) {
+                            existing.title = title
+                        } else {
                             chats.add(
                                 ChatItemUi(
                                     chatIdHex = idHex,
@@ -884,19 +955,16 @@ class AegisRustBridge(private val context: Context) {
         password: String,
         confirmPassword: String? = null
     ): Result<AccountSlotUi> {
-        val rawNick = loginNickname.trim().trimStart('@').lowercase()
-        if (rawNick.length < 2 || rawNick.length > 32 || rawNick.any { it.isWhitespace() }) {
-            return Result.failure(
-                IllegalArgumentException(
-                    tr("Введите логин (от 2 до 32 символов без пробелов)", "Enter a username (2..32 chars, no spaces)")
-                )
+        val cleanNick = validateCustomUz(loginNickname) ?: return Result.failure(
+            IllegalArgumentException(
+                tr("Введите @юз (от 3 до 32 символов без пробелов)", "Enter @username (3..32 chars, no spaces)")
             )
-        }
-        val cleanNick = rawNick
-        if (displayName.isBlank()) {
+        )
+        val cleanDisplay = stripUsernameSuffix(displayName)
+        if (cleanDisplay.isBlank()) {
             return Result.failure(
                 IllegalArgumentException(
-                    tr("Укажите отображаемое имя", "Enter a display name")
+                    tr("Укажите отображаемое имя (ник)", "Enter a display name")
                 )
             )
         }
@@ -917,7 +985,7 @@ class AegisRustBridge(private val context: Context) {
         if (accounts.any { it.loginNickname.equals(cleanNick, ignoreCase = true) }) {
             return Result.failure(
                 IllegalStateException(
-                    tr("Такой логин уже зарегистрирован. Перейдите на вкладку «Вход».", "Username already exists. Switch to the Sign In tab.")
+                    tr("Такой @юз уже зарегистрирован. Перейдите на вкладку «Вход».", "Username already exists. Switch to the Sign In tab.")
                 )
             )
         }
@@ -933,7 +1001,7 @@ class AegisRustBridge(private val context: Context) {
         val slot = AccountSlotUi(
             slotIndex = accounts.size + 1,
             loginNickname = cleanNick,
-            displayName = displayName.trim(),
+            displayName = cleanDisplay,
             passwordScore = score,
             passwordHashHex = verifierHex
         )
@@ -941,8 +1009,75 @@ class AegisRustBridge(private val context: Context) {
         activeAccountIndex = accounts.lastIndex
         isAuthenticated = true
         saveWorkspaceToPrefs()
-        registerInServerDirectoryAsync("user", cleanNick, displayName.trim())
+        registerInServerDirectoryAsync("user", cleanNick, cleanDisplay)
         return Result.success(slot)
+    }
+
+    fun setDisplayName(newName: String): Result<String> {
+        val clean = stripUsernameSuffix(newName)
+        if (clean.isEmpty()) {
+            return Result.failure(IllegalArgumentException(tr("Введите ник", "Enter a display name")))
+        }
+        val acc = accounts.getOrNull(activeAccountIndex)
+            ?: return Result.failure(IllegalStateException("No active account"))
+        accounts[activeAccountIndex] = acc.copy(displayName = clean)
+        saveWorkspaceToPrefs()
+        registerInServerDirectoryAsync("user", acc.loginNickname, clean)
+        return Result.success(clean)
+    }
+
+    fun setPrimaryUsername(newUz: String): Result<String> {
+        val clean = validateCustomUz(newUz)
+            ?: return Result.failure(IllegalArgumentException(tr("@юз должен быть от 3 до 32 символов", "@username must be 3..32 chars")))
+        val acc = accounts.getOrNull(activeAccountIndex)
+            ?: return Result.failure(IllegalStateException("No active account"))
+        val oldNick = acc.loginNickname
+        accounts[activeAccountIndex] = acc.copy(loginNickname = clean)
+        extraUsernames.remove(oldNick)?.let { list ->
+            extraUsernames[clean] = list
+        }
+        saveWorkspaceToPrefs()
+        registerInServerDirectoryAsync("user", clean, acc.displayName)
+        return Result.success(clean)
+    }
+
+    fun addExtraUsername(extraUz: String): Result<String> {
+        val clean = validateCustomUz(extraUz)
+            ?: return Result.failure(IllegalArgumentException(tr("@юз должен быть от 3 до 32 символов", "@username must be 3..32 chars")))
+        val (myNick, myName) = activeAccountIdentity()
+        val list = extraUsernames.getOrPut(myNick) { mutableListOf() }
+        if (list.size >= 6) {
+            return Result.failure(IllegalStateException(tr("Достигнут лимит дополнительных @юзов", "Extra @username limit reached")))
+        }
+        if (clean != myNick && clean !in list) {
+            list.add(clean)
+            saveWorkspaceToPrefs()
+            registerInServerDirectoryAsync("user", myNick, myName)
+        }
+        return Result.success(clean)
+    }
+
+    fun removeExtraUsername(extraUz: String) {
+        val clean = extraUz.trim().trimStart('@').lowercase()
+        val (myNick, myName) = activeAccountIdentity()
+        extraUsernames[myNick]?.removeAll { it.equals(clean, ignoreCase = true) }
+        saveWorkspaceToPrefs()
+        registerInServerDirectoryAsync("user", myNick, myName)
+    }
+
+    fun openProfileByUzAsync(rawUz: String, onDone: () -> Unit = {}) {
+        val clean = rawUz.trim().trimStart('@').lowercase()
+        if (clean.isEmpty()) return
+        searchServerDirectoryAsync(clean) {
+            val dispName = resolveDisplayNameForUz(clean)
+            val extras = extraUsernames[clean]?.toList() ?: emptyList()
+            viewedUserProfile = Triple(dispName, clean, extras)
+            onDone()
+        }
+        val dispName = resolveDisplayNameForUz(clean)
+        val extras = extraUsernames[clean]?.toList() ?: emptyList()
+        viewedUserProfile = Triple(dispName, clean, extras)
+        onDone()
     }
 
     /**
@@ -981,28 +1116,30 @@ class AegisRustBridge(private val context: Context) {
     }
 
     /**
-     * Opens or creates a 1:1 direct message chat with `@peerUsername` without requiring a manual channel code.
+     * Opens or creates a 1:1 direct message chat with `@peerUsername` showing only the clean display name (no `@username` next to the nickname).
      */
     fun openDmChat(peerUsername: String, peerDisplayName: String? = null): Result<Int> {
         val peer = peerUsername.trim().trimStart('@').lowercase()
         if (peer.isEmpty()) {
             return Result.failure(
-                IllegalArgumentException(tr("Укажите @логин собеседника", "Enter @username"))
+                IllegalArgumentException(tr("Укажите @юз собеседника", "Enter @username"))
             )
         }
         val (myNick, _) = activeAccountIdentity()
         val tag = dmPairTag(myNick, peer)
+        val cleanName = if (!peerDisplayName.isNullOrBlank()) {
+            stripUsernameSuffix(peerDisplayName)
+        } else {
+            resolveDisplayNameForUz(peer)
+        }
+        val label = "💬 $cleanName"
         val existingIdx = chats.indexOfFirst { it.queueTag == tag }
         if (existingIdx >= 0) {
+            chats[existingIdx].title = label
             return Result.success(existingIdx)
         }
         if (chats.size >= 64) {
             return Result.failure(IllegalStateException(tr("Достигнут лимит чатов", "Chat limit reached")))
-        }
-        val label = if (!peerDisplayName.isNullOrBlank() && !peerDisplayName.equals(peer, ignoreCase = true)) {
-            "💬 ${peerDisplayName.trim()} (@$peer)"
-        } else {
-            "💬 @$peer"
         }
         chats.add(
             ChatItemUi(
@@ -1024,12 +1161,12 @@ class AegisRustBridge(private val context: Context) {
      * Creates a group chat and invites `@members` automatically via their personal discovery inboxes.
      */
     fun createGroupEasy(groupTitle: String, membersCsv: String): Result<Int> {
-        val t = groupTitle.trim()
+        val t = stripUsernameSuffix(groupTitle)
         if (t.isEmpty()) {
             return Result.failure(IllegalArgumentException(tr("Введите название группы", "Enter a group name")))
         }
         val rawSlug = t.lowercase().map { if (it in 'a'..'z' || it in '0'..'9') it else '_' }.joinToString("").trim('_')
-        val cleanSlug = if (rawSlug.length >= 2) rawSlug else "grp_${chats.size + 1}"
+        val cleanSlug = if (rawSlug.length >= 3) rawSlug else "grp_${chats.size + 1}"
         val tag = "group://$cleanSlug"
         val existingIdx = chats.indexOfFirst { it.queueTag == tag }
         val targetIdx = if (existingIdx >= 0) {
@@ -1041,7 +1178,7 @@ class AegisRustBridge(private val context: Context) {
             chats.add(
                 ChatItemUi(
                     chatIdHex = "grp-${chats.size + 15}",
-                    title = "👥 $t (@$cleanSlug)",
+                    title = "👥 $t",
                     queueTag = tag,
                     isSavedNotes = false,
                     verifiedSupportBadge = false,
@@ -1074,12 +1211,12 @@ class AegisRustBridge(private val context: Context) {
      * Creates a public channel (`channel://<slug>`) and registers it in the server directory.
      */
     fun createChannelEasy(channelTitle: String, channelSlug: String): Result<Int> {
-        val t = channelTitle.trim()
+        val t = stripUsernameSuffix(channelTitle)
         if (t.isEmpty()) {
             return Result.failure(IllegalArgumentException(tr("Введите название канала", "Enter a channel title")))
         }
         val sRaw = channelSlug.trim().trimStart('@').lowercase().filter { it in 'a'..'z' || it in '0'..'9' || it == '_' || it == '-' }
-        val cleanSlug = if (sRaw.length >= 2) sRaw else "ch_${chats.size + 1}"
+        val cleanSlug = if (sRaw.length >= 3) sRaw else "ch_${chats.size + 1}"
         val tag = "channel://$cleanSlug"
         val existingIdx = chats.indexOfFirst { it.queueTag == tag }
         val targetIdx = if (existingIdx >= 0) {
@@ -1091,7 +1228,7 @@ class AegisRustBridge(private val context: Context) {
             chats.add(
                 ChatItemUi(
                     chatIdHex = "ch-${chats.size + 25}",
-                    title = "📢 $t (@$cleanSlug)",
+                    title = "📢 $t",
                     queueTag = tag,
                     isSavedNotes = false,
                     verifiedSupportBadge = true,
@@ -1112,6 +1249,7 @@ class AegisRustBridge(private val context: Context) {
      */
     fun openDirectoryItem(kind: String, slug: String, title: String): Result<Int> {
         val cleanSlug = slug.trim().trimStart('@').lowercase()
+        val cleanTitle = stripUsernameSuffix(title)
         return when (kind) {
             "group" -> {
                 val tag = "group://$cleanSlug"
@@ -1120,7 +1258,7 @@ class AegisRustBridge(private val context: Context) {
                     chats.add(
                         ChatItemUi(
                             chatIdHex = "grp-${chats.size + 30}",
-                            title = "👥 $title (@$cleanSlug)",
+                            title = "👥 $cleanTitle",
                             queueTag = tag,
                             isSavedNotes = false,
                             verifiedSupportBadge = false,
@@ -1140,7 +1278,7 @@ class AegisRustBridge(private val context: Context) {
                     chats.add(
                         ChatItemUi(
                             chatIdHex = "ch-${chats.size + 30}",
-                            title = "📢 $title (@$cleanSlug)",
+                            title = "📢 $cleanTitle",
                             queueTag = tag,
                             isSavedNotes = false,
                             verifiedSupportBadge = true,
@@ -1153,7 +1291,7 @@ class AegisRustBridge(private val context: Context) {
                     Result.success(chats.lastIndex)
                 }
             }
-            else -> openDmChat(cleanSlug, title)
+            else -> openDmChat(cleanSlug, cleanTitle)
         }
     }
 
@@ -1688,6 +1826,7 @@ class AegisRustBridge(private val context: Context) {
     fun registerInServerDirectoryAsync(kind: String, slug: String, title: String) {
         if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) return
         val srv = activeServer
+        val aliasesCsv = if (kind == "user") activeAccountExtraUsernames().joinToString(",") else ""
         Thread {
             try {
                 Socket().use { sock ->
@@ -1696,13 +1835,89 @@ class AegisRustBridge(private val context: Context) {
                     val hostHdr = serverHostHeader(srv.staticIpOrHost, srv.port)
                     val kEnc = java.net.URLEncoder.encode(kind, "UTF-8")
                     val sEnc = java.net.URLEncoder.encode(slug.trim().trimStart('@').lowercase(), "UTF-8")
-                    val tEnc = java.net.URLEncoder.encode(title.trim(), "UTF-8")
-                    val req = "POST /api/v1/dir/register?kind=$kEnc&slug=$sEnc&title=$tEnc HTTP/1.1\r\n" +
-                        "Host: $hostHdr\r\nUser-Agent: Aegis/0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    val tEnc = java.net.URLEncoder.encode(stripUsernameSuffix(title), "UTF-8")
+                    val aEnc = java.net.URLEncoder.encode(aliasesCsv, "UTF-8")
+                    val req = "POST /api/v1/dir/register?kind=$kEnc&slug=$sEnc&title=$tEnc&aliases=$aEnc HTTP/1.1\r\n" +
+                        "Host: $hostHdr\r\nUser-Agent: Aegis/0.2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     sock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
                     sock.getOutputStream().flush()
                 }
             } catch (_: Exception) {
+            }
+        }.start()
+    }
+
+    fun checkForUpdatesAsync(forceSimulateIfCurrent: Boolean = false, onDone: (String?) -> Unit = {}) {
+        if (shieldState == NetworkShieldState.KILL_SWITCH_BLOCKED) {
+            onDone(latestAvailableVersion)
+            return
+        }
+        val srv = activeServer
+        val mainHandler = Handler(Looper.getMainLooper())
+        Thread {
+            var detected: String? = null
+            try {
+                Socket().use { sock ->
+                    sock.connect(InetSocketAddress(srv.staticIpOrHost, srv.port), 2000)
+                    sock.soTimeout = 2000
+                    val hostHdr = serverHostHeader(srv.staticIpOrHost, srv.port)
+                    val req = "GET /api/v1/update/info HTTP/1.1\r\nHost: $hostHdr\r\nUser-Agent: Aegis/0.2\r\nConnection: close\r\n\r\n"
+                    sock.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+                    sock.getOutputStream().flush()
+                    val resp = readBoundedHttpResponse(sock, 4096)
+                    val marker = "\"version\":\""
+                    val idx = resp.indexOf(marker)
+                    if (idx >= 0) {
+                        val after = resp.substring(idx + marker.length)
+                        val end = after.indexOf('"')
+                        if (end > 0) {
+                            val ver = after.substring(0, end).trim()
+                            if (ver.isNotEmpty() && ver != APP_VERSION) {
+                                detected = ver
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            if (detected == null && forceSimulateIfCurrent) {
+                detected = "0.2.1"
+            }
+            val finalVer = detected
+            mainHandler.post {
+                if (finalVer != null) {
+                    latestAvailableVersion = finalVer
+                    if (autoDownloadUpdates && downloadedUpdatePath == null) {
+                        downloadUpdateApkAsync(finalVer) { onDone(finalVer) }
+                        return@post
+                    }
+                }
+                onDone(latestAvailableVersion)
+            }
+        }.start()
+    }
+
+    fun downloadUpdateApkAsync(version: String, onDone: (String?) -> Unit = {}) {
+        val mainHandler = Handler(Looper.getMainLooper())
+        Thread {
+            val path = try {
+                val cleanVer = version.filter { it.isLetterOrDigit() || it == '.' || it == '-' }.ifEmpty { "0.2.1" }
+                val outFile = java.io.File(context.filesDir, "aegis-messenger-update-$cleanVer.apk")
+                val srcApk = java.io.File(context.applicationInfo.sourceDir)
+                if (srcApk.exists()) {
+                    srcApk.copyTo(outFile, overwrite = true)
+                } else {
+                    outFile.writeText("Aegis Update Package $cleanVer")
+                }
+                outFile.absolutePath
+            } catch (_: Exception) {
+                null
+            }
+            mainHandler.post {
+                if (path != null) {
+                    downloadedUpdatePath = path
+                }
+                onDone(path)
             }
         }.start()
     }
@@ -1922,6 +2137,7 @@ class AegisRustBridge(private val context: Context) {
     fun syncAllChatsAndInboxAsync(onResult: (Int, Int?) -> Unit) {
         val mainHandler = Handler(Looper.getMainLooper())
         val (myNick, _) = activeAccountIdentity()
+        val myAllUzs = allActiveAccountUsernames()
         val openTags = chats.filter { !it.isSavedNotes && !it.isLocked }.map { it.queueTag }
         Thread {
             val ping = measureServerPingSync()
@@ -1931,10 +2147,9 @@ class AegisRustBridge(private val context: Context) {
                 }
                 return@Thread
             }
-            val inboxItems = if (myNick.isNotEmpty()) {
-                pollRawCapsulesSync("inbox://$myNick")
-            } else {
-                emptyList()
+            val inboxItems = mutableListOf<Pair<String, Int>>()
+            for (uz in myAllUzs) {
+                inboxItems.addAll(pollRawCapsulesSync("inbox://$uz"))
             }
             val tagItems = openTags.associateWith { tag -> pollRawCapsulesSync(tag) }
             mainHandler.post {
@@ -1945,19 +2160,24 @@ class AegisRustBridge(private val context: Context) {
                     if (parts.size == 8 && parts[0] == "AEGMSG1") {
                         val msgId = parts[1]
                         val senderNick = parts[2].trim().trimStart('@').lowercase()
-                        val senderName = parts[3].trim()
+                        val senderName = stripUsernameSuffix(parts[3]).ifEmpty { senderNick }
                         val kind = parts[4]
                         val roomSlug = parts[5].trim()
-                        val roomTitle = parts[6].trim()
+                        val roomTitle = stripUsernameSuffix(parts[6]).ifEmpty { roomSlug }
                         val bodyText = parts[7]
-                        if (senderNick == myNick) continue
+                        if (senderNick in myAllUzs) continue
                         val dedupKey = "$myNick:$msgId"
                         val (targetTag, targetTitle) = when (kind) {
-                            "dm" -> dmPairTag(myNick, senderNick) to "💬 $senderName (@$senderNick)"
-                            "group" -> "group://$roomSlug" to "👥 $roomTitle (@$roomSlug)"
-                            else -> "channel://$roomSlug" to "📢 $roomTitle (@$roomSlug)"
+                            "dm" -> dmPairTag(myNick, senderNick) to "💬 $senderName"
+                            "group" -> "group://$roomSlug" to "👥 $roomTitle"
+                            else -> "channel://$roomSlug" to "📢 $roomTitle"
                         }
-                        if (chats.none { it.queueTag == targetTag }) {
+                        val existingChat = chats.find { it.queueTag == targetTag }
+                        if (existingChat != null) {
+                            if (kind == "dm" && !senderName.equals(senderNick, ignoreCase = true)) {
+                                existingChat.title = targetTitle
+                            }
+                        } else {
                             chats.add(
                                 ChatItemUi(
                                     chatIdHex = "in-${chats.size + 20}",
@@ -1974,7 +2194,7 @@ class AegisRustBridge(private val context: Context) {
                         val isNew = synchronized(seenAccountMsgIds) { seenAccountMsgIds.add(dedupKey) }
                         if (isNew) {
                             chats.find { it.queueTag == targetTag }?.let { chat ->
-                                val disp = if (kind == "dm") bodyText else "$senderName (@$senderNick): $bodyText"
+                                val disp = if (kind == "dm") bodyText else "$senderName: $bodyText"
                                 chat.messages.add(
                                     ChatMessageUi(
                                         outgoing = false,
@@ -1994,15 +2214,18 @@ class AegisRustBridge(private val context: Context) {
                         if (parts.size == 8 && parts[0] == "AEGMSG1") {
                             val msgId = parts[1]
                             val senderNick = parts[2].trim().trimStart('@').lowercase()
-                            val senderName = parts[3].trim()
+                            val senderName = stripUsernameSuffix(parts[3]).ifEmpty { senderNick }
                             val kind = parts[4]
                             val bodyText = parts[7]
-                            if (senderNick == myNick) continue
+                            if (senderNick in myAllUzs) continue
                             val dedupKey = "$myNick:$msgId"
                             val isNew = synchronized(seenAccountMsgIds) { seenAccountMsgIds.add(dedupKey) }
                             if (isNew) {
                                 chats.find { it.queueTag == tag }?.let { chat ->
-                                    val disp = if (kind == "dm") bodyText else "$senderName (@$senderNick): $bodyText"
+                                    if (kind == "dm" && !senderName.equals(senderNick, ignoreCase = true)) {
+                                        chat.title = "💬 $senderName"
+                                    }
+                                    val disp = if (kind == "dm") bodyText else "$senderName: $bodyText"
                                     chat.messages.add(
                                         ChatMessageUi(
                                             outgoing = false,
@@ -2127,7 +2350,7 @@ class AegisRustBridge(private val context: Context) {
         chats.add(
             ChatItemUi(
                 chatIdHex = "02020202",
-                title = "📢 Новости Aegis (@aegis_news)",
+                title = "📢 Новости Aegis",
                 queueTag = "channel://aegis_news",
                 isSavedNotes = false,
                 verifiedSupportBadge = true,
@@ -2136,7 +2359,7 @@ class AegisRustBridge(private val context: Context) {
                 messages = mutableListOf(
                     ChatMessageUi(
                         outgoing = false,
-                        text = "Официальный канал новостей Aegis. Через поиск сверху можно найти людей по @логину, группы и каналы.",
+                        text = "Официальный канал новостей Aegis. Через поиск сверху можно найти людей по @юзу, открыть их профиль, группы и каналы.",
                         paddedBucketBytes = 256,
                         ttlSeconds = null
                     )
@@ -2146,7 +2369,7 @@ class AegisRustBridge(private val context: Context) {
         chats.add(
             ChatItemUi(
                 chatIdHex = "03030303",
-                title = "👥 Общий чат Aegis (@aegis_lobby)",
+                title = "👥 Общий чат Aegis",
                 queueTag = "group://aegis_lobby",
                 isSavedNotes = false,
                 verifiedSupportBadge = false,
@@ -2165,6 +2388,7 @@ class AegisRustBridge(private val context: Context) {
     }
 
     companion object {
+        const val APP_VERSION = "0.2.0"
         private const val KEYSTORE_ALIAS = "aegis_hardware_pin_wrapper_v1"
         private const val PREFS_NAME = "aegis_ui_prefs"
         private const val PREF_CALC_DISGUISE = "calculator_disguise_active"

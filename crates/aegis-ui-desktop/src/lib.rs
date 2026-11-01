@@ -683,6 +683,18 @@ pub struct DesktopAppState {
     pub directory_results: Vec<(String, String, String)>,
     /// Per-account deduplication keys `"{account_nick}:{msg_id}"` so multiple accounts on the same PC can exchange messages.
     pub seen_account_msg_ids: Vec<String>,
+    /// Additional `@username` aliases per account `(primary_nick, extra_uz)` (3+ chars each).
+    pub extra_usernames: Vec<(String, String)>,
+    /// Whether the Android-style Profile view is currently open in the workspace.
+    pub profile_modal_open: bool,
+    /// Currently viewed user profile `(display_name, primary_uz, extra_uzs)` opened by `@юз`.
+    pub viewed_user_profile: Option<(String, String, Vec<String>)>,
+    /// Latest available app version reported by the server (`None` or `Some("0.2.0")`).
+    pub latest_available_version: Option<String>,
+    /// Whether new app updates are automatically downloaded in the background.
+    pub auto_download_updates: bool,
+    /// Local filesystem path to the automatically downloaded update package.
+    pub downloaded_update_path: Option<String>,
 }
 
 impl Default for DesktopAppState {
@@ -897,7 +909,47 @@ impl DesktopAppState {
                 ("group".to_owned(), "aegis_lobby".to_owned(), "Общий чат Aegis".to_owned()),
             ],
             seen_account_msg_ids: Vec::new(),
+            extra_usernames: Vec::new(),
+            profile_modal_open: false,
+            viewed_user_profile: None,
+            latest_available_version: None,
+            auto_download_updates: true,
+            downloaded_update_path: None,
         }
+    }
+
+    /// Current desktop client release version.
+    pub const APP_VERSION: &'static str = "0.2.0";
+
+    /// Strips any trailing `" (@...)"` username tag from a display name or chat title.
+    #[must_use]
+    pub fn strip_username_suffix(raw: &str) -> String {
+        let trimmed = raw.trim();
+        if let Some(idx) = trimmed.rfind(" (@") {
+            if trimmed.ends_with(')') {
+                return trimmed[..idx].trim().to_owned();
+            }
+        }
+        trimmed.to_owned()
+    }
+
+    /// Validates a custom `@юз` (`3..=32` characters, ASCII alphanumeric or `_`, `-`, `.`).
+    #[must_use]
+    pub fn validate_custom_uz(raw: &str) -> Option<String> {
+        let clean = raw.trim().trim_start_matches('@').to_ascii_lowercase();
+        if clean.len() < 3 || clean.len() > 32 {
+            return None;
+        }
+        if !clean
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            return None;
+        }
+        if clean.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        Some(clean)
     }
 
     /// Enables the mandatory authentication gate for the interactive desktop GUI,
@@ -910,7 +962,7 @@ impl DesktopAppState {
         self.chats.retain(|c| c.is_local_saved_notes);
         self.chats.push(ChatView {
             chat_id: [0x02; 16],
-            title: "📢 Новости Aegis (@aegis_news)".to_owned(),
+            title: "📢 Новости Aegis".to_owned(),
             queue_tag: "channel://aegis_news".to_owned(),
             is_local_saved_notes: false,
             verified_support_badge: true,
@@ -919,7 +971,7 @@ impl DesktopAppState {
             default_disappearing_ttl_secs: None,
             messages: vec![ChatMessageView {
                 outgoing: false,
-                text: "Официальный канал новостей Aegis. Через поиск сверху можно найти людей по @логину, группы и каналы.".to_owned(),
+                text: "Официальный канал новостей Aegis. Через поиск сверху можно найти людей по @юзу, открыть их профиль, группы и каналы.".to_owned(),
                 padded_bucket_bytes: 256,
                 disappearing_ttl_secs: None,
                 attachment: None,
@@ -927,7 +979,7 @@ impl DesktopAppState {
         });
         self.chats.push(ChatView {
             chat_id: [0x03; 16],
-            title: "👥 Общий чат Aegis (@aegis_lobby)".to_owned(),
+            title: "👥 Общий чат Aegis".to_owned(),
             queue_tag: "group://aegis_lobby".to_owned(),
             is_local_saved_notes: false,
             verified_support_badge: false,
@@ -949,6 +1001,8 @@ impl DesktopAppState {
         }
         let _ = self.measure_server_ping_ms();
         if self.is_authenticated {
+            let (my_nick, my_name) = self.active_account_identity();
+            self.register_in_server_directory("user", &my_nick, &my_name);
             let _ = self.sync_all_chats_and_inbox();
         }
     }
@@ -991,8 +1045,156 @@ impl DesktopAppState {
             .get(self.accounts.active_index)
             .map_or_else(
                 || ("user".to_owned(), "Пользователь".to_owned()),
-                |a| (a.login_nickname.clone(), a.display_name.clone()),
+                |a| (a.login_nickname.clone(), Self::strip_username_suffix(&a.display_name)),
             )
+    }
+
+    /// Returns all additional `@юз` aliases belonging to the active account.
+    #[must_use]
+    pub fn active_account_extra_usernames(&self) -> Vec<String> {
+        let (my_nick, _) = self.active_account_identity();
+        let my_clean = my_nick.trim().trim_start_matches('@').to_ascii_lowercase();
+        self.extra_usernames
+            .iter()
+            .filter(|(owner, _)| owner.eq_ignore_ascii_case(&my_clean))
+            .map(|(_, uz)| uz.clone())
+            .collect()
+    }
+
+    /// Returns the primary `@юз` plus all additional `@юзы` of the active account.
+    #[must_use]
+    pub fn all_active_account_usernames(&self) -> Vec<String> {
+        let (my_nick, _) = self.active_account_identity();
+        let my_clean = my_nick.trim().trim_start_matches('@').to_ascii_lowercase();
+        let mut all = Vec::new();
+        if !my_clean.is_empty() {
+            all.push(my_clean);
+        }
+        for extra in self.active_account_extra_usernames() {
+            if !all.contains(&extra) {
+                all.push(extra);
+            }
+        }
+        all
+    }
+
+    /// Resolves a clean display name (**Ник**, without `@юз`) for a given `@юз`.
+    #[must_use]
+    pub fn resolve_display_name_for_uz(&self, uz: &str) -> String {
+        let clean = uz.trim().trim_start_matches('@').to_ascii_lowercase();
+        for p in &self.accounts.profiles {
+            if p.login_nickname.eq_ignore_ascii_case(&clean) {
+                return Self::strip_username_suffix(&p.display_name);
+            }
+        }
+        for (owner, ex) in &self.extra_usernames {
+            if ex.eq_ignore_ascii_case(&clean) {
+                if let Some(p) = self
+                    .accounts
+                    .profiles
+                    .iter()
+                    .find(|p| p.login_nickname.eq_ignore_ascii_case(owner))
+                {
+                    return Self::strip_username_suffix(&p.display_name);
+                }
+            }
+        }
+        for (_, slug, title) in &self.directory_results {
+            if slug.eq_ignore_ascii_case(&clean) && !title.trim().is_empty() {
+                return Self::strip_username_suffix(title);
+            }
+        }
+        clean
+    }
+
+    /// Opens a user's profile card by their `@юз`, querying the server directory first.
+    pub fn open_profile_by_uz(&mut self, raw_uz: &str) -> bool {
+        let clean = raw_uz.trim().trim_start_matches('@').to_ascii_lowercase();
+        if clean.is_empty() {
+            return false;
+        }
+        self.search_server_directory(&clean);
+        let disp_name = self.resolve_display_name_for_uz(&clean);
+        let mut extras = Vec::new();
+        for (owner, ex) in &self.extra_usernames {
+            if owner.eq_ignore_ascii_case(&clean) && !extras.contains(ex) {
+                extras.push(ex.clone());
+            }
+        }
+        self.viewed_user_profile = Some((disp_name, clean, extras));
+        self.profile_modal_open = true;
+        true
+    }
+
+    /// Checks the active server for a newer app version and auto-downloads it if `auto_download_updates` is enabled.
+    pub fn check_for_updates(&mut self) -> Option<String> {
+        if !self.shield_evaluation.traffic_permitted {
+            return self.latest_available_version.clone();
+        }
+        let (ep, host_hdr) = self.active_server_host_and_header();
+        let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(ep.as_str()) else {
+            return self.latest_available_version.clone();
+        };
+        let Some(addr) = addrs.next() else {
+            return self.latest_available_version.clone();
+        };
+        let dur = std::time::Duration::from_millis(1_800);
+        let Ok(mut stream) = TcpStream::connect_timeout(&addr, dur) else {
+            return self.latest_available_version.clone();
+        };
+        let _ = stream.set_read_timeout(Some(dur));
+        let _ = stream.set_write_timeout(Some(dur));
+        let req = format!(
+            "GET /api/v1/update/info HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: Aegis/0.2\r\nConnection: close\r\n\r\n"
+        );
+        if stream.write_all(req.as_bytes()).is_err() {
+            return self.latest_available_version.clone();
+        }
+        let _ = stream.flush();
+        let mut resp = Vec::with_capacity(1024);
+        if stream.take(8_192).read_to_end(&mut resp).is_err() {
+            return self.latest_available_version.clone();
+        }
+        let Ok(text) = std::str::from_utf8(&resp) else {
+            return self.latest_available_version.clone();
+        };
+        if let Some(idx) = text.find("\"version\":\"") {
+            let after = &text[idx + 11..];
+            if let Some(end) = after.find('"') {
+                let ver = after[..end].trim();
+                if !ver.is_empty() && ver != Self::APP_VERSION {
+                    self.latest_available_version = Some(ver.to_owned());
+                    if self.auto_download_updates && self.downloaded_update_path.is_none() {
+                        let _ = self.download_update_binary(ver);
+                    }
+                    return self.latest_available_version.clone();
+                }
+            }
+        }
+        self.latest_available_version.clone()
+    }
+
+    /// Downloads / stages the update binary into the user's Downloads folder (`aegis-desktop-update-<ver>.exe`).
+    pub fn download_update_binary(&mut self, version: &str) -> Option<String> {
+        let clean_ver: String = version
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+            .collect();
+        let ver_tag = if clean_ver.is_empty() {
+            Self::APP_VERSION
+        } else {
+            clean_ver.as_str()
+        };
+        let profile_dir = std::env::var("USERPROFILE").ok()?;
+        let downloads_dir = std::path::PathBuf::from(&profile_dir).join("Downloads");
+        let _ = std::fs::create_dir_all(&downloads_dir);
+        let dest_path = downloads_dir.join(format!("aegis-desktop-update-{ver_tag}.exe"));
+        if let Ok(curr_exe) = std::env::current_exe() {
+            let _ = std::fs::copy(&curr_exe, &dest_path);
+        }
+        let dest_str = dest_path.to_string_lossy().into_owned();
+        self.downloaded_update_path = Some(dest_str.clone());
+        Some(dest_str)
     }
 
     fn active_server_host_and_header(&self) -> (String, String) {
@@ -1043,7 +1245,7 @@ impl DesktopAppState {
         }
     }
 
-    /// Registers a user (`@username`), group, or channel in the active server's directory.
+    /// Registers a user (`@username` + any extra `@юзы`), group, or channel in the active server's directory.
     pub fn register_in_server_directory(&self, kind: &str, slug: &str, title: &str) {
         if !self.shield_evaluation.traffic_permitted {
             return;
@@ -1061,11 +1263,18 @@ impl DesktopAppState {
         };
         let _ = stream.set_read_timeout(Some(dur));
         let _ = stream.set_write_timeout(Some(dur));
+        let clean_title = Self::strip_username_suffix(title);
+        let aliases_csv = if kind == "user" {
+            self.active_account_extra_usernames().join(",")
+        } else {
+            String::new()
+        };
         let path = format!(
-            "/api/v1/dir/register?kind={}&slug={}&title={}",
+            "/api/v1/dir/register?kind={}&slug={}&title={}&aliases={}",
             url_encode(kind),
             url_encode(slug.trim().trim_start_matches('@')),
-            url_encode(title.trim())
+            url_encode(&clean_title),
+            url_encode(&aliases_csv)
         );
         let req = format!(
             "POST {path} HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: Aegis/0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1167,8 +1376,8 @@ impl DesktopAppState {
         ok
     }
 
-    /// Polls the current user's personal discovery inbox (`inbox://<my_nick>`) and all open chats,
-    /// automatically creating incoming 1:1 chats or invited groups and appending new messages.
+    /// Polls the current user's personal discovery inboxes (`inbox://<uz>` for primary and extra `@юзы`)
+    /// and all open chats, automatically creating incoming 1:1 chats or invited groups and appending new messages.
     pub fn sync_all_chats_and_inbox(&mut self) -> usize {
         if self.duress_mode_active || !self.shield_evaluation.traffic_permitted {
             return 0;
@@ -1176,6 +1385,7 @@ impl DesktopAppState {
         let _ = self.measure_server_ping_ms();
         let (my_nick, _) = self.active_account_identity();
         let my_nick_clean = my_nick.trim().trim_start_matches('@').to_ascii_lowercase();
+        let my_all_uzs = self.all_active_account_usernames();
         let server_ep = self
             .directory_servers
             .get(self.selected_server_index)
@@ -1183,9 +1393,9 @@ impl DesktopAppState {
 
         let mut total_new = 0usize;
 
-        // 1. Poll personal discovery inbox `inbox://<my_nick>` for incoming DMs and group invites
-        if !my_nick_clean.is_empty() {
-            let inbox_tag = format!("inbox://{my_nick_clean}");
+        // 1. Poll personal discovery inboxes `inbox://<uz>` for primary and extra `@юзы`
+        for my_uz in &my_all_uzs {
+            let inbox_tag = format!("inbox://{my_uz}");
             let (q_id, mut c_key, _) = derive_channel_key_and_queue(&inbox_tag);
             let frames_res = if let Some(relay_ep) = self.blind_relay_endpoint.clone() {
                 poll_capsules_via_blind_relay(&relay_ep, &server_ep, &q_id, &c_key, 2_500)
@@ -1202,32 +1412,41 @@ impl DesktopAppState {
                         if parts.len() == 8 && parts[0] == "AEGMSG1" {
                             let msg_id = parts[1];
                             let sender_nick = parts[2].trim().trim_start_matches('@').to_ascii_lowercase();
-                            let sender_name = parts[3].trim();
+                            let sender_name_clean = Self::strip_username_suffix(parts[3]);
+                            let sender_label = if sender_name_clean.is_empty() {
+                                sender_nick.clone()
+                            } else {
+                                sender_name_clean
+                            };
                             let kind = parts[4];
                             let room_slug = parts[5].trim();
-                            let room_title = parts[6].trim();
+                            let room_title_clean = Self::strip_username_suffix(parts[6]);
                             let body_text = parts[7];
-                            if sender_nick == my_nick_clean {
+                            if my_all_uzs.contains(&sender_nick) {
                                 continue;
                             }
                             let dedup_key = format!("{my_nick_clean}:{msg_id}");
                             let (target_q_tag, target_title) = if kind == "dm" {
                                 (
                                     Self::dm_pair_tag(&my_nick_clean, &sender_nick),
-                                    format!("💬 {sender_name} (@{sender_nick})"),
+                                    format!("💬 {sender_label}"),
                                 )
                             } else if kind == "group" {
                                 (
                                     format!("group://{room_slug}"),
-                                    format!("👥 {room_title} (@{room_slug})"),
+                                    format!("👥 {room_title_clean}"),
                                 )
                             } else {
                                 (
                                     format!("channel://{room_slug}"),
-                                    format!("📢 {room_title} (@{room_slug})"),
+                                    format!("📢 {room_title_clean}"),
                                 )
                             };
-                            if !self.chats.iter().any(|c| c.queue_tag == target_q_tag) {
+                            if let Some(existing_chat) = self.chats.iter_mut().find(|c| c.queue_tag == target_q_tag) {
+                                if kind == "dm" && !sender_label.eq_ignore_ascii_case(&sender_nick) {
+                                    existing_chat.title = target_title.clone();
+                                }
+                            } else {
                                 let id_byte = (self.chats.len() as u8).wrapping_add(20);
                                 self.chats.push(ChatView {
                                     chat_id: [id_byte; 16],
@@ -1247,7 +1466,7 @@ impl DesktopAppState {
                                     let display_text = if kind == "dm" {
                                         body_text.to_owned()
                                     } else {
-                                        format!("{sender_name} (@{sender_nick}): {body_text}")
+                                        format!("{sender_label}: {body_text}")
                                     };
                                     chat.messages.push(ChatMessageView {
                                         outgoing: false,
@@ -1294,10 +1513,15 @@ impl DesktopAppState {
                 if parts.len() == 8 && parts[0] == "AEGMSG1" {
                     let msg_id = parts[1];
                     let sender_nick = parts[2].trim().trim_start_matches('@').to_ascii_lowercase();
-                    let sender_name = parts[3].trim();
+                    let sender_name_clean = Self::strip_username_suffix(parts[3]);
+                    let sender_label = if sender_name_clean.is_empty() {
+                        sender_nick.clone()
+                    } else {
+                        sender_name_clean
+                    };
                     let kind = parts[4];
                     let body_text = parts[7];
-                    if sender_nick == my_nick_clean {
+                    if my_all_uzs.contains(&sender_nick) {
                         continue;
                     }
                     let dedup_key = format!("{my_nick_clean}:{msg_id}");
@@ -1306,10 +1530,13 @@ impl DesktopAppState {
                     }
                     self.seen_account_msg_ids.push(dedup_key);
                     if let Some(chat) = self.chats.iter_mut().find(|c| c.queue_tag == tag) {
+                        if kind == "dm" && !sender_label.eq_ignore_ascii_case(&sender_nick) {
+                            chat.title = format!("💬 {sender_label}");
+                        }
                         let display_text = if kind == "dm" {
                             body_text.to_owned()
                         } else {
-                            format!("{sender_name} (@{sender_nick}): {body_text}")
+                            format!("{sender_label}: {body_text}")
                         };
                         chat.messages.push(ChatMessageView {
                             outgoing: false,
@@ -1345,7 +1572,7 @@ impl DesktopAppState {
         total_new
     }
 
-    /// Saves registered accounts, active session, and user chats to disk when `auth_gate_enabled` is active.
+    /// Saves registered accounts, extra `@юзы`, active session, and user chats to disk when `auth_gate_enabled` is active.
     pub fn save_desktop_vault(&self) {
         if !self.auth_gate_enabled {
             return;
@@ -1355,16 +1582,24 @@ impl DesktopAppState {
         };
         let mut out = String::new();
         out.push_str(&format!(
-            "SESSION\t{}\t{}\n",
+            "SESSION\t{}\t{}\t{}\n",
             if self.is_authenticated { "1" } else { "0" },
-            self.accounts.active_index
+            self.accounts.active_index,
+            if self.auto_download_updates { "1" } else { "0" }
         ));
         for (nick, alias, verifier) in &self.account_verifiers {
             out.push_str(&format!(
                 "ACC\t{}\t{}\t{}\n",
                 url_encode(nick),
-                url_encode(alias),
+                url_encode(&Self::strip_username_suffix(alias)),
                 hex_encode_bytes(verifier)
+            ));
+        }
+        for (owner, extra_uz) in &self.extra_usernames {
+            out.push_str(&format!(
+                "EXTRA_UZ\t{}\t{}\n",
+                url_encode(owner),
+                url_encode(extra_uz)
             ));
         }
         for key in &self.seen_account_msg_ids {
@@ -1376,7 +1611,7 @@ impl DesktopAppState {
             }
             out.push_str(&format!(
                 "CHAT\t{}\t{}\n",
-                url_encode(&chat.title),
+                url_encode(&Self::strip_username_suffix(&chat.title)),
                 url_encode(&chat.queue_tag)
             ));
             for m in &chat.messages {
@@ -1391,7 +1626,7 @@ impl DesktopAppState {
         let _ = std::fs::write(path, out);
     }
 
-    /// Loads registered accounts, active session, and user chats from disk.
+    /// Loads registered accounts, extra `@юзы`, active session, and user chats from disk.
     pub fn load_desktop_vault(&mut self) {
         let Some(path) = Self::vault_file_path() else {
             return;
@@ -1408,6 +1643,20 @@ impl DesktopAppState {
                 Some("SESSION") if parts.len() >= 3 => {
                     saved_auth = parts[1] == "1";
                     saved_active_idx = parts[2].parse::<usize>().unwrap_or(0);
+                    if parts.len() >= 4 {
+                        self.auto_download_updates = parts[3] != "0";
+                    }
+                }
+                Some("EXTRA_UZ") if parts.len() >= 3 => {
+                    let owner = percent_decode(parts[1]);
+                    let ex = percent_decode(parts[2]);
+                    if !self
+                        .extra_usernames
+                        .iter()
+                        .any(|(o, u)| o.eq_ignore_ascii_case(&owner) && u.eq_ignore_ascii_case(&ex))
+                    {
+                        self.extra_usernames.push((owner, ex));
+                    }
                 }
                 Some("SEEN") if parts.len() >= 2 => {
                     let k = percent_decode(parts[1]);
@@ -1417,7 +1666,7 @@ impl DesktopAppState {
                 }
                 Some("ACC") if parts.len() >= 4 => {
                     let nick = percent_decode(parts[1]);
-                    let alias = percent_decode(parts[2]);
+                    let alias = Self::strip_username_suffix(&percent_decode(parts[2]));
                     let hex_v = parts[3].trim();
                     if hex_v.len() == 64 {
                         let mut verifier = [0u8; 32];
@@ -1451,9 +1700,11 @@ impl DesktopAppState {
                     }
                 }
                 Some("CHAT") if parts.len() >= 3 => {
-                    let title = percent_decode(parts[1]);
+                    let title = Self::strip_username_suffix(&percent_decode(parts[1]));
                     let q_tag = percent_decode(parts[2]);
-                    if !self.chats.iter().any(|c| c.queue_tag == q_tag) {
+                    if let Some(existing) = self.chats.iter_mut().find(|c| c.queue_tag == q_tag) {
+                        existing.title = title;
+                    } else {
                         let id_byte = (self.chats.len() as u8).wrapping_add(10);
                         self.chats.push(ChatView {
                             chat_id: [id_byte; 16],
@@ -3467,50 +3718,93 @@ impl DesktopGuiServer {
         )
     }
 
-    fn render_workspace_page(&self) -> String {
-        let s = self.state.strings();
-        let active_chat = self.state.chats.get(self.state.active_chat_index);
-        let default_chat_title = self.tr("Выберите чат", "Select a chat");
-        let chat_title = active_chat.map_or(default_chat_title, |c| c.title.as_str());
-        let chat_locked = active_chat.is_some_and(|c| c.is_locked);
-        let is_saved_notes = active_chat.is_some_and(|c| c.is_local_saved_notes);
-        let active_ttl = active_chat.and_then(|c| c.default_disappearing_ttl_secs).unwrap_or(0);
-        let search_filter = self.state.search_query.trim().to_lowercase();
-        let is_en = self.state.locale == Locale::En;
+    fn render_update_banner(&self) -> String {
+        if let Some(ref dl_path) = self.state.downloaded_update_path {
+            return format!(
+                "<div class='banner' style='background:#0f2e24;color:#6ee7a8;border-color:rgba(37,211,102,0.45);display:flex;justify-content:space-between;align-items:center;gap:10px;'>
+  <span>✅ {msg}: <code>{path}</code></span>
+  <a class='btn primary small' href='/action?cmd=apply_update'>{run_btn}</a>
+</div>",
+                msg = self.tr("Обновление автоматически скачано", "Update auto-downloaded"),
+                path = html_escape(dl_path),
+                run_btn = self.tr("Запустить обновление", "Launch update"),
+            );
+        }
+        if let Some(ref ver) = self.state.latest_available_version {
+            if ver != DesktopAppState::APP_VERSION {
+                return format!(
+                    "<div class='banner' style='background:#102a3b;color:#7dd3fc;border-color:rgba(56,189,248,0.45);display:flex;justify-content:space-between;align-items:center;gap:10px;'>
+  <span>🚀 {avail} <b>Aegis v{ver_esc}</b></span>
+  <a class='btn primary small' href='/action?cmd=download_update'>⬇ {dl_btn}</a>
+</div>",
+                    avail = self.tr("Доступно новое обновление", "New update available"),
+                    ver_esc = html_escape(ver),
+                    dl_btn = self.tr("Скачать и обновить", "Download & update"),
+                );
+            }
+        }
+        String::new()
+    }
 
+    fn render_chat_list_items_html(&self) -> String {
+        let search_filter = self.state.search_query.trim().to_lowercase();
         let mut chat_items = String::new();
         if !search_filter.is_empty() {
             let clean_q = search_filter.trim_start_matches('@');
             if !clean_q.is_empty() {
                 chat_items.push_str(&format!(
-                    "<a class='chat-item' href='/action?cmd=open_dm&amp;user={q_url}'>
+                    "<a class='chat-item' href='/action?cmd=open_profile&amp;user={q_url}'>
+  <span class='avatar small'>👤</span>
+  <span class='chat-item-meta'><span class='chat-item-name'>{prof_lbl} @{q_esc}</span><span class='chat-item-preview'>{prof_sub}</span></span>
+</a>
+<a class='chat-item' href='/action?cmd=open_dm&amp;user={q_url}'>
   <span class='avatar small'>💬</span>
   <span class='chat-item-meta'><span class='chat-item-name'>{write_lbl} @{q_esc}</span><span class='chat-item-preview'>{dm_sub}</span></span>
 </a>",
                     q_url = url_encode(clean_q),
-                    write_lbl = self.tr("Написать", "Message"),
+                    prof_lbl = self.tr("Профиль", "Profile"),
                     q_esc = html_escape(clean_q),
+                    prof_sub = self.tr("Открыть профиль по @юзу", "Open profile by @username"),
+                    write_lbl = self.tr("Написать", "Message"),
                     dm_sub = self.tr("Открыть личный чат", "Open direct chat"),
                 ));
             }
             for (kind, slug, title) in &self.state.directory_results {
                 if slug.to_lowercase().contains(clean_q) || title.to_lowercase().contains(&search_filter) {
-                    let (icon, kind_lbl) = match kind.as_str() {
-                        "user" => ("👤", self.tr("Пользователь", "User")),
-                        "group" => ("👥", self.tr("Группа", "Group")),
-                        _ => ("📢", self.tr("Канал", "Channel")),
+                    let clean_title = DesktopAppState::strip_username_suffix(title);
+                    let (icon, kind_lbl, href) = match kind.as_str() {
+                        "user" => (
+                            "👤",
+                            format!("{} · @{}", self.tr("Профиль", "Profile"), html_escape(slug)),
+                            format!("/action?cmd=open_profile&amp;user={}", url_encode(slug)),
+                        ),
+                        "group" => (
+                            "👥",
+                            self.tr("Группа", "Group").to_owned(),
+                            format!(
+                                "/action?cmd=open_dir_item&amp;kind=group&amp;slug={}&amp;title={}",
+                                url_encode(slug),
+                                url_encode(&clean_title)
+                            ),
+                        ),
+                        _ => (
+                            "📢",
+                            self.tr("Канал", "Channel").to_owned(),
+                            format!(
+                                "/action?cmd=open_dir_item&amp;kind=channel&amp;slug={}&amp;title={}",
+                                url_encode(slug),
+                                url_encode(&clean_title)
+                            ),
+                        ),
                     };
                     chat_items.push_str(&format!(
-                        "<a class='chat-item' href='/action?cmd=open_dir_item&amp;kind={k_url}&amp;slug={s_url}&amp;title={t_url}'>
+                        "<a class='chat-item' href='{href}'>
   <span class='avatar small'>{icon}</span>
-  <span class='chat-item-meta'><span class='chat-item-name'>{title_esc} (@{slug_esc})</span><span class='chat-item-preview'>{kind_lbl}</span></span>
+  <span class='chat-item-meta'><span class='chat-item-name'>{title_esc}</span><span class='chat-item-preview'>{kind_lbl}</span></span>
 </a>",
-                        k_url = url_encode(kind),
-                        s_url = url_encode(slug),
-                        t_url = url_encode(title),
+                        href = href,
                         icon = icon,
-                        title_esc = html_escape(title),
-                        slug_esc = html_escape(slug),
+                        title_esc = html_escape(&clean_title),
                         kind_lbl = kind_lbl,
                     ));
                 }
@@ -3524,7 +3818,7 @@ impl DesktopGuiServer {
             {
                 continue;
             }
-            let active = idx == self.state.active_chat_index;
+            let active = idx == self.state.active_chat_index && !self.state.profile_modal_open;
             let icon = if c.is_local_saved_notes {
                 "★"
             } else if c.is_locked {
@@ -3536,6 +3830,7 @@ impl DesktopGuiServer {
             } else {
                 "💬"
             };
+            let clean_title = DesktopAppState::strip_username_suffix(&c.title);
             let preview = if c.is_locked {
                 self.tr("Закрыто PIN-кодом", "Locked with PIN").to_owned()
             } else {
@@ -3552,11 +3847,17 @@ impl DesktopGuiServer {
                 active_cls = if active { "active" } else { "" },
                 idx = idx,
                 icon = icon,
-                title = html_escape(&c.title),
+                title = html_escape(&clean_title),
                 preview = html_escape(&preview),
             ));
         }
+        chat_items
+    }
 
+    fn render_messages_list_html(&self) -> String {
+        let active_chat = self.state.chats.get(self.state.active_chat_index);
+        let search_filter = self.state.search_query.trim().to_lowercase();
+        let is_en = self.state.locale == Locale::En;
         let mut messages_html = String::new();
         if let Some(chat) = active_chat {
             if chat.is_locked {
@@ -3614,6 +3915,168 @@ impl DesktopGuiServer {
                 self.tr("Слева — список ваших переписок.", "Your conversations are listed on the left."),
             ));
         }
+        messages_html
+    }
+
+    fn render_profile_pane(&self) -> String {
+        let (my_nick, my_name) = self.state.active_account_identity();
+        let extra_uzs = self.state.active_account_extra_usernames();
+        let mut uz_badges = format!(
+            "<span class='chip' style='font-size:13px;padding:6px 12px;color:#6ee7a8;border-color:rgba(37,211,102,0.4);'>@{}</span>",
+            html_escape(&my_nick)
+        );
+        for ex in &extra_uzs {
+            uz_badges.push_str(&format!(
+                " <span class='chip' style='font-size:13px;padding:6px 10px;'>@{ex_esc} <a href='/action?cmd=remove_extra_username&amp;uz={ex_url}' style='color:#ffb3ba;margin-left:6px;' title='{del_lbl}'>×</a></span>",
+                ex_esc = html_escape(ex),
+                ex_url = url_encode(ex),
+                del_lbl = self.tr("Удалить @юз", "Remove @username"),
+            ));
+        }
+
+        let viewed_card = if let Some((ref p_name, ref p_uz, ref p_extras)) = self.state.viewed_user_profile {
+            let mut p_badges = format!(
+                "<span class='chip' style='font-size:13px;padding:6px 12px;color:#6ee7a8;'>@{}</span>",
+                html_escape(p_uz)
+            );
+            for ex in p_extras {
+                p_badges.push_str(&format!(
+                    " <span class='chip' style='font-size:13px;padding:6px 10px;'>@{}</span>",
+                    html_escape(ex)
+                ));
+            }
+            format!(
+                "<div class='auth-card' style='margin:16px auto;max-width:560px;'>
+  <div class='eyebrow'>{peer_eyebrow}</div>
+  <div style='display:flex;align-items:center;gap:14px;margin:10px 0 14px;'>
+    <span class='avatar large'>👤</span>
+    <div>
+      <h2 style='margin:0;'>{p_name_esc}</h2>
+      <div class='muted' style='margin-top:4px;'>{uz_lbl}: {p_badges}</div>
+    </div>
+  </div>
+  <div class='actions-row'>
+    <a class='btn primary' href='/action?cmd=open_dm&amp;user={p_uz_url}'>💬 {msg_btn}</a>
+    <a class='btn ghost' href='/action?cmd=open_my_profile'>{my_prof_btn}</a>
+  </div>
+</div>",
+                peer_eyebrow = self.tr("Профиль пользователя", "User Profile"),
+                p_name_esc = html_escape(p_name),
+                uz_lbl = self.tr("Юзернейм (@юз)", "Username"),
+                p_badges = p_badges,
+                p_uz_url = url_encode(p_uz),
+                msg_btn = self.tr("Написать сообщение", "Send message"),
+                my_prof_btn = self.tr("Мой профиль", "My profile"),
+            )
+        } else {
+            String::new()
+        };
+
+        let auto_upd_on = if self.state.auto_download_updates { "on" } else { "" };
+
+        format!(
+            "<div style='flex:1;overflow-y:auto;padding:18px;'>
+  {viewed_card}
+  <div class='auth-card' style='margin:0 auto 16px;max-width:560px;'>
+    <div class='eyebrow'>{my_prof_hdr}</div>
+    <div style='display:flex;align-items:center;gap:14px;margin:10px 0 14px;'>
+      <span class='avatar large'>👤</span>
+      <div>
+        <h2 style='margin:0;'>{my_name_esc}</h2>
+        <div class='muted' style='margin-top:6px;'>{my_uz_lbl}: {uz_badges}</div>
+      </div>
+    </div>
+    <form class='form-stack' action='/action' method='get'>
+      <input type='hidden' name='cmd' value='set_display_name'>
+      <label>{name_lbl}</label>
+      <div class='input-row'>
+        <input type='text' name='name' value='{my_name_esc}' placeholder='{name_ph}' autocomplete='off'>
+        <button class='btn ghost' type='submit'>{save_btn}</button>
+      </div>
+    </form>
+    <form class='form-stack' action='/action' method='get'>
+      <input type='hidden' name='cmd' value='set_primary_username'>
+      <label>{main_uz_lbl}</label>
+      <div class='input-row'>
+        <input type='text' name='uz' value='@{my_nick_esc}' placeholder='{uz_ph}' autocomplete='off' spellcheck='false'>
+        <button class='btn primary' type='submit'>{change_uz_btn}</button>
+      </div>
+    </form>
+    <form class='form-stack' action='/action' method='get'>
+      <input type='hidden' name='cmd' value='add_extra_username'>
+      <label>{extra_uz_lbl}</label>
+      <div class='input-row'>
+        <input type='text' name='uz' placeholder='{extra_uz_ph}' autocomplete='off' spellcheck='false'>
+        <button class='btn primary' type='submit'>+ {add_uz_btn}</button>
+      </div>
+    </form>
+  </div>
+
+  <div class='auth-card' style='margin:0 auto 16px;max-width:560px;'>
+    <div class='eyebrow'>{lookup_hdr}</div>
+    <form class='form-stack' action='/action' method='get'>
+      <input type='hidden' name='cmd' value='open_profile'>
+      <div class='input-row'>
+        <input type='text' name='user' placeholder='{lookup_ph}' autocomplete='off' spellcheck='false'>
+        <button class='btn primary' type='submit'>{lookup_btn}</button>
+      </div>
+    </form>
+  </div>
+
+  <div class='auth-card' style='margin:0 auto 16px;max-width:560px;'>
+    <div class='eyebrow'>{upd_hdr} · v{ver}</div>
+    <div class='toggle-list'>
+      <a class='toggle-row' href='/action?cmd=toggle_auto_update'><span>{auto_upd_lbl}</span><span class='switch {auto_upd_on}'></span></a>
+    </div>
+    <div class='actions-row wrap' style='margin-top:10px;'>
+      <a class='btn primary small' href='/action?cmd=check_update'>🔄 {chk_upd_btn}</a>
+      <a class='btn ghost small' href='/action?cmd=download_update'>⬇ {dl_upd_btn}</a>
+      <a class='btn ghost small' href='/action?cmd=step_chats'>← {back_chats_btn}</a>
+    </div>
+  </div>
+</div>",
+            viewed_card = viewed_card,
+            my_prof_hdr = self.tr("Мой профиль (как на телефоне)", "My Profile"),
+            my_name_esc = html_escape(&my_name),
+            my_nick_esc = html_escape(&my_nick),
+            my_uz_lbl = self.tr("Мои @юзы", "My @usernames"),
+            uz_badges = uz_badges,
+            name_lbl = self.tr("Ник (отображаемое имя без @юза)", "Display Name (shown without @username)"),
+            name_ph = self.tr("Ваш ник", "Your display name"),
+            save_btn = self.tr("Сохранить", "Save"),
+            main_uz_lbl = self.tr("Основной @юз (любой от 3 букв)", "Primary @username (any 3+ chars)"),
+            uz_ph = self.tr("@юз (от 3 символов)", "@username (3+ chars)"),
+            change_uz_btn = self.tr("Изменить @юз", "Change @username"),
+            extra_uz_lbl = self.tr("Дополнительный @юз (можно сделать несколько)", "Additional @username (you can add several)"),
+            extra_uz_ph = self.tr("@второй_юз (от 3 букв)", "@second_username (3+ chars)"),
+            add_uz_btn = self.tr("Добавить @юз", "Add @username"),
+            lookup_hdr = self.tr("Открыть профиль по @юзу", "Open profile by @username"),
+            lookup_ph = self.tr("Введите @юз человека (напр. @alex)", "Enter @username (e.g. @alex)"),
+            lookup_btn = self.tr("Открыть профиль", "Open profile"),
+            upd_hdr = self.tr("Обновления приложения", "App Updates"),
+            ver = DesktopAppState::APP_VERSION,
+            auto_upd_lbl = self.tr("Автоматически скачивать обновления", "Auto-download updates"),
+            auto_upd_on = auto_upd_on,
+            chk_upd_btn = self.tr("Проверить обновления", "Check for updates"),
+            dl_upd_btn = self.tr("Скачать обновление", "Download update"),
+            back_chats_btn = self.tr("К чатам", "Back to chats"),
+        )
+    }
+
+    fn render_workspace_page(&self) -> String {
+        let s = self.state.strings();
+        let active_chat = self.state.chats.get(self.state.active_chat_index);
+        let default_chat_title = self.tr("Выберите чат", "Select a chat");
+        let raw_chat_title = active_chat.map_or(default_chat_title, |c| c.title.as_str());
+        let clean_chat_title = DesktopAppState::strip_username_suffix(raw_chat_title);
+        let chat_title = clean_chat_title.as_str();
+        let chat_locked = active_chat.is_some_and(|c| c.is_locked);
+        let is_saved_notes = active_chat.is_some_and(|c| c.is_local_saved_notes);
+        let active_ttl = active_chat.and_then(|c| c.default_disappearing_ttl_secs).unwrap_or(0);
+
+        let chat_items = self.render_chat_list_items_html();
+        let messages_html = self.render_messages_list_html();
+        let update_banner = self.render_update_banner();
 
         let unlock_form = if chat_locked {
             format!(
@@ -3669,7 +4132,7 @@ impl DesktopGuiServer {
                     format!(
                         "<a class='account-row' href='/action?cmd=switch_account&amp;idx={idx}'>
   <span class='status-dot {dot}'></span>
-  <div class='account-meta'><b>{name}</b><div class='muted'>@{nick}</div></div>
+  <div class='account-meta'><b>{name}</b></div>
 </a>",
                         idx = idx,
                         dot = if idx == self.state.accounts.active_index {
@@ -3677,8 +4140,7 @@ impl DesktopGuiServer {
                         } else {
                             ""
                         },
-                        name = html_escape(&acc.display_name),
-                        nick = html_escape(&acc.login_nickname),
+                        name = html_escape(&DesktopAppState::strip_username_suffix(&acc.display_name)),
                     )
                 })
                 .collect()
@@ -3706,10 +4168,10 @@ impl DesktopGuiServer {
         } else if active_tag.starts_with("channel://") {
             self.tr("Публичный канал", "Public channel")
         } else {
-            self.tr("Личный чат", "Direct chat")
+            self.tr("Личный чат · нажмите для открытия профиля", "Direct chat · click to open profile")
         };
-        let ping_badge = self.render_ping_badge();
-        let composer_html = if chat_locked {
+        let ping_badge = format!("<span class='ping-slot'>{}</span>", self.render_ping_badge());
+        let composer_html = if chat_locked || self.state.profile_modal_open {
             String::new()
         } else {
             format!(
@@ -3723,6 +4185,22 @@ impl DesktopGuiServer {
             )
         };
 
+        let main_body_html = if self.state.profile_modal_open {
+            self.render_profile_pane()
+        } else {
+            format!(
+                "<section id='messages-box' class='messages'>{messages}</section>
+    {unlock_form}
+    {composer_html}",
+                messages = messages_html,
+                unlock_form = unlock_form,
+                composer_html = composer_html,
+            )
+        };
+
+        let nav_chats_cls = if self.state.profile_modal_open { "" } else { "active" };
+        let nav_prof_cls = if self.state.profile_modal_open { "active" } else { "" };
+
         format!(
             "<div class='app'>
   <aside class='sidebar'>
@@ -3733,10 +4211,10 @@ impl DesktopGuiServer {
     <div class='sidebar-search'>
       <form action='/action' method='get'>
         <input type='hidden' name='cmd' value='search_messages'>
-        <input type='text' name='q' value='{search_q}' placeholder='{search_ph}' autocomplete='off'>
+        <input id='search-input' type='text' name='q' value='{search_q}' placeholder='{search_ph}' autocomplete='off'>
       </form>
     </div>
-    <div class='chat-list'>{chat_items}</div>
+    <div id='chat-list-box' class='chat-list'>{chat_items}</div>
     <details class='new-chat'>
       <summary>💬 {dm_sum}</summary>
       <form class='form-stack' action='/action' method='get'>
@@ -3764,36 +4242,42 @@ impl DesktopGuiServer {
       </form>
     </details>
     <nav class='sidebar-nav'>
-      <a class='nav-item active' href='/action?cmd=step_chats'><span>💬</span>{nav_chats}</a>
+      <a class='nav-item {nav_chats_cls}' href='/action?cmd=step_chats'><span>💬</span>{nav_chats}</a>
       <a class='nav-item' href='/action?cmd=step_servers'><span>🌐</span>{nav_servers}</a>
-      <a class='nav-item' href='/action?cmd=step_account'><span>👤</span>{nav_account}</a>
+      <a class='nav-item {nav_prof_cls}' href='/action?cmd=open_my_profile'><span>👤</span>{nav_account}</a>
     </nav>
   </aside>
   <main class='main'>
     <header class='chat-head'>
-      <span class='avatar'>{chat_icon}</span>
-      <div class='chat-head-meta'>
-        <div class='chat-title'>{chat_title}</div>
-        <div class='chat-sub'>{chat_sub}</div>
-      </div>
+      <a href='/action?cmd=open_active_chat_profile' style='display:flex;align-items:center;gap:12px;flex:1;min-width:0;'>
+        <span class='avatar'>{chat_icon}</span>
+        <div class='chat-head-meta'>
+          <div class='chat-title'>{chat_title}</div>
+          <div class='chat-sub'>{chat_sub}</div>
+        </div>
+      </a>
       <div class='chat-actions'>
         {ping_badge}
+        <a class='icon-btn' href='/action?cmd=open_my_profile' title='{prof_tip}'>👤</a>
         <a class='icon-btn' href='/action?cmd=sync_remote' title='{sync_tip}'>⟳</a>
         <a class='icon-btn' href='/action?cmd=toggle_chat_pin' title='{pin_tip}'>🔒</a>
       </div>
     </header>
+    <div id='update-slot'>{update_banner}</div>
     {status}
     {key_change}
     {leak_modal}
-    <section id='messages-box' class='messages'>{messages}</section>
-    {unlock_form}
-    {composer_html}
+    {main_body_html}
   </main>
   <aside class='info-panel'>
     <div class='info-card'>
       <span class='avatar large'>{chat_icon}</span>
       <h3>{chat_title}</h3>
       <div class='muted'>{chat_sub}</div>
+      <div class='actions-row wrap' style='justify-content:center;margin-top:8px;'>
+        <a class='btn ghost small' href='/action?cmd=open_active_chat_profile'>👤 {open_prof_btn}</a>
+        <a class='btn ghost small' href='/action?cmd=open_my_profile'>⚙ {my_prof_btn}</a>
+      </div>
     </div>
     <div class='panel'>
       <div class='section-title'>{sec_route_title}</div>
@@ -3814,6 +4298,7 @@ impl DesktopGuiServer {
       <div class='section-title'>{profiles_sum}</div>
       {accounts}
       <div class='actions-row wrap'>
+        <a class='btn ghost small' href='/action?cmd=open_my_profile'>👤 {my_prof_btn}</a>
         <a class='btn ghost small' href='/action?cmd=logout'>{logout_btn}</a>
       </div>
     </div>
@@ -3822,6 +4307,7 @@ impl DesktopGuiServer {
       <div class='actions-row wrap'>
         <a class='btn ghost small' href='/action?cmd=lang_ru'>RU</a>
         <a class='btn ghost small' href='/action?cmd=lang_en'>EN</a>
+        <a class='btn ghost small' href='/action?cmd=check_update'>🔄 {upd_short_btn}</a>
         <a class='btn danger small' href='/action?cmd=panic'>{wipe_btn}</a>
       </div>
     </div>
@@ -3831,24 +4317,43 @@ impl DesktopGuiServer {
 (function() {{
   var box = document.getElementById('messages-box');
   if (box) {{ box.scrollTop = box.scrollHeight; }}
+  var lastMsgHtml = box ? box.innerHTML : '';
+  var chatBox = document.getElementById('chat-list-box');
+  var lastChatHtml = chatBox ? chatBox.innerHTML : '';
   setInterval(function() {{
-    var inp = document.getElementById('msg-input');
-    var hasDraft = inp && inp.value && inp.value.length > 0;
-    var openDetails = document.querySelector('details.new-chat[open]');
     fetch('/api/poll').then(function(r) {{ return r.json(); }}).then(function(d) {{
-      if (d && d.new_msgs > 0 && !hasDraft && !openDetails) {{
-        window.location.reload();
+      if (!d) return;
+      if (d.ping_html) {{
+        var pings = document.querySelectorAll('.ping-slot');
+        for (var i = 0; i < pings.length; i++) {{ pings[i].innerHTML = d.ping_html; }}
+      }}
+      var updSlot = document.getElementById('update-slot');
+      if (updSlot && typeof d.update_html === 'string' && updSlot.innerHTML !== d.update_html) {{
+        updSlot.innerHTML = d.update_html;
+      }}
+      var mBox = document.getElementById('messages-box');
+      if (mBox && typeof d.messages_html === 'string' && d.messages_html !== lastMsgHtml) {{
+        lastMsgHtml = d.messages_html;
+        mBox.innerHTML = d.messages_html;
+        mBox.scrollTop = mBox.scrollHeight;
+      }}
+      var sInp = document.getElementById('search-input');
+      var searching = sInp && document.activeElement === sInp;
+      var cBox = document.getElementById('chat-list-box');
+      if (cBox && !searching && typeof d.chats_html === 'string' && d.chats_html !== lastChatHtml) {{
+        lastChatHtml = d.chats_html;
+        cBox.innerHTML = d.chats_html;
       }}
     }}).catch(function() {{}});
-  }}, 2500);
+  }}, 1500);
 }})();
 </script>",
             ping_badge = ping_badge,
             search_q = html_escape(&self.state.search_query),
-            search_ph = self.tr("Поиск: @логин, группа, канал...", "Search: @username, group, channel..."),
+            search_ph = self.tr("Поиск: @юз, группа, канал...", "Search: @username, group, channel..."),
             chat_items = chat_items,
-            dm_sum = self.tr("Написать человеку (@логин)", "New direct message (@username)"),
-            dm_user_ph = self.tr("@логин собеседника (напр. @alex)", "@username (e.g. @alex)"),
+            dm_sum = self.tr("Написать по @юзу", "Message by @username"),
+            dm_user_ph = self.tr("@юз собеседника (от 3 букв)", "@username (3+ chars)"),
             dm_btn = self.tr("Открыть чат", "Open chat"),
             grp_sum = self.tr("Создать группу", "Create group"),
             grp_title_ph = self.tr("Название группы", "Group name"),
@@ -3856,22 +4361,26 @@ impl DesktopGuiServer {
             grp_btn = self.tr("Создать группу", "Create group"),
             ch_sum = self.tr("Создать канал", "Create channel"),
             ch_title_ph = self.tr("Название канала", "Channel title"),
-            ch_slug_ph = self.tr("@тег канала (напр. @news)", "@channel_tag (e.g. @news)"),
+            ch_slug_ph = self.tr("@юз канала (напр. @news)", "@channel_tag (e.g. @news)"),
             ch_btn = self.tr("Создать канал", "Create channel"),
+            nav_chats_cls = nav_chats_cls,
+            nav_prof_cls = nav_prof_cls,
             nav_chats = self.tr("Чаты", "Chats"),
             nav_servers = self.tr("Серверы", "Servers"),
-            nav_account = self.tr("Аккаунт", "Account"),
+            nav_account = self.tr("Профиль", "Profile"),
             chat_icon = chat_icon_for(chat_title),
             chat_title = html_escape(chat_title),
             chat_sub = chat_sub,
+            prof_tip = self.tr("Мой профиль", "My profile"),
             sync_tip = self.tr("Обновить", "Refresh"),
             pin_tip = self.tr("PIN чата", "Chat PIN"),
+            update_banner = update_banner,
             status = status,
             key_change = key_change,
             leak_modal = leak_modal,
-            messages = messages_html,
-            unlock_form = unlock_form,
-            composer_html = composer_html,
+            main_body_html = main_body_html,
+            open_prof_btn = self.tr("Профиль", "Profile"),
+            my_prof_btn = self.tr("Мой @юз", "My @username"),
             sec_route_title = self.tr("Переключатели", "Toggles"),
             chat_pin_lbl = self.tr("PIN-код чата", "Chat PIN lock"),
             lock_on = lock_on,
@@ -3889,6 +4398,7 @@ impl DesktopGuiServer {
             accounts = accounts_html,
             logout_btn = self.tr("Выйти из аккаунта", "Log out"),
             theme_sum = self.tr("Язык и управление", "Language & Controls"),
+            upd_short_btn = self.tr("Обновления", "Updates"),
             wipe_btn = self.tr("Стереть данные", "Wipe data"),
         )
     }
@@ -4011,12 +4521,204 @@ impl DesktopGuiServer {
                 self.state.status_banner.clear();
             }
             "step_servers" => {
+                self.state.profile_modal_open = false;
                 self.state.current_screen = Screen::ServerLauncher;
                 self.state.status_banner.clear();
             }
             "step_chats" => {
+                self.state.profile_modal_open = false;
+                self.state.viewed_user_profile = None;
                 self.state.current_screen = Screen::ChatWorkspace;
                 self.state.status_banner.clear();
+            }
+            "open_my_profile" => {
+                self.state.profile_modal_open = true;
+                self.state.viewed_user_profile = None;
+                self.state.current_screen = Screen::ChatWorkspace;
+                self.state.status_banner.clear();
+            }
+            "open_profile" => {
+                let u = extract_query_param(query, "user").unwrap_or_default();
+                if self.state.open_profile_by_uz(&u) {
+                    self.state.search_query.clear();
+                    self.state.current_screen = Screen::ChatWorkspace;
+                    self.state.status_banner.clear();
+                } else {
+                    self.state.status_banner = self
+                        .tr("Укажите @юз пользователя.", "Enter a @username.")
+                        .to_owned();
+                }
+            }
+            "open_active_chat_profile" => {
+                let active_tag = self
+                    .state
+                    .chats
+                    .get(self.state.active_chat_index)
+                    .map(|c| c.queue_tag.clone())
+                    .unwrap_or_default();
+                if let Some(rest) = active_tag.strip_prefix("dm://") {
+                    let (my_nick, _) = self.state.active_account_identity();
+                    let peer = rest
+                        .split(':')
+                        .find(|p| !p.eq_ignore_ascii_case(&my_nick))
+                        .unwrap_or(rest)
+                        .to_owned();
+                    let _ = self.state.open_profile_by_uz(&peer);
+                    self.state.current_screen = Screen::ChatWorkspace;
+                } else {
+                    self.state.profile_modal_open = true;
+                    self.state.viewed_user_profile = None;
+                    self.state.current_screen = Screen::ChatWorkspace;
+                }
+            }
+            "set_display_name" => {
+                let raw_name = extract_query_param(query, "name").unwrap_or_default();
+                let clean_name = DesktopAppState::strip_username_suffix(&raw_name);
+                if !clean_name.is_empty() {
+                    if let Some(prof) = self
+                        .state
+                        .accounts
+                        .profiles
+                        .get_mut(self.state.accounts.active_index)
+                    {
+                        prof.display_name.clone_from(&clean_name);
+                    }
+                    let (my_nick, _) = self.state.active_account_identity();
+                    for (n, alias, _) in &mut self.state.account_verifiers {
+                        if n.eq_ignore_ascii_case(&my_nick) {
+                            alias.clone_from(&clean_name);
+                        }
+                    }
+                    self.state.register_in_server_directory("user", &my_nick, &clean_name);
+                    self.state.save_desktop_vault();
+                    self.state.status_banner = self
+                        .tr("Ник обновлён.", "Display name updated.")
+                        .to_owned();
+                }
+            }
+            "set_primary_username" => {
+                let raw_uz = extract_query_param(query, "uz").unwrap_or_default();
+                if let Some(new_uz) = DesktopAppState::validate_custom_uz(&raw_uz) {
+                    let (old_nick, my_name) = self.state.active_account_identity();
+                    if let Some(prof) = self
+                        .state
+                        .accounts
+                        .profiles
+                        .get_mut(self.state.accounts.active_index)
+                    {
+                        prof.login_nickname.clone_from(&new_uz);
+                    }
+                    for (n, _, _) in &mut self.state.account_verifiers {
+                        if n.eq_ignore_ascii_case(&old_nick) {
+                            n.clone_from(&new_uz);
+                        }
+                    }
+                    for (owner, _) in &mut self.state.extra_usernames {
+                        if owner.eq_ignore_ascii_case(&old_nick) {
+                            owner.clone_from(&new_uz);
+                        }
+                    }
+                    self.state.register_in_server_directory("user", &new_uz, &my_name);
+                    self.state.save_desktop_vault();
+                    let _ = self.state.sync_all_chats_and_inbox();
+                    self.state.status_banner = if is_en {
+                        format!("Primary username updated: @{new_uz}")
+                    } else {
+                        format!("Основной @юз обновлён: @{new_uz}")
+                    };
+                } else {
+                    self.state.status_banner = self
+                        .tr(
+                            "@юз должен быть от 3 до 32 символов (буквы/цифры/_).",
+                            "@username must be 3..32 characters (letters/digits/_).",
+                        )
+                        .to_owned();
+                }
+            }
+            "add_extra_username" => {
+                let raw_uz = extract_query_param(query, "uz").unwrap_or_default();
+                if let Some(extra_uz) = DesktopAppState::validate_custom_uz(&raw_uz) {
+                    let (my_nick, my_name) = self.state.active_account_identity();
+                    let count = self.state.active_account_extra_usernames().len();
+                    if count >= 6 {
+                        self.state.status_banner = self
+                            .tr("Достигнут лимит дополнительных @юзов.", "Additional @username limit reached.")
+                            .to_owned();
+                    } else if !self.state.all_active_account_usernames().contains(&extra_uz) {
+                        self.state.extra_usernames.push((my_nick.clone(), extra_uz.clone()));
+                        self.state.register_in_server_directory("user", &my_nick, &my_name);
+                        self.state.save_desktop_vault();
+                        let _ = self.state.sync_all_chats_and_inbox();
+                        self.state.status_banner = if is_en {
+                            format!("Added username @{extra_uz}")
+                        } else {
+                            format!("Добавлен дополнительный @юз: @{extra_uz}")
+                        };
+                    }
+                } else {
+                    self.state.status_banner = self
+                        .tr(
+                            "@юз должен быть от 3 до 32 символов (буквы/цифры/_).",
+                            "@username must be 3..32 characters (letters/digits/_).",
+                        )
+                        .to_owned();
+                }
+            }
+            "remove_extra_username" => {
+                let raw_uz = extract_query_param(query, "uz").unwrap_or_default();
+                let clean = raw_uz.trim().trim_start_matches('@').to_ascii_lowercase();
+                let (my_nick, my_name) = self.state.active_account_identity();
+                self.state
+                    .extra_usernames
+                    .retain(|(o, u)| !(o.eq_ignore_ascii_case(&my_nick) && u.eq_ignore_ascii_case(&clean)));
+                self.state.register_in_server_directory("user", &my_nick, &my_name);
+                self.state.save_desktop_vault();
+            }
+            "toggle_auto_update" => {
+                self.state.auto_download_updates = !self.state.auto_download_updates;
+                self.state.save_desktop_vault();
+                self.state.status_banner = if self.state.auto_download_updates {
+                    self.tr("Автоскачивание обновлений включено.", "Auto-download updates enabled.").to_owned()
+                } else {
+                    self.tr("Автоскачивание обновлений выключено.", "Auto-download updates disabled.").to_owned()
+                };
+            }
+            "check_update" => {
+                let found = self.state.check_for_updates();
+                if found.is_none() {
+                    self.state.latest_available_version = Some("0.2.1".to_owned());
+                    if self.state.auto_download_updates {
+                        let _ = self.state.download_update_binary("0.2.1");
+                    }
+                }
+                self.state.status_banner = self
+                    .tr(
+                        "Проверка обновлений завершена.",
+                        "Update check completed.",
+                    )
+                    .to_owned();
+            }
+            "download_update" => {
+                let ver = self
+                    .state
+                    .latest_available_version
+                    .clone()
+                    .unwrap_or_else(|| "0.2.1".to_owned());
+                if let Some(path) = self.state.download_update_binary(&ver) {
+                    self.state.status_banner = if is_en {
+                        format!("Update downloaded: {path}")
+                    } else {
+                        format!("Обновление скачано: {path}")
+                    };
+                }
+            }
+            "apply_update" => {
+                if let Some(ref path) = self.state.downloaded_update_path {
+                    let _ = std::process::Command::new(path).spawn();
+                    self.state.status_banner = self
+                        .tr("Запущена новая версия приложения.", "Launched updated application.")
+                        .to_owned();
+                }
             }
             "toggle_seed_only" => {
                 self.state.seed_only_mode = !self.state.seed_only_mode;
@@ -4052,15 +4754,18 @@ impl DesktopGuiServer {
                 let peer_raw = extract_query_param(query, "user").unwrap_or_default();
                 let peer = peer_raw.trim().trim_start_matches('@').to_ascii_lowercase();
                 if !peer.is_empty() && self.state.chats.len() < 64 {
+                    self.state.search_server_directory(&peer);
+                    let disp_name = self.state.resolve_display_name_for_uz(&peer);
                     let (my_nick, _) = self.state.active_account_identity();
                     let tag = DesktopAppState::dm_pair_tag(&my_nick, &peer);
                     if let Some(existing_idx) = self.state.chats.iter().position(|c| c.queue_tag == tag) {
+                        self.state.chats[existing_idx].title = format!("💬 {disp_name}");
                         self.state.active_chat_index = existing_idx;
                     } else {
                         let id_byte = (self.state.chats.len() as u8).wrapping_add(10);
                         self.state.chats.push(ChatView {
                             chat_id: [id_byte; 16],
-                            title: format!("💬 @{peer}"),
+                            title: format!("💬 {disp_name}"),
                             queue_tag: tag,
                             is_local_saved_notes: false,
                             verified_support_badge: false,
@@ -4071,6 +4776,8 @@ impl DesktopGuiServer {
                         });
                         self.state.active_chat_index = self.state.chats.len() - 1;
                     }
+                    self.state.profile_modal_open = false;
+                    self.state.viewed_user_profile = None;
                     self.state.search_query.clear();
                     self.state.current_screen = Screen::ChatWorkspace;
                     let _ = self.state.sync_all_chats_and_inbox();
@@ -4080,7 +4787,7 @@ impl DesktopGuiServer {
             }
             "new_group_easy" => {
                 let title = extract_query_param(query, "title")
-                    .map(|s| s.trim().to_owned())
+                    .map(|s| DesktopAppState::strip_username_suffix(&s))
                     .filter(|s| !s.is_empty());
                 let members_raw = extract_query_param(query, "members").unwrap_or_default();
                 if let Some(t) = title {
@@ -4092,7 +4799,7 @@ impl DesktopGuiServer {
                             .collect::<String>()
                             .trim_matches('_')
                             .to_owned();
-                        let clean_slug = if slug.len() >= 2 {
+                        let clean_slug = if slug.len() >= 3 {
                             slug
                         } else {
                             format!("grp_{}", self.state.chats.len() + 1)
@@ -4104,7 +4811,7 @@ impl DesktopGuiServer {
                             let id_byte = (self.state.chats.len() as u8).wrapping_add(15);
                             self.state.chats.push(ChatView {
                                 chat_id: [id_byte; 16],
-                                title: format!("👥 {t} (@{clean_slug})"),
+                                title: format!("👥 {t}"),
                                 queue_tag: tag,
                                 is_local_saved_notes: false,
                                 verified_support_badge: false,
@@ -4134,25 +4841,26 @@ impl DesktopGuiServer {
                                 let _ = self.state.send_raw_capsule_to_tag(&format!("inbox://{m_nick}"), &wire);
                             }
                         }
+                        self.state.profile_modal_open = false;
                         self.state.current_screen = Screen::ChatWorkspace;
                         self.state.save_desktop_vault();
                         self.state.status_banner = if is_en {
-                            format!("Group \"{t}\" (@{clean_slug}) created.")
+                            format!("Group \"{t}\" created.")
                         } else {
-                            format!("Группа «{t}» (@{clean_slug}) создана.")
+                            format!("Группа «{t}» создана.")
                         };
                     }
                 }
             }
             "new_channel_easy" => {
                 let title = extract_query_param(query, "title")
-                    .map(|s| s.trim().to_owned())
+                    .map(|s| DesktopAppState::strip_username_suffix(&s))
                     .filter(|s| !s.is_empty());
                 let slug_in = extract_query_param(query, "slug").unwrap_or_default();
                 if let Some(t) = title {
                     if self.state.chats.len() < 64 {
                         let raw_slug = slug_in.trim().trim_start_matches('@').to_ascii_lowercase();
-                        let clean_slug: String = if raw_slug.len() >= 2 {
+                        let clean_slug: String = if raw_slug.len() >= 3 {
                             raw_slug
                                 .chars()
                                 .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
@@ -4167,7 +4875,7 @@ impl DesktopGuiServer {
                             let id_byte = (self.state.chats.len() as u8).wrapping_add(25);
                             self.state.chats.push(ChatView {
                                 chat_id: [id_byte; 16],
-                                title: format!("📢 {t} (@{clean_slug})"),
+                                title: format!("📢 {t}"),
                                 queue_tag: tag,
                                 is_local_saved_notes: false,
                                 verified_support_badge: true,
@@ -4179,12 +4887,13 @@ impl DesktopGuiServer {
                             self.state.active_chat_index = self.state.chats.len() - 1;
                         }
                         self.state.register_in_server_directory("channel", &clean_slug, &t);
+                        self.state.profile_modal_open = false;
                         self.state.current_screen = Screen::ChatWorkspace;
                         self.state.save_desktop_vault();
                         self.state.status_banner = if is_en {
-                            format!("Channel \"{t}\" (@{clean_slug}) created.")
+                            format!("Channel \"{t}\" created.")
                         } else {
-                            format!("Канал «{t}» (@{clean_slug}) создан.")
+                            format!("Канал «{t}» создан.")
                         };
                     }
                 }
@@ -4196,15 +4905,17 @@ impl DesktopGuiServer {
                     .trim()
                     .trim_start_matches('@')
                     .to_ascii_lowercase();
-                let title = extract_query_param(query, "title").unwrap_or_else(|| slug.clone());
+                let title = DesktopAppState::strip_username_suffix(
+                    &extract_query_param(query, "title").unwrap_or_else(|| slug.clone()),
+                );
                 if !slug.is_empty() && self.state.chats.len() < 64 {
                     let (my_nick, _) = self.state.active_account_identity();
                     let (tag, disp_title) = match kind.as_str() {
-                        "group" => (format!("group://{slug}"), format!("👥 {title} (@{slug})")),
-                        "channel" => (format!("channel://{slug}"), format!("📢 {title} (@{slug})")),
+                        "group" => (format!("group://{slug}"), format!("👥 {title}")),
+                        "channel" => (format!("channel://{slug}"), format!("📢 {title}")),
                         _ => (
                             DesktopAppState::dm_pair_tag(&my_nick, &slug),
-                            format!("💬 {title} (@{slug})"),
+                            format!("💬 {title}"),
                         ),
                     };
                     if let Some(idx) = self.state.chats.iter().position(|c| c.queue_tag == tag) {
@@ -4224,6 +4935,7 @@ impl DesktopGuiServer {
                         });
                         self.state.active_chat_index = self.state.chats.len() - 1;
                     }
+                    self.state.profile_modal_open = false;
                     self.state.search_query.clear();
                     self.state.current_screen = Screen::ChatWorkspace;
                     let _ = self.state.sync_all_chats_and_inbox();
@@ -4431,14 +5143,15 @@ impl DesktopGuiServer {
                 );
                 if created_res.is_ok()
                     || (self.state.auth_gate_enabled
-                        && clean_nick.len() >= 2
+                        && clean_nick.len() >= 3
                         && pwd.chars().count() >= 4)
                 {
+                    let clean_alias = DesktopAppState::strip_username_suffix(alias.trim());
                     if created_res.is_err() {
                         self.state.accounts.profiles.push(AccountProfileSummary {
                             account_id: [next_idx; 16],
                             login_nickname: clean_nick.clone(),
-                            display_name: alias.trim().to_owned(),
+                            display_name: clean_alias.clone(),
                             password_score: 85,
                         });
                     }
@@ -4446,14 +5159,15 @@ impl DesktopGuiServer {
                         DesktopAppState::compute_password_verifier(&clean_nick, &pwd);
                     self.state.account_verifiers.push((
                         clean_nick.clone(),
-                        alias.trim().to_owned(),
+                        clean_alias.clone(),
                         verifier,
                     ));
                     self.state.accounts.active_index =
                         self.state.accounts.profiles.len().saturating_sub(1);
                     self.state.is_authenticated = true;
+                    self.state.profile_modal_open = false;
                     self.state.recovery_phrase_preview = None;
-                    self.state.register_in_server_directory("user", &clean_nick, alias.trim());
+                    self.state.register_in_server_directory("user", &clean_nick, &clean_alias);
                     self.state.current_screen = if self.state.auth_gate_enabled {
                         Screen::ChatWorkspace
                     } else {
@@ -4462,9 +5176,9 @@ impl DesktopGuiServer {
                     self.state.save_desktop_vault();
                     let _ = self.state.sync_all_chats_and_inbox();
                     self.state.status_banner = if is_en {
-                        format!("Signed in as {} (@{}).", alias.trim(), clean_nick)
+                        format!("Signed in as {clean_alias}.")
                     } else {
-                        format!("Вы вошли как {} (@{}).", alias.trim(), clean_nick)
+                        format!("Вы вошли как {clean_alias}.")
                     };
                 } else if let Err(e) = created_res {
                     self.state.status_banner = if is_en {
@@ -4483,6 +5197,7 @@ impl DesktopGuiServer {
                                 self.state.peer_verified = true;
                             }
                             self.state.active_chat_index = idx;
+                            self.state.profile_modal_open = false;
                             self.state.leak_guard_modal = None;
                         }
                     }
@@ -5035,12 +5750,19 @@ impl DesktopGuiServer {
                 }
                 if req.starts_with("GET /api/poll ") {
                     let n = if self.state.is_authenticated {
+                        let _ = self.state.check_for_updates();
                         self.state.sync_all_chats_and_inbox()
                     } else {
                         0
                     };
                     let ping_val = self.state.last_ping_ms.map_or(-1i32, |v| v as i32);
-                    let json = format!(r#"{{"new_msgs":{n},"ping_ms":{ping_val}}}"#);
+                    let ping_html = json_escape(&self.render_ping_badge());
+                    let update_html = json_escape(&self.render_update_banner());
+                    let messages_html = json_escape(&self.render_messages_list_html());
+                    let chats_html = json_escape(&self.render_chat_list_items_html());
+                    let json = format!(
+                        r#"{{"new_msgs":{n},"ping_ms":{ping_val},"ping_html":"{ping_html}","update_html":"{update_html}","messages_html":"{messages_html}","chats_html":"{chats_html}"}}"#
+                    );
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{json}",
                         json.len()
@@ -5253,6 +5975,22 @@ fn html_escape(input: &str) -> String {
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
             _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn json_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {}
+            c => out.push(c),
         }
     }
     out
