@@ -187,9 +187,20 @@ class AegisRustBridge(private val context: Context) {
     var downloadedUpdatePath: String? = null
     var outboundCapsuleSeq: Long = (System.currentTimeMillis() % 100000L)
     var lastPingMs: Int? = 38
+    var pushNotificationsEnabled: Boolean = true
+    var soundNotificationsEnabled: Boolean = true
+    var animationsEnabled: Boolean = true
+    var uiTheme: String = "cyber-neon"
+    var chatWallpaper: String = "nebula"
+    var bubbleStyle: String = "modern"
+    var fontScale: String = "normal"
+    var profileBio: String = "👑 Владелец и создатель Aegis"
+    var profileStatusEmoji: String = "👑"
+    var lastPushToast: Pair<String, String>? = null
     val directoryResults = mutableListOf(
-        DirectoryEntryUi("channel", "aegis_news", "Новости Aegis"),
-        DirectoryEntryUi("group", "aegis_lobby", "Общий чат Aegis")
+        DirectoryEntryUi("channel", "owner", "Канал Owner"),
+        DirectoryEntryUi("user", "owner", "Shadow"),
+        DirectoryEntryUi("user", "topxir", "Topxir")
     )
     var blindRelayEndpoint: String = ""
     var socks5ProxyEndpoint: String = ""
@@ -282,6 +293,13 @@ class AegisRustBridge(private val context: Context) {
         return out
     }
 
+    /** Owner privileges (multiple @usernames + posting in the Owner channel) are bound to `@owner`. */
+    fun isOwnerAccount(): Boolean {
+        val (myNick, _) = activeAccountIdentity()
+        return myNick.equals("owner", ignoreCase = true) ||
+            activeAccountExtraUsernames().any { it.equals("owner", ignoreCase = true) }
+    }
+
     fun resolveDisplayNameForUz(uz: String): String {
         val clean = uz.trim().trimStart('@').lowercase()
         accounts.find { it.loginNickname.equals(clean, ignoreCase = true) }?.let {
@@ -322,6 +340,15 @@ class AegisRustBridge(private val context: Context) {
                 .putInt("active_account_idx", activeAccountIndex)
                 .putBoolean("is_authenticated", isAuthenticated)
                 .putBoolean("auto_download_updates", autoDownloadUpdates)
+                .putBoolean("push_notifications", pushNotificationsEnabled)
+                .putBoolean("sound_notifications", soundNotificationsEnabled)
+                .putBoolean("animations_enabled", animationsEnabled)
+                .putString("ui_theme", uiTheme)
+                .putString("chat_wallpaper", chatWallpaper)
+                .putString("bubble_style", bubbleStyle)
+                .putString("font_scale", fontScale)
+                .putString("profile_bio", profileBio)
+                .putString("profile_status_emoji", profileStatusEmoji)
                 .putInt("active_server_idx", activeServerIndex)
                 .putString("app_locale", locale.name)
                 .apply()
@@ -336,6 +363,15 @@ class AegisRustBridge(private val context: Context) {
                 switchLocale(AppLocale.EN)
             }
             autoDownloadUpdates = prefs.getBoolean("auto_download_updates", true)
+            pushNotificationsEnabled = prefs.getBoolean("push_notifications", true)
+            soundNotificationsEnabled = prefs.getBoolean("sound_notifications", true)
+            animationsEnabled = prefs.getBoolean("animations_enabled", true)
+            uiTheme = prefs.getString("ui_theme", "cyber-neon") ?: "cyber-neon"
+            chatWallpaper = prefs.getString("chat_wallpaper", "nebula") ?: "nebula"
+            bubbleStyle = prefs.getString("bubble_style", "modern") ?: "modern"
+            fontScale = prefs.getString("font_scale", "normal") ?: "normal"
+            profileBio = prefs.getString("profile_bio", "👑 Владелец и создатель Aegis") ?: "👑 Владелец и создатель Aegis"
+            profileStatusEmoji = prefs.getString("profile_status_emoji", "👑") ?: "👑"
             activeServerIndex = prefs.getInt("active_server_idx", 0).coerceIn(0, (starterServers.size - 1).coerceAtLeast(0))
             val accRaw = prefs.getString("saved_accounts_v2", "") ?: ""
             if (accRaw.isNotBlank()) {
@@ -1042,6 +1078,16 @@ class AegisRustBridge(private val context: Context) {
     }
 
     fun addExtraUsername(extraUz: String): Result<String> {
+        if (!isOwnerAccount()) {
+            return Result.failure(
+                IllegalStateException(
+                    tr(
+                        "Несколько @юзов доступны только владельцу (@owner).",
+                        "Multiple @usernames are available only to the Owner (@owner)."
+                    )
+                )
+            )
+        }
         val clean = validateCustomUz(extraUz)
             ?: return Result.failure(IllegalArgumentException(tr("@юз должен быть от 3 до 32 символов", "@username must be 3..32 chars")))
         val (myNick, myName) = activeAccountIdentity()
@@ -2203,6 +2249,7 @@ class AegisRustBridge(private val context: Context) {
                                         ttlSeconds = chat.defaultTtlSeconds
                                     )
                                 )
+                                lastPushToast = stripUsernameSuffix(chat.title) to disp
                                 totalNew++
                             }
                         }
@@ -2234,6 +2281,7 @@ class AegisRustBridge(private val context: Context) {
                                             ttlSeconds = chat.defaultTtlSeconds
                                         )
                                     )
+                                    lastPushToast = stripUsernameSuffix(chat.title) to disp
                                     totalNew++
                                 }
                             }
@@ -2350,8 +2398,8 @@ class AegisRustBridge(private val context: Context) {
         chats.add(
             ChatItemUi(
                 chatIdHex = "02020202",
-                title = "📢 Новости Aegis",
-                queueTag = "channel://aegis_news",
+                title = "📢 Канал Owner",
+                queueTag = "channel://owner",
                 isSavedNotes = false,
                 verifiedSupportBadge = true,
                 perChatPin = null,
@@ -2359,26 +2407,7 @@ class AegisRustBridge(private val context: Context) {
                 messages = mutableListOf(
                     ChatMessageUi(
                         outgoing = false,
-                        text = "Официальный канал новостей Aegis. Через поиск сверху можно найти людей по @юзу, открыть их профиль, группы и каналы.",
-                        paddedBucketBytes = 256,
-                        ttlSeconds = null
-                    )
-                )
-            )
-        )
-        chats.add(
-            ChatItemUi(
-                chatIdHex = "03030303",
-                title = "👥 Общий чат Aegis",
-                queueTag = "group://aegis_lobby",
-                isSavedNotes = false,
-                verifiedSupportBadge = false,
-                perChatPin = null,
-                isLocked = false,
-                messages = mutableListOf(
-                    ChatMessageUi(
-                        outgoing = false,
-                        text = "Общая группа Aegis. Напишите сообщение — его увидят все участники.",
+                        text = "👑 Официальный авторский канал Owner. Публиковать записи здесь может только владелец.",
                         paddedBucketBytes = 256,
                         ttlSeconds = null
                     )

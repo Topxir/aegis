@@ -274,8 +274,10 @@ fn main() {
         "aegis-serverd listening on http://{bind_addr} (Static-IP & Direct Ready, Zero IP Logs, OPAQUE + Queues + Support Portal)"
     );
 
+    let mut fed_state = FederationServerState::new(init_server_blinding_salt());
+    fed_state.enable_disk_persistence();
     let shared_state = Arc::new(Mutex::new((
-        FederationServerState::new(init_server_blinding_salt()),
+        fed_state,
         SupportPortalState::new(),
     )));
     let active_conns = Arc::new(AtomicUsize::new(0));

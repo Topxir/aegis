@@ -150,6 +150,7 @@ pub struct FederationServerState {
     opaque_records: BTreeMap<[u8; 32], Vec<u8>>,
     directory_entries: BTreeMap<String, (String, String)>,
     latest_app_version: String,
+    persist_to_disk: bool,
     requests_in_window: u32,
     suspicious_burst: bool,
     window_started_unix_secs: u64,
@@ -205,12 +206,16 @@ impl FederationServerState {
         };
         let mut directory_entries = BTreeMap::new();
         directory_entries.insert(
-            "channel:aegis_news".to_owned(),
-            ("channel".to_owned(), "Новости Aegis".to_owned()),
+            "channel:owner".to_owned(),
+            ("channel".to_owned(), "Канал Owner".to_owned()),
         );
         directory_entries.insert(
-            "group:aegis_lobby".to_owned(),
-            ("group".to_owned(), "Общий чат Aegis".to_owned()),
+            "user:owner".to_owned(),
+            ("user".to_owned(), "Shadow".to_owned()),
+        );
+        directory_entries.insert(
+            "user:topxir".to_owned(),
+            ("user".to_owned(), "Topxir".to_owned()),
         );
         Self {
             server_blinding_salt: salt,
@@ -221,9 +226,113 @@ impl FederationServerState {
             opaque_records: BTreeMap::new(),
             directory_entries,
             latest_app_version: "0.2.0".to_owned(),
+            persist_to_disk: false,
             requests_in_window: 0,
             suspicious_burst: false,
             window_started_unix_secs: current_unix_seconds(),
+        }
+    }
+
+    fn server_state_file_path() -> Option<std::path::PathBuf> {
+        std::env::var("USERPROFILE")
+            .ok()
+            .map(|p| std::path::PathBuf::from(p).join(".aegis-server-state.tsv"))
+    }
+
+    /// Enables disk persistence of queues and directory entries for the live `aegis-serverd` daemon.
+    pub fn enable_disk_persistence(&mut self) {
+        self.persist_to_disk = true;
+        self.load_state_from_disk();
+    }
+
+    /// Saves queues, queue auth hashes, and directory entries to disk when `persist_to_disk` is enabled.
+    pub fn save_state_to_disk(&self) {
+        if !self.persist_to_disk {
+            return;
+        }
+        let Some(path) = Self::server_state_file_path() else {
+            return;
+        };
+        let mut out = String::new();
+        for (key, (kind, title)) in &self.directory_entries {
+            out.push_str(&format!(
+                "DIR\t{}\t{}\t{}\n",
+                hex_encode_bytes(key.as_bytes()),
+                hex_encode_bytes(kind.as_bytes()),
+                hex_encode_bytes(title.as_bytes())
+            ));
+        }
+        for (q_id, auth_hash) in &self.queue_auth_hashes {
+            out.push_str(&format!(
+                "AUTH\t{}\t{}\n",
+                hex_encode_bytes(q_id),
+                hex_encode_bytes(auth_hash)
+            ));
+        }
+        for (q_id, frames) in &self.queues {
+            let q_hex = hex_encode_bytes(q_id);
+            for frame in frames {
+                out.push_str(&format!("FRAME\t{q_hex}\t{}\n", hex_encode_bytes(frame)));
+            }
+        }
+        let _ = std::fs::write(path, out);
+    }
+
+    /// Loads saved queues, queue auth hashes, and directory entries from disk.
+    pub fn load_state_from_disk(&mut self) {
+        let Some(path) = Self::server_state_file_path() else {
+            return;
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let now = current_unix_seconds();
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            match parts.first().copied() {
+                Some("DIR") if parts.len() >= 4 => {
+                    if let (Ok(k_b), Ok(kind_b), Ok(t_b)) = (
+                        hex_decode_bytes(parts[1]),
+                        hex_decode_bytes(parts[2]),
+                        hex_decode_bytes(parts[3]),
+                    ) {
+                        if let (Ok(k), Ok(kind), Ok(t)) = (
+                            String::from_utf8(k_b),
+                            String::from_utf8(kind_b),
+                            String::from_utf8(t_b),
+                        ) {
+                            if k != "channel:aegis_news" && k != "group:aegis_lobby" {
+                                self.directory_entries.insert(k, (kind, t));
+                            }
+                        }
+                    }
+                }
+                Some("AUTH") if parts.len() >= 3 => {
+                    if let (Ok(q_b), Ok(a_b)) = (hex_decode_bytes(parts[1]), hex_decode_bytes(parts[2])) {
+                        if q_b.len() == 32 && a_b.len() == 32 {
+                            let mut q = [0u8; 32];
+                            let mut a = [0u8; 32];
+                            q.copy_from_slice(&q_b);
+                            a.copy_from_slice(&a_b);
+                            self.queue_auth_hashes.insert(q, a);
+                        }
+                    }
+                }
+                Some("FRAME") if parts.len() >= 3 => {
+                    if let (Ok(q_b), Ok(f_b)) = (hex_decode_bytes(parts[1]), hex_decode_bytes(parts[2])) {
+                        if q_b.len() == 32 && !f_b.is_empty() {
+                            let mut q = [0u8; 32];
+                            q.copy_from_slice(&q_b);
+                            let entry = self.queues.entry(q).or_default();
+                            if !entry.contains(&f_b) {
+                                entry.push(f_b);
+                                self.queue_timestamps.entry(q).or_default().push(now);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1340,7 +1449,10 @@ pub fn handle_http_request(
                 }
             }
             match server.enqueue_frame(queue_id, frame_to_enqueue) {
-                Ok(_) => (200, "application/json", r#"{"status":"queued"}"#.to_owned()),
+                Ok(_) => {
+                    server.save_state_to_disk();
+                    (200, "application/json", r#"{"status":"queued"}"#.to_owned())
+                }
                 Err(_) => {
                     if !had_auth_before && !server.queues.contains_key(&queue_id) {
                         server.queue_auth_hashes.remove(&queue_id);
@@ -1431,6 +1543,7 @@ pub fn handle_http_request(
                         );
                     }
                 }
+                server.save_state_to_disk();
                 (200, "application/json", r#"{"status":"registered"}"#.to_owned())
             } else {
                 (400, "application/json", r#"{"error":"invalid_dir_entry"}"#.to_owned())

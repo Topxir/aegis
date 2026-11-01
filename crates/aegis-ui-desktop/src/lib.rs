@@ -695,6 +695,26 @@ pub struct DesktopAppState {
     pub auto_download_updates: bool,
     /// Local filesystem path to the automatically downloaded update package.
     pub downloaded_update_path: Option<String>,
+    /// Whether push notifications for incoming messages are enabled.
+    pub push_notifications_enabled: bool,
+    /// Whether notification sound chimes are enabled.
+    pub sound_notifications_enabled: bool,
+    /// Whether smooth UI animations and transitions are enabled.
+    pub animations_enabled: bool,
+    /// Active visual color theme (`"cyber-neon"`, `"emerald-monolith"`, `"crimson-sunset"`, `"royal-amethyst"`, `"gold-sovereign"`, `"oled-black"`).
+    pub ui_theme: String,
+    /// Active chat background wallpaper (`"nebula"`, `"grid"`, `"dots"`, `"clean"`).
+    pub chat_wallpaper: String,
+    /// Active message bubble style (`"modern"`, `"neon"`, `"glass"`).
+    pub bubble_style: String,
+    /// Active font scale (`"normal"`, `"large"`, `"compact"`).
+    pub font_scale: String,
+    /// User's custom bio / status line in Profile.
+    pub profile_bio: String,
+    /// User's status badge emoji in Profile (`"👑"`, `"⚡"`, `"🔥"`, `"💎"`, `"🛡"`, `"👻"`).
+    pub profile_status_emoji: String,
+    /// Latest incoming message toast `(sender_title, message_preview)` for push notification display.
+    pub last_push_toast: Option<(String, String)>,
 }
 
 impl Default for DesktopAppState {
@@ -905,8 +925,9 @@ impl DesktopAppState {
             account_verifiers: Vec::new(),
             last_ping_ms: Some(38),
             directory_results: vec![
-                ("channel".to_owned(), "aegis_news".to_owned(), "Новости Aegis".to_owned()),
-                ("group".to_owned(), "aegis_lobby".to_owned(), "Общий чат Aegis".to_owned()),
+                ("channel".to_owned(), "owner".to_owned(), "Канал Owner".to_owned()),
+                ("user".to_owned(), "owner".to_owned(), "Shadow".to_owned()),
+                ("user".to_owned(), "topxir".to_owned(), "Topxir".to_owned()),
             ],
             seen_account_msg_ids: Vec::new(),
             extra_usernames: Vec::new(),
@@ -915,11 +936,51 @@ impl DesktopAppState {
             latest_available_version: None,
             auto_download_updates: true,
             downloaded_update_path: None,
+            push_notifications_enabled: true,
+            sound_notifications_enabled: true,
+            animations_enabled: true,
+            ui_theme: "cyber-neon".to_owned(),
+            chat_wallpaper: "nebula".to_owned(),
+            bubble_style: "modern".to_owned(),
+            font_scale: "normal".to_owned(),
+            profile_bio: "👑 Владелец и создатель Aegis".to_owned(),
+            profile_status_emoji: "👑".to_owned(),
+            last_push_toast: None,
         }
     }
 
     /// Current desktop client release version.
     pub const APP_VERSION: &'static str = "0.2.0";
+
+    /// Checks whether the local machine holds the cryptographic Owner device key (`~/.aegis-owner.key`).
+    #[must_use]
+    pub fn has_owner_device_key() -> bool {
+        let Some(profile) = std::env::var("USERPROFILE").ok() else {
+            return false;
+        };
+        let key_path = std::path::PathBuf::from(&profile).join(".aegis-owner.key");
+        if let Ok(content) = std::fs::read_to_string(&key_path) {
+            if content.trim().starts_with("AEGIS-OWNER-KEY-V1:485cca70-0a6c-459d-91a9-7975fa195263:") {
+                return true;
+            }
+        }
+        let cf_path = std::path::PathBuf::from(&profile)
+            .join(".cloudflared")
+            .join("485cca70-0a6c-459d-91a9-7975fa195263.json");
+        cf_path.is_file()
+    }
+
+    /// Returns `true` if the active session is authenticated as the Owner (`@owner` + device key).
+    #[must_use]
+    pub fn is_owner_account(&self) -> bool {
+        let (my_nick, _) = self.active_account_identity();
+        let is_owner_nick = my_nick.eq_ignore_ascii_case("owner")
+            || self
+                .extra_usernames
+                .iter()
+                .any(|(o, u)| o.eq_ignore_ascii_case(&my_nick) && u.eq_ignore_ascii_case("owner"));
+        is_owner_nick && Self::has_owner_device_key()
+    }
 
     /// Strips any trailing `" (@...)"` username tag from a display name or chat title.
     #[must_use]
@@ -958,12 +1019,12 @@ impl DesktopAppState {
         self.auth_gate_enabled = true;
         self.is_authenticated = false;
         self.current_screen = Screen::Onboarding;
-        // Replace test-only nordic-falcon chat with real public group & channel in GUI mode
+        // Keep only local saved notes + the official Owner channel (no generic channels/groups)
         self.chats.retain(|c| c.is_local_saved_notes);
         self.chats.push(ChatView {
             chat_id: [0x02; 16],
-            title: "📢 Новости Aegis".to_owned(),
-            queue_tag: "channel://aegis_news".to_owned(),
+            title: "📢 Канал Owner".to_owned(),
+            queue_tag: "channel://owner".to_owned(),
             is_local_saved_notes: false,
             verified_support_badge: true,
             per_chat_pin: None,
@@ -971,24 +1032,7 @@ impl DesktopAppState {
             default_disappearing_ttl_secs: None,
             messages: vec![ChatMessageView {
                 outgoing: false,
-                text: "Официальный канал новостей Aegis. Через поиск сверху можно найти людей по @юзу, открыть их профиль, группы и каналы.".to_owned(),
-                padded_bucket_bytes: 256,
-                disappearing_ttl_secs: None,
-                attachment: None,
-            }],
-        });
-        self.chats.push(ChatView {
-            chat_id: [0x03; 16],
-            title: "👥 Общий чат Aegis".to_owned(),
-            queue_tag: "group://aegis_lobby".to_owned(),
-            is_local_saved_notes: false,
-            verified_support_badge: false,
-            per_chat_pin: None,
-            is_locked: false,
-            default_disappearing_ttl_secs: None,
-            messages: vec![ChatMessageView {
-                outgoing: false,
-                text: "Общая группа Aegis. Напишите сообщение — его увидят все участники.".to_owned(),
+                text: "👑 Официальный авторский канал Owner. Публиковать записи здесь может только владелец (ключ устройства подтверждён).".to_owned(),
                 padded_bucket_bytes: 256,
                 disappearing_ttl_secs: None,
                 attachment: None,
@@ -996,6 +1040,19 @@ impl DesktopAppState {
         });
         self.active_chat_index = 0;
         self.load_desktop_vault();
+        self.chats.retain(|c| {
+            c.queue_tag != "channel://aegis_news" && c.queue_tag != "group://aegis_lobby"
+        });
+        // Keep exactly one row per queue (the vault may already contain the Owner channel).
+        let mut seen_tags: Vec<String> = Vec::new();
+        self.chats.retain(|c| {
+            if seen_tags.iter().any(|t| t == &c.queue_tag) {
+                false
+            } else {
+                seen_tags.push(c.queue_tag.clone());
+                true
+            }
+        });
         if !self.account_verifiers.is_empty() && !self.is_authenticated {
             self.auth_tab_login = true;
         }
@@ -1003,7 +1060,65 @@ impl DesktopAppState {
         if self.is_authenticated {
             let (my_nick, my_name) = self.active_account_identity();
             self.register_in_server_directory("user", &my_nick, &my_name);
+            if self.is_owner_account() {
+                self.register_in_server_directory("channel", "owner", "Канал Owner");
+            }
+            self.re_sync_outgoing_to_server();
             let _ = self.sync_all_chats_and_inbox();
+        }
+    }
+
+    /// Ensures any locally saved outgoing messages are queued on the active server so peers (like `@topxir`)
+    /// receive them even if the server was restarted.
+    pub fn re_sync_outgoing_to_server(&mut self) {
+        if !self.shield_evaluation.traffic_permitted || self.duress_mode_active {
+            return;
+        }
+        let (my_nick, my_name) = self.active_account_identity();
+        let my_clean = my_nick.trim().trim_start_matches('@').to_ascii_lowercase();
+        let chat_snapshots: Vec<(String, String, Vec<String>)> = self
+            .chats
+            .iter()
+            .filter(|c| !c.is_local_saved_notes)
+            .map(|c| {
+                let out_msgs: Vec<String> = c
+                    .messages
+                    .iter()
+                    .filter(|m| m.outgoing)
+                    .map(|m| m.text.clone())
+                    .collect();
+                (c.queue_tag.clone(), c.title.clone(), out_msgs)
+            })
+            .collect();
+        for (q_tag, c_title, out_msgs) in chat_snapshots {
+            let (kind, slug) = if let Some(rest) = q_tag.strip_prefix("dm://") {
+                let peer = rest
+                    .split(':')
+                    .find(|p| !p.eq_ignore_ascii_case(&my_clean))
+                    .unwrap_or(rest);
+                ("dm", peer.to_owned())
+            } else if let Some(rest) = q_tag.strip_prefix("channel://") {
+                ("channel", rest.to_owned())
+            } else if let Some(rest) = q_tag.strip_prefix("group://") {
+                ("group", rest.to_owned())
+            } else {
+                continue;
+            };
+            for (idx, txt) in out_msgs.iter().enumerate() {
+                let msg_id = format!("sync_{my_clean}_{slug}_{idx}");
+                let dedup = format!("{my_clean}:{msg_id}");
+                if !self.seen_account_msg_ids.contains(&dedup) {
+                    self.seen_account_msg_ids.push(dedup);
+                }
+                let wire = format!(
+                    "AEGMSG1\t{msg_id}\t{my_clean}\t{my_name}\t{kind}\t{slug}\t{}\t{txt}",
+                    Self::strip_username_suffix(&c_title)
+                );
+                let _ = self.send_raw_capsule_to_tag(&q_tag, &wire);
+                if kind == "dm" && !slug.is_empty() && !slug.contains(':') {
+                    let _ = self.send_raw_capsule_to_tag(&format!("inbox://{slug}"), &wire);
+                }
+            }
         }
     }
 
@@ -1470,11 +1585,12 @@ impl DesktopAppState {
                                     };
                                     chat.messages.push(ChatMessageView {
                                         outgoing: false,
-                                        text: display_text,
+                                        text: display_text.clone(),
                                         padded_bucket_bytes: frame.len(),
                                         disappearing_ttl_secs: chat.default_disappearing_ttl_secs,
                                         attachment: None,
                                     });
+                                    self.last_push_toast = Some((chat.title.clone(), display_text));
                                     total_new = total_new.saturating_add(1);
                                 }
                             }
@@ -1540,11 +1656,12 @@ impl DesktopAppState {
                         };
                         chat.messages.push(ChatMessageView {
                             outgoing: false,
-                            text: display_text,
+                            text: display_text.clone(),
                             padded_bucket_bytes: frame.len(),
                             disappearing_ttl_secs: chat.default_disappearing_ttl_secs,
                             attachment: None,
                         });
+                        self.last_push_toast = Some((chat.title.clone(), display_text));
                         total_new = total_new.saturating_add(1);
                     }
                 } else {
@@ -1556,11 +1673,12 @@ impl DesktopAppState {
                     if let Some(chat) = self.chats.iter_mut().find(|c| c.queue_tag == tag) {
                         chat.messages.push(ChatMessageView {
                             outgoing: false,
-                            text: pt,
+                            text: pt.clone(),
                             padded_bucket_bytes: frame.len(),
                             disappearing_ttl_secs: chat.default_disappearing_ttl_secs,
                             attachment: None,
                         });
+                        self.last_push_toast = Some((chat.title.clone(), pt));
                         total_new = total_new.saturating_add(1);
                     }
                 }
@@ -1572,7 +1690,7 @@ impl DesktopAppState {
         total_new
     }
 
-    /// Saves registered accounts, extra `@юзы`, active session, and user chats to disk when `auth_gate_enabled` is active.
+    /// Saves registered accounts, extra `@юзы`, active session, customization, and user chats to disk when `auth_gate_enabled` is active.
     pub fn save_desktop_vault(&self) {
         if !self.auth_gate_enabled {
             return;
@@ -1586,6 +1704,18 @@ impl DesktopAppState {
             if self.is_authenticated { "1" } else { "0" },
             self.accounts.active_index,
             if self.auto_download_updates { "1" } else { "0" }
+        ));
+        out.push_str(&format!(
+            "CUSTOM\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            if self.push_notifications_enabled { "1" } else { "0" },
+            if self.sound_notifications_enabled { "1" } else { "0" },
+            if self.animations_enabled { "1" } else { "0" },
+            url_encode(&self.ui_theme),
+            url_encode(&self.chat_wallpaper),
+            url_encode(&self.bubble_style),
+            url_encode(&self.font_scale),
+            url_encode(&self.profile_bio),
+            url_encode(&self.profile_status_emoji),
         ));
         for (nick, alias, verifier) in &self.account_verifiers {
             out.push_str(&format!(
@@ -1645,6 +1775,32 @@ impl DesktopAppState {
                     saved_active_idx = parts[2].parse::<usize>().unwrap_or(0);
                     if parts.len() >= 4 {
                         self.auto_download_updates = parts[3] != "0";
+                    }
+                }
+                Some("CUSTOM") if parts.len() >= 10 => {
+                    self.push_notifications_enabled = parts[1] != "0";
+                    self.sound_notifications_enabled = parts[2] != "0";
+                    self.animations_enabled = parts[3] != "0";
+                    let t = percent_decode(parts[4]);
+                    if !t.is_empty() {
+                        self.ui_theme = t;
+                    }
+                    let w = percent_decode(parts[5]);
+                    if !w.is_empty() {
+                        self.chat_wallpaper = w;
+                    }
+                    let b = percent_decode(parts[6]);
+                    if !b.is_empty() {
+                        self.bubble_style = b;
+                    }
+                    let f = percent_decode(parts[7]);
+                    if !f.is_empty() {
+                        self.font_scale = f;
+                    }
+                    self.profile_bio = percent_decode(parts[8]);
+                    let em = percent_decode(parts[9]);
+                    if !em.is_empty() {
+                        self.profile_status_emoji = em;
                     }
                 }
                 Some("EXTRA_UZ") if parts.len() >= 3 => {
@@ -3920,19 +4076,58 @@ impl DesktopGuiServer {
 
     fn render_profile_pane(&self) -> String {
         let (my_nick, my_name) = self.state.active_account_identity();
+        let is_owner = self.state.is_owner_account();
         let extra_uzs = self.state.active_account_extra_usernames();
         let mut uz_badges = format!(
             "<span class='chip' style='font-size:13px;padding:6px 12px;color:#6ee7a8;border-color:rgba(37,211,102,0.4);'>@{}</span>",
             html_escape(&my_nick)
         );
-        for ex in &extra_uzs {
-            uz_badges.push_str(&format!(
-                " <span class='chip' style='font-size:13px;padding:6px 10px;'>@{ex_esc} <a href='/action?cmd=remove_extra_username&amp;uz={ex_url}' style='color:#ffb3ba;margin-left:6px;' title='{del_lbl}'>×</a></span>",
-                ex_esc = html_escape(ex),
-                ex_url = url_encode(ex),
-                del_lbl = self.tr("Удалить @юз", "Remove @username"),
-            ));
+        if is_owner {
+            for ex in &extra_uzs {
+                uz_badges.push_str(&format!(
+                    " <span class='chip' style='font-size:13px;padding:6px 10px;'>@{ex_esc} <a href='/action?cmd=remove_extra_username&amp;uz={ex_url}' style='color:#ffb3ba;margin-left:6px;' title='{del_lbl}'>×</a></span>",
+                    ex_esc = html_escape(ex),
+                    ex_url = url_encode(ex),
+                    del_lbl = self.tr("Удалить @юз", "Remove @username"),
+                ));
+            }
         }
+
+        let owner_badge_html = if is_owner {
+            format!(
+                "<span class='chip' style='background:linear-gradient(135deg,#f59e0b,#eab308);color:#1a1002;border:none;font-weight:800;margin-left:8px;'>👑 {}</span>",
+                self.tr("Owner · Ключ устройства подтверждён", "Owner · Device Key Verified")
+            )
+        } else {
+            String::new()
+        };
+
+        let extra_uz_section = if is_owner {
+            format!(
+                "<form class='form-stack' action='/action' method='get'>
+      <input type='hidden' name='cmd' value='add_extra_username'>
+      <label>👑 {extra_uz_lbl}</label>
+      <div class='input-row'>
+        <input type='text' name='uz' placeholder='{extra_uz_ph}' autocomplete='off' spellcheck='false'>
+        <button class='btn primary' type='submit'>+ {add_uz_btn}</button>
+      </div>
+    </form>",
+                extra_uz_lbl = self.tr(
+                    "Дополнительные @юзы (привилегия Owner — можно сделать несколько)",
+                    "Additional @usernames (Owner privilege — add multiple)"
+                ),
+                extra_uz_ph = self.tr("@второй_юз (от 3 букв)", "@second_username (3+ chars)"),
+                add_uz_btn = self.tr("Добавить @юз", "Add @username"),
+            )
+        } else {
+            format!(
+                "<div class='notice compact' style='margin-top:10px;'>👑 {}</div>",
+                self.tr(
+                    "Несколько @юзов сейчас доступны только владельцу (Owner).",
+                    "Multiple @usernames are currently available only to the Owner."
+                )
+            )
+        };
 
         let viewed_card = if let Some((ref p_name, ref p_uz, ref p_extras)) = self.state.viewed_user_profile {
             let mut p_badges = format!(
@@ -3945,14 +4140,16 @@ impl DesktopGuiServer {
                     html_escape(ex)
                 ));
             }
+            let peer_is_owner = p_uz.eq_ignore_ascii_case("owner") || p_uz.eq_ignore_ascii_case("ceo");
+            let peer_crown = if peer_is_owner { " 👑" } else { "" };
             format!(
-                "<div class='auth-card' style='margin:16px auto;max-width:560px;'>
+                "<div class='auth-card' style='margin:0 auto 16px;max-width:640px;'>
   <div class='eyebrow'>{peer_eyebrow}</div>
   <div style='display:flex;align-items:center;gap:14px;margin:10px 0 14px;'>
     <span class='avatar large'>👤</span>
     <div>
-      <h2 style='margin:0;'>{p_name_esc}</h2>
-      <div class='muted' style='margin-top:4px;'>{uz_lbl}: {p_badges}</div>
+      <h2 style='margin:0;'>{p_name_esc}{peer_crown}</h2>
+      <div class='muted' style='margin-top:6px;'>{uz_lbl}: {p_badges}</div>
     </div>
   </div>
   <div class='actions-row'>
@@ -3962,6 +4159,7 @@ impl DesktopGuiServer {
 </div>",
                 peer_eyebrow = self.tr("Профиль пользователя", "User Profile"),
                 p_name_esc = html_escape(p_name),
+                peer_crown = peer_crown,
                 uz_lbl = self.tr("Юзернейм (@юз)", "Username"),
                 p_badges = p_badges,
                 p_uz_url = url_encode(p_uz),
@@ -3973,24 +4171,109 @@ impl DesktopGuiServer {
         };
 
         let auto_upd_on = if self.state.auto_download_updates { "on" } else { "" };
+        let push_on = if self.state.push_notifications_enabled { "on" } else { "" };
+        let sound_on = if self.state.sound_notifications_enabled { "on" } else { "" };
+        let anim_on = if self.state.animations_enabled { "on" } else { "" };
+
+        let themes = [
+            ("cyber-neon", self.tr("🌌 Кибер-Неон", "🌌 Cyber Neon")),
+            ("emerald-monolith", self.tr("💎 Изумруд", "💎 Emerald")),
+            ("crimson-sunset", self.tr("🔥 Багровый Закат", "🔥 Crimson Sunset")),
+            ("royal-amethyst", self.tr("💜 Аметист", "💜 Amethyst")),
+            ("gold-sovereign", self.tr("👑 Золотой Owner", "👑 Gold Owner")),
+            ("oled-black", self.tr("🌑 Чистый OLED", "🌑 Pure OLED")),
+        ];
+        let mut theme_btns = String::new();
+        for (tid, tlabel) in themes {
+            let cls = if self.state.ui_theme == tid { "active" } else { "" };
+            theme_btns.push_str(&format!(
+                "<a class='seg {cls}' href='/action?cmd=set_custom_theme&amp;theme={tid}'>{tlabel}</a>"
+            ));
+        }
+
+        let wallpapers = [
+            ("nebula", self.tr("🌌 Неон", "🌌 Nebula")),
+            ("grid", self.tr("🕸 Сетка", "🕸 Grid")),
+            ("dots", self.tr("✨ Матрица", "✨ Matrix")),
+            ("clean", self.tr("🌑 Чистый", "🌑 Clean")),
+        ];
+        let mut wp_btns = String::new();
+        for (wid, wlabel) in wallpapers {
+            let cls = if self.state.chat_wallpaper == wid { "active" } else { "" };
+            wp_btns.push_str(&format!(
+                "<a class='seg {cls}' href='/action?cmd=set_wallpaper&amp;wp={wid}'>{wlabel}</a>"
+            ));
+        }
+
+        let bubbles = [
+            ("modern", self.tr("💎 Градиент", "💎 Gradient")),
+            ("neon", self.tr("⚡ Неоновая рамка", "⚡ Neon Border")),
+            ("glass", self.tr("🫧 Стекло", "🫧 Glass")),
+        ];
+        let mut bub_btns = String::new();
+        for (bid, blabel) in bubbles {
+            let cls = if self.state.bubble_style == bid { "active" } else { "" };
+            bub_btns.push_str(&format!(
+                "<a class='seg {cls}' href='/action?cmd=set_bubble_style&amp;style={bid}'>{blabel}</a>"
+            ));
+        }
+
+        let fonts = [
+            ("compact", self.tr("Компактный", "Compact")),
+            ("normal", self.tr("Обычный", "Normal")),
+            ("large", self.tr("Крупный", "Large")),
+        ];
+        let mut font_btns = String::new();
+        for (fid, flabel) in fonts {
+            let cls = if self.state.font_scale == fid { "active" } else { "" };
+            font_btns.push_str(&format!(
+                "<a class='seg {cls}' href='/action?cmd=set_font_scale&amp;scale={fid}'>{flabel}</a>"
+            ));
+        }
+
+        let emojis = ["👑", "⚡", "🔥", "💎", "🛡", "👻"];
+        let mut emoji_btns = String::new();
+        for em in emojis {
+            let cls = if self.state.profile_status_emoji == em { "active" } else { "" };
+            emoji_btns.push_str(&format!(
+                "<a class='seg {cls}' href='/action?cmd=set_status_emoji&amp;emoji={em_url}'>{em}</a>",
+                cls = cls,
+                em_url = url_encode(em),
+                em = em
+            ));
+        }
 
         format!(
             "<div style='flex:1;overflow-y:auto;padding:18px;'>
   {viewed_card}
-  <div class='auth-card' style='margin:0 auto 16px;max-width:560px;'>
+  <div class='auth-card' style='margin:0 auto 16px;max-width:640px;'>
     <div class='eyebrow'>{my_prof_hdr}</div>
     <div style='display:flex;align-items:center;gap:14px;margin:10px 0 14px;'>
-      <span class='avatar large'>👤</span>
+      <span class='avatar large'>{status_emoji}</span>
       <div>
-        <h2 style='margin:0;'>{my_name_esc}</h2>
+        <div style='display:flex;align-items:center;flex-wrap:wrap;'>
+          <h2 style='margin:0;'>{my_name_esc}</h2>
+          {owner_badge_html}
+        </div>
+        <div class='muted' style='margin-top:4px;'>{bio_esc}</div>
         <div class='muted' style='margin-top:6px;'>{my_uz_lbl}: {uz_badges}</div>
       </div>
     </div>
+    <div class='section-title' style='margin-top:8px;'>{emoji_lbl}</div>
+    <div class='seg-row' style='grid-template-columns:repeat(6,1fr);margin-bottom:10px;'>{emoji_btns}</div>
     <form class='form-stack' action='/action' method='get'>
       <input type='hidden' name='cmd' value='set_display_name'>
       <label>{name_lbl}</label>
       <div class='input-row'>
         <input type='text' name='name' value='{my_name_esc}' placeholder='{name_ph}' autocomplete='off'>
+        <button class='btn ghost' type='submit'>{save_btn}</button>
+      </div>
+    </form>
+    <form class='form-stack' action='/action' method='get'>
+      <input type='hidden' name='cmd' value='set_profile_bio'>
+      <label>{bio_lbl}</label>
+      <div class='input-row'>
+        <input type='text' name='bio' value='{bio_esc}' placeholder='{bio_ph}' autocomplete='off'>
         <button class='btn ghost' type='submit'>{save_btn}</button>
       </div>
     </form>
@@ -4002,18 +4285,38 @@ impl DesktopGuiServer {
         <button class='btn primary' type='submit'>{change_uz_btn}</button>
       </div>
     </form>
-    <form class='form-stack' action='/action' method='get'>
-      <input type='hidden' name='cmd' value='add_extra_username'>
-      <label>{extra_uz_lbl}</label>
-      <div class='input-row'>
-        <input type='text' name='uz' placeholder='{extra_uz_ph}' autocomplete='off' spellcheck='false'>
-        <button class='btn primary' type='submit'>+ {add_uz_btn}</button>
-      </div>
-    </form>
+    {extra_uz_section}
   </div>
 
-  <div class='auth-card' style='margin:0 auto 16px;max-width:560px;'>
-    <div class='eyebrow'>{lookup_hdr}</div>
+  <div class='auth-card' style='margin:0 auto 16px;max-width:640px;'>
+    <div class='eyebrow'>🎨 {cust_hdr}</div>
+    <div class='section-title' style='margin-top:10px;'>{theme_lbl}</div>
+    <div class='seg-row' style='grid-template-columns:repeat(3,1fr);'>{theme_btns}</div>
+    <div class='section-title' style='margin-top:12px;'>{wp_lbl}</div>
+    <div class='seg-row' style='grid-template-columns:repeat(4,1fr);'>{wp_btns}</div>
+    <div class='section-title' style='margin-top:12px;'>{bub_lbl}</div>
+    <div class='seg-row' style='grid-template-columns:repeat(3,1fr);'>{bub_btns}</div>
+    <div class='section-title' style='margin-top:12px;'>{font_lbl}</div>
+    <div class='seg-row' style='grid-template-columns:repeat(3,1fr);'>{font_btns}</div>
+  </div>
+
+  <div class='auth-card' style='margin:0 auto 16px;max-width:640px;'>
+    <div class='eyebrow'>🔔 {notif_hdr} · v{ver}</div>
+    <div class='toggle-list'>
+      <a class='toggle-row' href='/action?cmd=toggle_push_notifications'><span>🔔 {push_lbl}</span><span class='switch {push_on}'></span></a>
+      <a class='toggle-row' href='/action?cmd=toggle_sound_notifications'><span>🔊 {sound_lbl}</span><span class='switch {sound_on}'></span></a>
+      <a class='toggle-row' href='/action?cmd=toggle_animations'><span>✨ {anim_lbl}</span><span class='switch {anim_on}'></span></a>
+      <a class='toggle-row' href='/action?cmd=toggle_auto_update'><span>🔄 {auto_upd_lbl}</span><span class='switch {auto_upd_on}'></span></a>
+    </div>
+    <div class='actions-row wrap' style='margin-top:10px;'>
+      <a class='btn primary small' href='/action?cmd=check_update'>🔄 {chk_upd_btn}</a>
+      <a class='btn ghost small' href='/action?cmd=download_update'>⬇ {dl_upd_btn}</a>
+      <a class='btn ghost small' href='/action?cmd=step_chats'>← {back_chats_btn}</a>
+    </div>
+  </div>
+
+  <div class='auth-card' style='margin:0 auto 16px;max-width:640px;'>
+    <div class='eyebrow'>🔍 {lookup_hdr}</div>
     <form class='form-stack' action='/action' method='get'>
       <input type='hidden' name='cmd' value='open_profile'>
       <div class='input-row'>
@@ -4022,44 +4325,52 @@ impl DesktopGuiServer {
       </div>
     </form>
   </div>
-
-  <div class='auth-card' style='margin:0 auto 16px;max-width:560px;'>
-    <div class='eyebrow'>{upd_hdr} · v{ver}</div>
-    <div class='toggle-list'>
-      <a class='toggle-row' href='/action?cmd=toggle_auto_update'><span>{auto_upd_lbl}</span><span class='switch {auto_upd_on}'></span></a>
-    </div>
-    <div class='actions-row wrap' style='margin-top:10px;'>
-      <a class='btn primary small' href='/action?cmd=check_update'>🔄 {chk_upd_btn}</a>
-      <a class='btn ghost small' href='/action?cmd=download_update'>⬇ {dl_upd_btn}</a>
-      <a class='btn ghost small' href='/action?cmd=step_chats'>← {back_chats_btn}</a>
-    </div>
-  </div>
 </div>",
             viewed_card = viewed_card,
-            my_prof_hdr = self.tr("Мой профиль (как на телефоне)", "My Profile"),
+            my_prof_hdr = self.tr("Мой профиль и настройки", "My Profile & Settings"),
+            status_emoji = html_escape(&self.state.profile_status_emoji),
             my_name_esc = html_escape(&my_name),
+            owner_badge_html = owner_badge_html,
+            bio_esc = html_escape(&self.state.profile_bio),
             my_nick_esc = html_escape(&my_nick),
             my_uz_lbl = self.tr("Мои @юзы", "My @usernames"),
             uz_badges = uz_badges,
-            name_lbl = self.tr("Ник (отображаемое имя без @юза)", "Display Name (shown without @username)"),
+            emoji_lbl = self.tr("Значок статуса в профиле", "Profile status badge"),
+            emoji_btns = emoji_btns,
+            name_lbl = self.tr("Ник (отображается без @юза)", "Display Name (shown without @username)"),
             name_ph = self.tr("Ваш ник", "Your display name"),
             save_btn = self.tr("Сохранить", "Save"),
+            bio_lbl = self.tr("О себе / Статус", "Bio / Status"),
+            bio_ph = self.tr("Напишите статус о себе...", "Write a short bio..."),
             main_uz_lbl = self.tr("Основной @юз (любой от 3 букв)", "Primary @username (any 3+ chars)"),
             uz_ph = self.tr("@юз (от 3 символов)", "@username (3+ chars)"),
             change_uz_btn = self.tr("Изменить @юз", "Change @username"),
-            extra_uz_lbl = self.tr("Дополнительный @юз (можно сделать несколько)", "Additional @username (you can add several)"),
-            extra_uz_ph = self.tr("@второй_юз (от 3 букв)", "@second_username (3+ chars)"),
-            add_uz_btn = self.tr("Добавить @юз", "Add @username"),
-            lookup_hdr = self.tr("Открыть профиль по @юзу", "Open profile by @username"),
-            lookup_ph = self.tr("Введите @юз человека (напр. @alex)", "Enter @username (e.g. @alex)"),
-            lookup_btn = self.tr("Открыть профиль", "Open profile"),
-            upd_hdr = self.tr("Обновления приложения", "App Updates"),
+            extra_uz_section = extra_uz_section,
+            cust_hdr = self.tr("Лютая кастомизация интерфейса", "Deep UI Customization"),
+            theme_lbl = self.tr("Цветовая тема", "Color Theme"),
+            theme_btns = theme_btns,
+            wp_lbl = self.tr("Фон чата", "Chat Wallpaper"),
+            wp_btns = wp_btns,
+            bub_lbl = self.tr("Стиль пузырей сообщений", "Message Bubble Style"),
+            bub_btns = bub_btns,
+            font_lbl = self.tr("Размер текста", "Font Size"),
+            font_btns = font_btns,
+            notif_hdr = self.tr("Уведомления, анимации и автообновление", "Notifications, Animations & Auto-Update"),
             ver = DesktopAppState::APP_VERSION,
+            push_lbl = self.tr("Пуш-уведомления о новых сообщениях", "Push notifications for new messages"),
+            push_on = push_on,
+            sound_lbl = self.tr("Звук уведомлений", "Notification sound"),
+            sound_on = sound_on,
+            anim_lbl = self.tr("Плавные анимации интерфейса", "Smooth UI animations"),
+            anim_on = anim_on,
             auto_upd_lbl = self.tr("Автоматически скачивать обновления", "Auto-download updates"),
             auto_upd_on = auto_upd_on,
             chk_upd_btn = self.tr("Проверить обновления", "Check for updates"),
             dl_upd_btn = self.tr("Скачать обновление", "Download update"),
             back_chats_btn = self.tr("К чатам", "Back to chats"),
+            lookup_hdr = self.tr("Открыть профиль по @юзу", "Open profile by @username"),
+            lookup_ph = self.tr("Введите @юз человека (напр. @topxir)", "Enter @username (e.g. @topxir)"),
+            lookup_btn = self.tr("Открыть профиль", "Open profile"),
         )
     }
 
@@ -4171,8 +4482,18 @@ impl DesktopGuiServer {
             self.tr("Личный чат · нажмите для открытия профиля", "Direct chat · click to open profile")
         };
         let ping_badge = format!("<span class='ping-slot'>{}</span>", self.render_ping_badge());
+        let is_channel = active_tag.starts_with("channel://");
+        let is_owner = self.state.is_owner_account();
         let composer_html = if chat_locked || self.state.profile_modal_open {
             String::new()
+        } else if is_channel && !is_owner {
+            format!(
+                "<div class='composer' style='justify-content:center;color:var(--muted);font-weight:600;padding:14px;'>👑 {}</div>",
+                self.tr(
+                    "Канал Owner · писать сообщения может только владелец",
+                    "Owner Channel · only the Owner can post messages"
+                )
+            )
         } else {
             format!(
                 "<form class='composer' action='/action' method='get'>
@@ -4200,9 +4521,30 @@ impl DesktopGuiServer {
 
         let nav_chats_cls = if self.state.profile_modal_open { "" } else { "active" };
         let nav_prof_cls = if self.state.profile_modal_open { "active" } else { "" };
+        let anim_cls = if self.state.animations_enabled { "anim-on" } else { "no-anim" };
+        let channel_creator_html = if is_owner {
+            format!(
+                "<details class='new-chat'>
+      <summary>📢 {ch_sum}</summary>
+      <form class='form-stack' action='/action' method='get'>
+        <input type='hidden' name='cmd' value='new_channel_easy'>
+        <input type='text' name='title' placeholder='{ch_title_ph}' autocomplete='off'>
+        <input type='text' name='slug' placeholder='{ch_slug_ph}' autocomplete='off' spellcheck='false'>
+        <button class='btn primary' type='submit'>{ch_btn}</button>
+      </form>
+    </details>",
+                ch_sum = self.tr("Создать канал (Owner)", "Create channel (Owner)"),
+                ch_title_ph = self.tr("Название канала", "Channel title"),
+                ch_slug_ph = self.tr("@юз канала (напр. @owner)", "@channel_tag (e.g. @owner)"),
+                ch_btn = self.tr("Создать канал", "Create channel"),
+            )
+        } else {
+            String::new()
+        };
 
         format!(
-            "<div class='app'>
+            "<div class='app {anim_cls}' data-theme='{ui_theme}' data-wallpaper='{chat_wp}' data-bubble='{bub_style}' data-font='{font_scale}'>
+  <div id='push-toast-box' class='push-toast-box'></div>
   <aside class='sidebar'>
     <div class='sidebar-head'>
       <div class='brand-row'><span class='brand-mark'>A</span><span class='brand-name'>Aegis</span></div>
@@ -4232,15 +4574,7 @@ impl DesktopGuiServer {
         <button class='btn primary' type='submit'>{grp_btn}</button>
       </form>
     </details>
-    <details class='new-chat'>
-      <summary>📢 {ch_sum}</summary>
-      <form class='form-stack' action='/action' method='get'>
-        <input type='hidden' name='cmd' value='new_channel_easy'>
-        <input type='text' name='title' placeholder='{ch_title_ph}' autocomplete='off'>
-        <input type='text' name='slug' placeholder='{ch_slug_ph}' autocomplete='off' spellcheck='false'>
-        <button class='btn primary' type='submit'>{ch_btn}</button>
-      </form>
-    </details>
+    {channel_creator_html}
     <nav class='sidebar-nav'>
       <a class='nav-item {nav_chats_cls}' href='/action?cmd=step_chats'><span>💬</span>{nav_chats}</a>
       <a class='nav-item' href='/action?cmd=step_servers'><span>🌐</span>{nav_servers}</a>
@@ -4258,7 +4592,7 @@ impl DesktopGuiServer {
       </a>
       <div class='chat-actions'>
         {ping_badge}
-        <a class='icon-btn' href='/action?cmd=open_my_profile' title='{prof_tip}'>👤</a>
+        <a class='icon-btn' href='/action?cmd=open_my_profile' title='{prof_tip}'>🎨</a>
         <a class='icon-btn' href='/action?cmd=sync_remote' title='{sync_tip}'>⟳</a>
         <a class='icon-btn' href='/action?cmd=toggle_chat_pin' title='{pin_tip}'>🔒</a>
       </div>
@@ -4276,12 +4610,14 @@ impl DesktopGuiServer {
       <div class='muted'>{chat_sub}</div>
       <div class='actions-row wrap' style='justify-content:center;margin-top:8px;'>
         <a class='btn ghost small' href='/action?cmd=open_active_chat_profile'>👤 {open_prof_btn}</a>
-        <a class='btn ghost small' href='/action?cmd=open_my_profile'>⚙ {my_prof_btn}</a>
+        <a class='btn ghost small' href='/action?cmd=open_my_profile'>🎨 {my_prof_btn}</a>
       </div>
     </div>
     <div class='panel'>
       <div class='section-title'>{sec_route_title}</div>
       <div class='toggle-list'>
+        <a class='toggle-row' href='/action?cmd=toggle_push_notifications'><span>🔔 {push_short_lbl}</span><span class='switch {push_on_cls}'></span></a>
+        <a class='toggle-row' href='/action?cmd=toggle_animations'><span>✨ {anim_short_lbl}</span><span class='switch {anim_on_cls}'></span></a>
         <a class='toggle-row' href='/action?cmd=toggle_chat_pin'><span>{chat_pin_lbl}</span><span class='switch {lock_on}'></span></a>
         <a class='toggle-row' href='{kill_href}'><span>{kill_lbl}</span><span class='switch {kill_on}'></span></a>
       </div>
@@ -4320,6 +4656,40 @@ impl DesktopGuiServer {
   var lastMsgHtml = box ? box.innerHTML : '';
   var chatBox = document.getElementById('chat-list-box');
   var lastChatHtml = chatBox ? chatBox.innerHTML : '';
+  function playChime() {{
+    try {{
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      var ctx = new Ctx();
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.09);
+      gain.gain.setValueAtTime(0.08, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.28);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.29);
+    }} catch (e) {{}}
+  }}
+  function showPushToast(title, text, playSound) {{
+    if (playSound) playChime();
+    var tBox = document.getElementById('push-toast-box');
+    if (tBox) {{
+      var item = document.createElement('div');
+      item.className = 'push-toast';
+      item.innerHTML = '<div class=\"push-toast-title\">🔔 ' + title + '</div><div class=\"push-toast-body\">' + text + '</div>';
+      tBox.appendChild(item);
+      setTimeout(function() {{ if (item.parentNode) item.parentNode.removeChild(item); }}, 4500);
+    }}
+    try {{
+      if ('Notification' in window && Notification.permission === 'granted') {{
+        new Notification(title, {{ body: text }});
+      }}
+    }} catch (e) {{}}
+  }}
   setInterval(function() {{
     fetch('/api/poll').then(function(r) {{ return r.json(); }}).then(function(d) {{
       if (!d) return;
@@ -4330,6 +4700,9 @@ impl DesktopGuiServer {
       var updSlot = document.getElementById('update-slot');
       if (updSlot && typeof d.update_html === 'string' && updSlot.innerHTML !== d.update_html) {{
         updSlot.innerHTML = d.update_html;
+      }}
+      if (d.push_enabled && d.push_title && d.push_title.length > 0) {{
+        showPushToast(d.push_title, d.push_text || '', d.sound_enabled);
       }}
       var mBox = document.getElementById('messages-box');
       if (mBox && typeof d.messages_html === 'string' && d.messages_html !== lastMsgHtml) {{
@@ -4348,6 +4721,11 @@ impl DesktopGuiServer {
   }}, 1500);
 }})();
 </script>",
+            anim_cls = anim_cls,
+            ui_theme = html_escape(&self.state.ui_theme),
+            chat_wp = html_escape(&self.state.chat_wallpaper),
+            bub_style = html_escape(&self.state.bubble_style),
+            font_scale = html_escape(&self.state.font_scale),
             ping_badge = ping_badge,
             search_q = html_escape(&self.state.search_query),
             search_ph = self.tr("Поиск: @юз, группа, канал...", "Search: @username, group, channel..."),
@@ -4359,10 +4737,7 @@ impl DesktopGuiServer {
             grp_title_ph = self.tr("Название группы", "Group name"),
             grp_mem_ph = self.tr("Участники: @user1, @user2", "Members: @user1, @user2"),
             grp_btn = self.tr("Создать группу", "Create group"),
-            ch_sum = self.tr("Создать канал", "Create channel"),
-            ch_title_ph = self.tr("Название канала", "Channel title"),
-            ch_slug_ph = self.tr("@юз канала (напр. @news)", "@channel_tag (e.g. @news)"),
-            ch_btn = self.tr("Создать канал", "Create channel"),
+            channel_creator_html = channel_creator_html,
             nav_chats_cls = nav_chats_cls,
             nav_prof_cls = nav_prof_cls,
             nav_chats = self.tr("Чаты", "Chats"),
@@ -4371,7 +4746,7 @@ impl DesktopGuiServer {
             chat_icon = chat_icon_for(chat_title),
             chat_title = html_escape(chat_title),
             chat_sub = chat_sub,
-            prof_tip = self.tr("Мой профиль", "My profile"),
+            prof_tip = self.tr("Профиль и кастомизация", "Profile & Customization"),
             sync_tip = self.tr("Обновить", "Refresh"),
             pin_tip = self.tr("PIN чата", "Chat PIN"),
             update_banner = update_banner,
@@ -4380,8 +4755,12 @@ impl DesktopGuiServer {
             leak_modal = leak_modal,
             main_body_html = main_body_html,
             open_prof_btn = self.tr("Профиль", "Profile"),
-            my_prof_btn = self.tr("Мой @юз", "My @username"),
+            my_prof_btn = self.tr("Кастомизация", "Customize"),
             sec_route_title = self.tr("Переключатели", "Toggles"),
+            push_short_lbl = self.tr("Пуш-уведомления", "Push notifications"),
+            push_on_cls = if self.state.push_notifications_enabled { "on" } else { "" },
+            anim_short_lbl = self.tr("Анимации", "Animations"),
+            anim_on_cls = if self.state.animations_enabled { "on" } else { "" },
             chat_pin_lbl = self.tr("PIN-код чата", "Chat PIN lock"),
             lock_on = lock_on,
             kill_href = kill_href,
@@ -4682,6 +5061,86 @@ impl DesktopGuiServer {
                 } else {
                     self.tr("Автоскачивание обновлений выключено.", "Auto-download updates disabled.").to_owned()
                 };
+            }
+            "toggle_push_notifications" => {
+                self.state.push_notifications_enabled = !self.state.push_notifications_enabled;
+                self.state.save_desktop_vault();
+                self.state.status_banner = if self.state.push_notifications_enabled {
+                    self.tr("Пуш-уведомления включены.", "Push notifications enabled.").to_owned()
+                } else {
+                    self.tr("Пуш-уведомления выключены.", "Push notifications disabled.").to_owned()
+                };
+            }
+            "toggle_sound_notifications" => {
+                self.state.sound_notifications_enabled = !self.state.sound_notifications_enabled;
+                self.state.save_desktop_vault();
+                self.state.status_banner = if self.state.sound_notifications_enabled {
+                    self.tr("Звук уведомлений включён.", "Notification sound enabled.").to_owned()
+                } else {
+                    self.tr("Звук уведомлений выключен.", "Notification sound disabled.").to_owned()
+                };
+            }
+            "toggle_animations" => {
+                self.state.animations_enabled = !self.state.animations_enabled;
+                self.state.save_desktop_vault();
+                self.state.status_banner = if self.state.animations_enabled {
+                    self.tr("Анимации включены.", "Animations enabled.").to_owned()
+                } else {
+                    self.tr("Анимации выключены.", "Animations disabled.").to_owned()
+                };
+            }
+            "set_custom_theme" => {
+                let theme = extract_query_param(query, "theme").unwrap_or_default();
+                let allowed = [
+                    "cyber-neon",
+                    "emerald-monolith",
+                    "crimson-sunset",
+                    "royal-amethyst",
+                    "gold-sovereign",
+                    "oled-black",
+                ];
+                if allowed.contains(&theme.as_str()) {
+                    self.state.ui_theme = theme;
+                    self.state.save_desktop_vault();
+                }
+            }
+            "set_wallpaper" => {
+                let wp = extract_query_param(query, "wp").unwrap_or_default();
+                if ["nebula", "grid", "dots", "clean"].contains(&wp.as_str()) {
+                    self.state.chat_wallpaper = wp;
+                    self.state.save_desktop_vault();
+                }
+            }
+            "set_bubble_style" => {
+                let style = extract_query_param(query, "style").unwrap_or_default();
+                if ["modern", "neon", "glass"].contains(&style.as_str()) {
+                    self.state.bubble_style = style;
+                    self.state.save_desktop_vault();
+                }
+            }
+            "set_font_scale" => {
+                let scale = extract_query_param(query, "scale").unwrap_or_default();
+                if ["compact", "normal", "large"].contains(&scale.as_str()) {
+                    self.state.font_scale = scale;
+                    self.state.save_desktop_vault();
+                }
+            }
+            "set_profile_bio" => {
+                let bio = extract_query_param(query, "bio").unwrap_or_default();
+                let clean: String = bio.trim().chars().take(80).collect();
+                self.state.profile_bio = clean;
+                self.state.save_desktop_vault();
+                self.state.status_banner = self
+                    .tr("Статус профиля обновлён.", "Profile status updated.")
+                    .to_owned();
+            }
+            "set_status_emoji" => {
+                let raw = extract_query_param(query, "emoji").unwrap_or_default();
+                let emoji = percent_decode(&raw);
+                if ["👑", "⚡", "🔥", "💎", "🛡", "👻"].contains(&emoji.as_str()) {
+                    self.state.profile_status_emoji = emoji;
+                    self.state.save_desktop_vault();
+                }
             }
             "check_update" => {
                 let found = self.state.check_for_updates();
@@ -5760,8 +6219,21 @@ impl DesktopGuiServer {
                     let update_html = json_escape(&self.render_update_banner());
                     let messages_html = json_escape(&self.render_messages_list_html());
                     let chats_html = json_escape(&self.render_chat_list_items_html());
+                    let push_enabled = self.state.push_notifications_enabled;
+                    let sound_enabled = self.state.sound_notifications_enabled;
+                    let (push_title, push_text) = if push_enabled {
+                        self.state
+                            .last_push_toast
+                            .take()
+                            .unwrap_or((String::new(), String::new()))
+                    } else {
+                        self.state.last_push_toast = None;
+                        (String::new(), String::new())
+                    };
                     let json = format!(
-                        r#"{{"new_msgs":{n},"ping_ms":{ping_val},"ping_html":"{ping_html}","update_html":"{update_html}","messages_html":"{messages_html}","chats_html":"{chats_html}"}}"#
+                        r#"{{"new_msgs":{n},"ping_ms":{ping_val},"ping_html":"{ping_html}","update_html":"{update_html}","messages_html":"{messages_html}","chats_html":"{chats_html}","push_enabled":{push_enabled},"sound_enabled":{sound_enabled},"push_title":"{push_title}","push_text":"{push_text}"}}"#,
+                        push_title = json_escape(&push_title),
+                        push_text = json_escape(&push_text),
                     );
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{json}",
@@ -6456,6 +6928,113 @@ pre { margin: 8px 0 0; padding: 10px; border-radius: 8px; background: #0e181f; c
   .chat-head { min-height: 54px; }
   .bubble { max-width: 86%; }
 }
+
+/* ================= Themes ================= */
+.app[data-theme="emerald-monolith"] {
+  --bg: #06120e; --panel: #0a1c15; --panel-2: #0f2a1f; --line: #1d4433;
+  --text: #e6fff2; --muted: #7fb39a; --accent: #34d399; --accent-2: #059669;
+  --bubble-in: #0f2a1f; --bubble-out: #065f46; --ok: #34d399;
+}
+.app[data-theme="crimson-sunset"] {
+  --bg: #150a0d; --panel: #211016; --panel-2: #2d1620; --line: #4a2230;
+  --text: #ffeef1; --muted: #c08a97; --accent: #fb7185; --accent-2: #e11d48;
+  --bubble-in: #2d1620; --bubble-out: #7f1d3a; --ok: #fb7185;
+}
+.app[data-theme="royal-amethyst"] {
+  --bg: #0e0918; --panel: #171027; --panel-2: #201634; --line: #362653;
+  --text: #f2ecff; --muted: #a795c9; --accent: #c084fc; --accent-2: #7c3aed;
+  --bubble-in: #201634; --bubble-out: #4c1d95; --ok: #c084fc;
+}
+.app[data-theme="gold-sovereign"] {
+  --bg: #12100a; --panel: #1c1810; --panel-2: #272118; --line: #423720;
+  --text: #fff8e7; --muted: #bfa877; --accent: #fbbf24; --accent-2: #d97706;
+  --bubble-in: #272118; --bubble-out: #78350f; --ok: #fbbf24;
+}
+.app[data-theme="oled-black"] {
+  --bg: #000000; --panel: #070707; --panel-2: #101010; --line: #1f1f1f;
+  --text: #f5f5f5; --muted: #8a8a8a; --accent: #e5e5e5; --accent-2: #a3a3a3;
+  --bubble-in: #101010; --bubble-out: #262626; --ok: #4ade80;
+}
+.app[data-theme="oled-black"] .brand-mark { color: #000; }
+
+/* ================= Chat wallpapers ================= */
+.main { position: relative; }
+.main::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  opacity: 0.55; transition: background 0.35s ease;
+}
+.main > * { position: relative; z-index: 1; }
+.app[data-wallpaper="nebula"] .main::before {
+  background:
+    radial-gradient(900px 500px at 15% 0%, rgba(83,189,235,0.16), transparent 60%),
+    radial-gradient(700px 500px at 85% 100%, rgba(0,168,132,0.16), transparent 60%);
+}
+.app[data-wallpaper="grid"] .main::before {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.045) 1px, transparent 1px);
+  background-size: 34px 34px;
+}
+.app[data-wallpaper="dots"] .main::before {
+  background-image: radial-gradient(rgba(255,255,255,0.10) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+.app[data-wallpaper="clean"] .main::before { background: none; }
+
+/* ================= Bubble styles ================= */
+.app[data-bubble="neon"] .bubble {
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.04), 0 0 18px -6px var(--accent);
+}
+.app[data-bubble="glass"] .bubble {
+  background: rgba(255,255,255,0.07) !important;
+  border: 1px solid rgba(255,255,255,0.16);
+  backdrop-filter: blur(10px) saturate(140%);
+}
+.app[data-bubble="glass"] .message-row.out .bubble {
+  background: linear-gradient(135deg, rgba(83,189,235,0.32), rgba(0,168,132,0.28)) !important;
+}
+
+/* ================= Font scale ================= */
+.app[data-font="compact"] { font-size: 12.5px; }
+.app[data-font="compact"] .bubble { padding: 6px 10px; }
+.app[data-font="large"] { font-size: 16px; }
+.app[data-font="large"] .bubble { padding: 10px 14px; }
+.app[data-font="large"] .chat-title { font-size: 17px; }
+
+/* ================= Animations ================= */
+.app.anim-on .chat-item { transition: background 0.18s ease, transform 0.18s ease; }
+.app.anim-on .chat-item:hover { transform: translateX(2px); }
+.app.anim-on .message-row { animation: msg-in 0.24s ease both; }
+.app.anim-on .auth-card { animation: card-in 0.28s ease both; }
+.app.anim-on .btn, .app.anim-on .icon-btn, .app.anim-on .seg, .app.anim-on .nav-item {
+  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease, border-color 0.18s ease;
+}
+.app.anim-on .btn:active, .app.anim-on .icon-btn:active, .app.anim-on .seg:active { transform: scale(0.97); }
+.app.anim-on .switch { transition: background 0.2s ease; }
+@keyframes msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes card-in { from { opacity: 0; transform: translateY(10px) scale(0.995); } to { opacity: 1; transform: none; } }
+.app.no-anim *, .app.no-anim *::before, .app.no-anim *::after {
+  animation: none !important; transition: none !important;
+}
+
+/* ================= Push toast ================= */
+.push-toast-box {
+  position: fixed; top: 16px; right: 16px; z-index: 9999;
+  display: flex; flex-direction: column; gap: 10px; max-width: 360px;
+}
+.push-toast {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent-2);
+  border-radius: 12px;
+  padding: 11px 14px;
+  box-shadow: 0 18px 40px -14px rgba(0,0,0,0.8);
+  animation: toast-in 0.28s cubic-bezier(0.2,0.9,0.3,1.2) both;
+}
+.push-toast-title { font-weight: 700; font-size: 13px; margin-bottom: 3px; }
+.push-toast-body { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes toast-in { from { opacity: 0; transform: translateX(24px) scale(0.96); } to { opacity: 1; transform: none; } }
 "#;
 
 fn human_ttl_locale(secs: u32, is_en: bool) -> String {

@@ -8,6 +8,8 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import org.aegis.messenger.core.AegisRustBridge
+import org.aegis.messenger.notify.AegisNotifications
 
 /**
  * Persistent Zero-GMS Foreground Service (`PLAN.md §7.2`, `AGENTS.md §2.2`, `D-0019`).
@@ -16,14 +18,18 @@ import android.os.IBinder
  * 1. Maintains the multiplexed QUIC / TLS 1.3 connection to the user's chosen Aegis static-IP
  *    starter server (or optional Tor `.onion` hidden service) without Google Play Services / Firebase FCM.
  * 2. Runs the adaptive keep-alive timer and background Cover Traffic dummy frame scheduler (`256 B`).
- * 3. Displays strictly redacted notifications ("Aegis: Активна защита соединения") —
- *    NEVER exposing sender aliases, message previews, or secret material to the OS notification log (`AGENTS.md §2.4`).
+ * 3. Polls the user's inboxes while the app is in the background and raises local push
+ *    notifications for new messages (only when the user enabled them in Profile).
  */
 class AegisBackgroundService : Service() {
+
+    private var pollThread: Thread? = null
+    @Volatile private var running = false
 
     override fun onCreate() {
         super.onCreate()
         createRedactedNotificationChannel()
+        AegisNotifications.ensureChannels(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -37,7 +43,50 @@ class AegisBackgroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        startBackgroundPolling()
         return START_STICKY
+    }
+
+    private fun startBackgroundPolling() {
+        if (running) return
+        running = true
+        pollThread = Thread {
+            val bridge = runCatching { AegisRustBridge(applicationContext) }.getOrNull() ?: return@Thread
+            while (running) {
+                try {
+                    if (bridge.isAuthenticated && bridge.pushNotificationsEnabled &&
+                        !AegisNotifications.isAppForeground
+                    ) {
+                        bridge.syncAllChatsAndInboxAsync { newCount, _ ->
+                            if (newCount > 0) {
+                                bridge.lastPushToast?.let { (title, text) ->
+                                    AegisNotifications.showMessage(
+                                        applicationContext,
+                                        title,
+                                        text,
+                                        bridge.soundNotificationsEnabled
+                                    )
+                                }
+                            }
+                            bridge.lastPushToast = null
+                        }
+                    }
+                    Thread.sleep(20_000L)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                } catch (_: Exception) {
+                    // Keep the transport alive even if a single poll fails.
+                    runCatching { Thread.sleep(5_000L) }
+                }
+            }
+        }.also { it.isDaemon = true; it.start() }
+    }
+
+    override fun onDestroy() {
+        running = false
+        pollThread?.interrupt()
+        pollThread = null
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
