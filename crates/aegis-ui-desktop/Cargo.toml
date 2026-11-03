@@ -14,7 +14,7 @@ name = "aegis-desktop"
 path = "src/main.rs"
 
 [dependencies]
-aegis-ffi = { path = "../aegis-ffi" }
+aegis-core = { path = "../aegis-core" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tao = "0.37.2"

@@ -1,9 +1,6 @@
-# Aegis 1-Click Self-Hosted Zero-Knowledge Server (Static IP / Direct & Optional Tor)
-# Server Key Fingerprint (Ed25519): a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
-# Client Invite URI: aegis://server/185.220.101.42:8443?fp=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
 services:
   aegis-server:
-    image: ghcr.io/aegis-project/aegis-server:0.1.0
+    image: ghcr.io/aegis-project/aegis-server:0.2.0
     container_name: aegis-server
     restart: unless-stopped
     read_only: true
@@ -13,15 +10,9 @@ services:
       - ALL
     logging:
       driver: "none"
+    command: ["--bind", "0.0.0.0", "--port", "8443", "--data-dir", "/var/lib/aegis"]
     ports:
-      - "0.0.0.0:8443:8443/tcp"
-      - "0.0.0.0:8443:8443/udp"
-    environment:
-      AEGIS_BIND_HOST: "0.0.0.0"
-      AEGIS_BIND_PORT: "8443"
-      AEGIS_QUEUE_TTL_SECS: "2592000"
-      AEGIS_SERVER_PUBKEY_HEX: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
-      AEGIS_IP_LOGGING: "false"
+      - "8443:8443/tcp"
     volumes:
       - aegis_data:/var/lib/aegis
 volumes:

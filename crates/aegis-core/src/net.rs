@@ -1,0 +1,547 @@
+//! Blocking client for the server endpoints of spec sections 3 and 4.
+
+use crate::directory::Registration;
+use crate::identity::{is_valid_username, Identity};
+use crate::text::{pct_encode, sanitize_display_text};
+use crate::{hex, now_secs, pad, pow, Error, Result};
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant};
+
+/// Response bodies larger than this are refused.
+pub const MAX_RESPONSE: usize = 1 << 20;
+const MAX_HEADERS: usize = 16 * 1024;
+const MAX_POLL_FRAMES: usize = 100;
+
+/// Parsed `https://host[:port]` or (restricted) `http://host[:port]` endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    pub tls: bool,
+    pub host: String,
+    pub port: u16,
+}
+
+fn http_allowed(host: &str) -> bool {
+    host == "127.0.0.1" || host == "localhost" || host.ends_with(".onion")
+}
+
+impl Endpoint {
+    pub fn parse(s: &str) -> Result<Self> {
+        let (tls, rest) = if let Some(r) = s.strip_prefix("https://") {
+            (true, r)
+        } else if let Some(r) = s.strip_prefix("http://") {
+            (false, r)
+        } else {
+            return Err(Error::InvalidEndpoint);
+        };
+        let rest = rest.strip_suffix('/').unwrap_or(rest);
+        let (host, port) = match rest.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (rest, None),
+        };
+        let host = host.to_ascii_lowercase();
+        let host_ok = !host.is_empty()
+            && host.len() <= 253
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.');
+        if !host_ok || (!tls && !http_allowed(&host)) {
+            return Err(Error::InvalidEndpoint);
+        }
+        let port = match port {
+            Some(p) => crate::text::parse_u64(p)
+                .ok()
+                .and_then(|n| u16::try_from(n).ok())
+                .filter(|&n| n != 0)
+                .ok_or(Error::InvalidEndpoint)?,
+            None if tls => 443,
+            None => 80,
+        };
+        Ok(Self { tls, host, port })
+    }
+
+    fn host_header(&self) -> String {
+        let default = if self.tls { 443 } else { 80 };
+        if self.port == default {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+/// Directory entry returned by a lookup. `title` is already sanitized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    pub u: String,
+    pub title: String,
+    pub x: [u8; 32],
+    pub ed: [u8; 32],
+}
+
+/// Result of a queue poll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Poll {
+    pub frames: Vec<(u64, Vec<u8>)>,
+    pub next: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Client {
+    endpoint: Endpoint,
+    socks5: Option<String>,
+    pow_bits: u32,
+    timeout: Duration,
+}
+
+impl Client {
+    /// `socks5` is an optional `host:port` of a SOCKS5 proxy; the server name is
+    /// then resolved by the proxy and never locally.
+    pub fn new(endpoint: &str, socks5: Option<&str>) -> Result<Self> {
+        Ok(Self {
+            endpoint: Endpoint::parse(endpoint)?,
+            socks5: socks5.map(str::to_owned),
+            pow_bits: pow::DEFAULT_BITS,
+            timeout: Duration::from_secs(20),
+        })
+    }
+
+    /// Proof-of-work difficulty to mine for (the public server uses 18).
+    pub fn with_pow_bits(mut self, bits: u32) -> Self {
+        self.pow_bits = bits;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    pub fn health(&self) -> Result<()> {
+        let (code, body) = self.request("GET", "/health", "", &[])?;
+        let v: serde_json::Value = serde_json::from_slice(&body).map_err(|_| Error::BadResponse)?;
+        if code == 200 && v["status"] == "ok" && v["protocol"] == 2 {
+            Ok(())
+        } else {
+            Err(Error::BadResponse)
+        }
+    }
+
+    /// Signs, mines and submits a directory registration.
+    pub fn register(&self, identity: &Identity, u: &str, title: &str) -> Result<()> {
+        let mut reg = Registration::sign(identity, u, title, now_secs())?;
+        reg.mine(self.pow_bits);
+        self.submit_registration(&reg)
+    }
+
+    pub fn submit_registration(&self, reg: &Registration) -> Result<()> {
+        let (code, _) = self.request(
+            "POST",
+            "/api/v2/dir/register",
+            "application/x-www-form-urlencoded",
+            reg.to_form().as_bytes(),
+        )?;
+        if code == 200 {
+            Ok(())
+        } else {
+            Err(Error::Http(code))
+        }
+    }
+
+    pub fn lookup(&self, u: &str) -> Result<Option<DirEntry>> {
+        if !is_valid_username(u) {
+            return Err(Error::InvalidUsername);
+        }
+        let path = format!("/api/v2/dir/lookup?u={}", pct_encode(u));
+        let (code, body) = self.request("GET", &path, "", &[])?;
+        match code {
+            404 => Ok(None),
+            200 => {
+                let v: serde_json::Value =
+                    serde_json::from_slice(&body).map_err(|_| Error::BadResponse)?;
+                let s = |k: &str| v[k].as_str().ok_or(Error::BadResponse);
+                if s("u")? != u {
+                    return Err(Error::BadResponse);
+                }
+                Ok(Some(DirEntry {
+                    u: u.to_owned(),
+                    title: sanitize_display_text(s("title")?),
+                    x: hex::decode_array(s("x")?).map_err(|_| Error::BadResponse)?,
+                    ed: hex::decode_array(s("ed")?).map_err(|_| Error::BadResponse)?,
+                }))
+            }
+            c => Err(Error::Http(c)),
+        }
+    }
+
+    /// Posts a padded frame to queue `q`; returns the assigned sequence number.
+    pub fn send(&self, q: &[u8; 32], padded: &[u8]) -> Result<u64> {
+        if !pad::is_bucket(padded.len()) {
+            return Err(Error::BadPadding);
+        }
+        let body = hex::encode(padded);
+        let qhex = hex::encode(q);
+        let ts = now_secs();
+        let n = pow::mine(&qhex, ts, &pow::body_hash_hex(body.as_bytes()), self.pow_bits);
+        let path = format!("/api/v2/queue/send?q={qhex}&ts={ts}&pow={n}");
+        let (code, resp) = self.request("POST", &path, "text/plain", body.as_bytes())?;
+        if code != 200 {
+            return Err(Error::Http(code));
+        }
+        let v: serde_json::Value = serde_json::from_slice(&resp).map_err(|_| Error::BadResponse)?;
+        v["seq"].as_u64().ok_or(Error::BadResponse)
+    }
+
+    /// Fetches up to 100 frames with `seq > after`.
+    pub fn poll(&self, q: &[u8; 32], after: u64) -> Result<Poll> {
+        let path = format!("/api/v2/queue/poll?q={}&after={after}", hex::encode(q));
+        let (code, body) = self.request("GET", &path, "", &[])?;
+        if code != 200 {
+            return Err(Error::Http(code));
+        }
+        let v: serde_json::Value = serde_json::from_slice(&body).map_err(|_| Error::BadResponse)?;
+        let arr = v["frames"].as_array().ok_or(Error::BadResponse)?;
+        if arr.len() > MAX_POLL_FRAMES {
+            return Err(Error::BadResponse);
+        }
+        let mut frames = Vec::with_capacity(arr.len());
+        let mut last = after;
+        for f in arr {
+            let seq = f["seq"].as_u64().ok_or(Error::BadResponse)?;
+            if seq <= last {
+                return Err(Error::BadResponse);
+            }
+            let d = hex::decode(f["d"].as_str().ok_or(Error::BadResponse)?)
+                .map_err(|_| Error::BadResponse)?;
+            last = seq;
+            frames.push((seq, d));
+        }
+        let next = v["next"].as_u64().ok_or(Error::BadResponse)?;
+        if next != last {
+            return Err(Error::BadResponse);
+        }
+        Ok(Poll { frames, next })
+    }
+
+    fn connect(&self) -> Result<TcpStream> {
+        let ep = &self.endpoint;
+        let stream = if let Some(proxy) = &self.socks5 {
+            let mut s = connect_addr(proxy, self.timeout)?;
+            s.set_read_timeout(Some(self.timeout))?;
+            s.set_write_timeout(Some(self.timeout))?;
+            socks5_connect(&mut s, &ep.host, ep.port)?;
+            s
+        } else {
+            connect_addr(&format!("{}:{}", ep.host, ep.port), self.timeout)?
+        };
+        stream.set_read_timeout(Some(self.timeout))?;
+        stream.set_write_timeout(Some(self.timeout))?;
+        let _ = stream.set_nodelay(true);
+        Ok(stream)
+    }
+
+    fn request(&self, method: &str, path: &str, ctype: &str, body: &[u8]) -> Result<(u16, Vec<u8>)> {
+        let mut head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: aegis\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+            self.endpoint.host_header()
+        );
+        if method == "POST" {
+            head.push_str(&format!("Content-Type: {ctype}\r\nContent-Length: {}\r\n", body.len()));
+        }
+        head.push_str("\r\n");
+        let mut req = head.into_bytes();
+        req.extend_from_slice(body);
+
+        let tcp = self.connect()?;
+        let deadline = Instant::now() + self.timeout * 3;
+        if self.endpoint.tls {
+            let connector = native_tls::TlsConnector::builder()
+                .min_protocol_version(Some(native_tls::Protocol::Tlsv12))
+                .build()
+                .map_err(|e| Error::Net(format!("tls setup: {e}")))?;
+            let mut s = connector
+                .connect(&self.endpoint.host, tcp)
+                .map_err(|e| Error::Net(format!("tls: {e}")))?;
+            exchange(&mut s, &req, deadline)
+        } else {
+            let mut s = tcp;
+            exchange(&mut s, &req, deadline)
+        }
+    }
+}
+
+fn connect_addr(addr: &str, timeout: Duration) -> Result<TcpStream> {
+    let mut last = Error::Net("no address".into());
+    for a in addr.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&a, timeout) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = Error::from(e),
+        }
+    }
+    Err(last)
+}
+
+/// SOCKS5 CONNECT with the destination sent as a domain name (remote DNS).
+pub fn socks5_connect<S: Read + Write>(s: &mut S, host: &str, port: u16) -> Result<()> {
+    let host_b = host.as_bytes();
+    let hl = u8::try_from(host_b.len()).map_err(|_| Error::InvalidEndpoint)?;
+    s.write_all(&[5, 1, 0])?;
+    let mut r = [0u8; 2];
+    s.read_exact(&mut r)?;
+    if r != [5, 0] {
+        return Err(Error::Net("socks5: no acceptable auth method".into()));
+    }
+    let mut req = vec![5, 1, 0, 3, hl];
+    req.extend_from_slice(host_b);
+    req.extend_from_slice(&port.to_be_bytes());
+    s.write_all(&req)?;
+    let mut h = [0u8; 4];
+    s.read_exact(&mut h)?;
+    if h[0] != 5 || h[1] != 0 {
+        return Err(Error::Net(format!("socks5: connect refused ({})", h[1])));
+    }
+    let skip = match h[3] {
+        1 => 4 + 2,
+        4 => 16 + 2,
+        3 => {
+            let mut l = [0u8; 1];
+            s.read_exact(&mut l)?;
+            usize::from(l[0]) + 2
+        }
+        _ => return Err(Error::Net("socks5: bad reply".into())),
+    };
+    let mut rest = vec![0u8; skip];
+    s.read_exact(&mut rest)?;
+    Ok(())
+}
+
+fn read_some<S: Read>(s: &mut S, buf: &mut Vec<u8>, deadline: Instant) -> Result<usize> {
+    if Instant::now() > deadline {
+        return Err(Error::Net("deadline exceeded".into()));
+    }
+    let mut chunk = [0u8; 8192];
+    loop {
+        match s.read(&mut chunk) {
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                return Ok(n);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            // TLS peers that close without close_notify.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(0),
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+fn exchange<S: Read + Write>(s: &mut S, req: &[u8], deadline: Instant) -> Result<(u16, Vec<u8>)> {
+    s.write_all(req)?;
+    s.flush()?;
+    read_response(s, deadline)
+}
+
+/// Reads one HTTP/1.x response (Content-Length, chunked or until close), capped at 1 MiB.
+pub fn read_response<S: Read>(s: &mut S, deadline: Instant) -> Result<(u16, Vec<u8>)> {
+    let mut buf = Vec::new();
+    let head_end = loop {
+        if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break p;
+        }
+        if buf.len() > MAX_HEADERS {
+            return Err(Error::BadResponse);
+        }
+        if read_some(s, &mut buf, deadline)? == 0 {
+            return Err(Error::BadResponse);
+        }
+    };
+    let head = core::str::from_utf8(&buf[..head_end]).map_err(|_| Error::BadResponse)?;
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().ok_or(Error::BadResponse)?;
+    let mut parts = status_line.splitn(3, ' ');
+    let version = parts.next().unwrap_or("");
+    if !(version == "HTTP/1.1" || version == "HTTP/1.0") {
+        return Err(Error::BadResponse);
+    }
+    let code: u16 = parts
+        .next()
+        .and_then(|c| c.parse().ok())
+        .filter(|c| (100..600).contains(c))
+        .ok_or(Error::BadResponse)?;
+    let mut content_length: Option<usize> = None;
+    let mut chunked = false;
+    for l in lines {
+        let Some((k, v)) = l.split_once(':') else {
+            return Err(Error::BadResponse);
+        };
+        let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
+        if k == "content-length" {
+            let n: usize = v.parse().map_err(|_| Error::BadResponse)?;
+            if n > MAX_RESPONSE || content_length.replace(n).is_some_and(|o| o != n) {
+                return Err(Error::BadResponse);
+            }
+        } else if k == "transfer-encoding" && v.to_ascii_lowercase().contains("chunked") {
+            chunked = true;
+        }
+    }
+    let mut raw = buf.split_off(head_end + 4);
+    let body = if chunked {
+        loop {
+            if let Some(r) = decode_chunked(&raw) {
+                break r?;
+            }
+            if raw.len() > MAX_RESPONSE * 2 {
+                return Err(Error::BadResponse);
+            }
+            if read_some(s, &mut raw, deadline)? == 0 {
+                return Err(Error::BadResponse);
+            }
+        }
+    } else if let Some(n) = content_length {
+        while raw.len() < n {
+            if read_some(s, &mut raw, deadline)? == 0 {
+                return Err(Error::BadResponse);
+            }
+        }
+        raw.truncate(n);
+        raw
+    } else {
+        while read_some(s, &mut raw, deadline)? != 0 {
+            if raw.len() > MAX_RESPONSE {
+                return Err(Error::BadResponse);
+            }
+        }
+        raw
+    };
+    if body.len() > MAX_RESPONSE {
+        return Err(Error::BadResponse);
+    }
+    Ok((code, body))
+}
+
+/// Decodes a complete chunked body, or `None` if more data is needed.
+fn decode_chunked(raw: &[u8]) -> Option<Result<Vec<u8>>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    loop {
+        let eol = raw[i..].windows(2).position(|w| w == b"\r\n")? + i;
+        let size_line = match core::str::from_utf8(&raw[i..eol]) {
+            Ok(s) => s.split(';').next().unwrap_or("").trim(),
+            Err(_) => return Some(Err(Error::BadResponse)),
+        };
+        let Ok(size) = usize::from_str_radix(size_line, 16) else {
+            return Some(Err(Error::BadResponse));
+        };
+        i = eol + 2;
+        if size == 0 {
+            // Trailers are ignored; wait for the terminating blank line.
+            return if raw[i..].windows(2).any(|w| w == b"\r\n") {
+                Some(Ok(out))
+            } else {
+                None
+            };
+        }
+        if out.len() + size > MAX_RESPONSE {
+            return Some(Err(Error::BadResponse));
+        }
+        if raw.len() < i + size + 2 {
+            return None;
+        }
+        out.extend_from_slice(&raw[i..i + size]);
+        if &raw[i + size..i + size + 2] != b"\r\n" {
+            return Some(Err(Error::BadResponse));
+        }
+        i += size + 2;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(30)
+    }
+
+    #[test]
+    fn endpoints() {
+        let e = Endpoint::parse("https://freeoasis.space").unwrap();
+        assert_eq!((e.tls, e.host.as_str(), e.port), (true, "freeoasis.space", 443));
+        assert_eq!(Endpoint::parse("https://example.org:8443/").unwrap().port, 8443);
+        assert!(Endpoint::parse("http://127.0.0.1:8080").is_ok());
+        assert!(Endpoint::parse("http://localhost").is_ok());
+        assert!(Endpoint::parse("http://abcdefghijklmnop.onion").is_ok());
+        for bad in [
+            "http://example.com",
+            "ftp://x",
+            "example.com",
+            "https://",
+            "https://a/b",
+            "https://user@a.com",
+            "https://a.com:0",
+            "https://a.com:99999",
+            "https://a b.com",
+            "http://127.0.0.1.evil.com",
+        ] {
+            assert!(Endpoint::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn responses() {
+        let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        assert_eq!(read_response(&mut Cursor::new(&ok[..]), far()).unwrap(), (200, b"hello".to_vec()));
+        let ch = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2;x=y\r\nde\r\n0\r\n\r\n";
+        assert_eq!(read_response(&mut Cursor::new(&ch[..]), far()).unwrap().1, b"abcde");
+        let eof = b"HTTP/1.0 404 Not Found\r\n\r\nbody";
+        assert_eq!(read_response(&mut Cursor::new(&eof[..]), far()).unwrap(), (404, b"body".to_vec()));
+        for bad in [
+            &b"garbage"[..],
+            b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nshort",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 99999999\r\n\r\n",
+            b"HTTP/1.1 abc OK\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nab",
+        ] {
+            assert!(read_response(&mut Cursor::new(bad), far()).is_err());
+        }
+    }
+
+    struct Duplex {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+    impl Read for Duplex {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(b)
+        }
+    }
+    impl Write for Duplex {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.output.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn socks5_sends_domain_name() {
+        let reply = vec![5, 0, 5, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        let mut d = Duplex { input: Cursor::new(reply), output: vec![] };
+        socks5_connect(&mut d, "example.onion", 80).unwrap();
+        let mut want = vec![5, 1, 0, 5, 1, 0, 3, 13];
+        want.extend_from_slice(b"example.onion");
+        want.extend_from_slice(&80u16.to_be_bytes());
+        assert_eq!(d.output, want);
+        let mut refused = Duplex { input: Cursor::new(vec![5, 0, 5, 5, 0, 1]), output: vec![] };
+        assert!(socks5_connect(&mut refused, "a.onion", 80).is_err());
+        let mut noauth = Duplex { input: Cursor::new(vec![5, 0xff]), output: vec![] };
+        assert!(socks5_connect(&mut noauth, "a.onion", 80).is_err());
+    }
+}

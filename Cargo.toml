@@ -1,16 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/aegis-crypto",
-    "crates/aegis-identity",
-    "crates/aegis-storage",
-    "crates/aegis-protocol",
-    "crates/aegis-transport",
+    "crates/aegis-core",
     "crates/aegis-server",
-    "crates/aegis-directory",
-    "crates/aegis-launcher",
-    "crates/aegis-plugins",
-    "crates/aegis-ffi",
     "crates/aegis-ui-desktop",
 ]
 exclude = ["apps", "builds"]
@@ -23,15 +15,8 @@ authors = ["aegis-project <aegis-project@users.noreply.github.com>"]
 repository = "https://github.com/aegis-project/aegis"
 
 [workspace.dependencies]
-aegis-crypto = { path = "crates/aegis-crypto" }
-aegis-identity = { path = "crates/aegis-identity" }
-aegis-storage = { path = "crates/aegis-storage" }
-aegis-protocol = { path = "crates/aegis-protocol" }
-aegis-transport = { path = "crates/aegis-transport" }
+aegis-core = { path = "crates/aegis-core" }
 aegis-server = { path = "crates/aegis-server" }
-aegis-directory = { path = "crates/aegis-directory" }
-aegis-launcher = { path = "crates/aegis-launcher" }
-aegis-plugins = { path = "crates/aegis-plugins" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
