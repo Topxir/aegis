@@ -156,9 +156,10 @@ fn ensure_background_tunnel_server() {
             .and_then(|p| p.parent().map(PathBuf::from));
         let candidates = [
             exe_dir.as_ref().map(|d| d.join("aegis-serverd.exe")),
-            exe_dir
-                .as_ref()
-                .and_then(|d| d.parent().map(|p| p.join("server").join("aegis-serverd.exe"))),
+            exe_dir.as_ref().and_then(|d| {
+                d.parent()
+                    .map(|p| p.join("server").join("aegis-serverd.exe"))
+            }),
         ];
         for cand in candidates.into_iter().flatten() {
             if cand.is_file() {

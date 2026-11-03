@@ -1,6 +1,5 @@
 package org.aegis.messenger.ui
 
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -18,7 +17,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -158,9 +156,6 @@ fun AegisComposeApp(
         uiTick++
     }
 
-    AegisColors.applyTheme(bridge.uiTheme)
-    AegisVisuals.bubbleStyle = bridge.bubbleStyle
-    AegisVisuals.animationsEnabled = bridge.animationsEnabled
     val baseDensity = LocalDensity.current
     val fontScaleMultiplier = when (bridge.fontScale) {
         "compact" -> 0.88f
@@ -169,20 +164,7 @@ fun AegisComposeApp(
     }
     val scaledDensity = Density(baseDensity.density, baseDensity.fontScale * fontScaleMultiplier)
 
-    MaterialTheme(
-        colorScheme = darkColorScheme(
-            primary = AegisColors.accent,
-            onPrimary = AegisColors.onAccent,
-            secondary = AegisColors.info,
-            background = AegisColors.bg,
-            surface = AegisColors.panel,
-            surfaceVariant = AegisColors.panel2,
-            onBackground = AegisColors.text,
-            onSurface = AegisColors.text,
-            onSurfaceVariant = AegisColors.muted,
-            error = AegisColors.danger
-        )
-    ) {
+    AegisTheme(mode = bridge.uiTheme) {
       CompositionLocalProvider(LocalDensity provides scaledDensity) {
         Surface(modifier = Modifier.fillMaxSize(), color = AegisColors.bg) {
             if (currentTick >= 0 && bridge.wipedByPanicOrDuress) {
@@ -206,7 +188,7 @@ fun AegisComposeApp(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState())
-                            .padding(horizontal = 20.dp, vertical = 24.dp)
+                            .padding(horizontal = 16.dp, vertical = 24.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -217,11 +199,11 @@ fun AegisComposeApp(
                                 BrandMark(size = 44.dp)
                                 Spacer(Modifier.width(12.dp))
                                 Column {
-                                    Text("Aegis", color = AegisColors.text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                                    Text("Aegis", color = AegisColors.text, fontSize = 20.sp, fontWeight = FontWeight.Medium)
                                     Text(
                                         tr("Мессенджер", "Messenger"),
                                         color = AegisColors.muted,
-                                        fontSize = 12.sp
+                                        fontSize = 13.sp
                                     )
                                 }
                             }
@@ -231,9 +213,9 @@ fun AegisComposeApp(
                         Text(
                             tr("Вход без номера телефона и почты", "Sign in without a phone number or email"),
                             color = AegisColors.text,
-                            fontSize = 26.sp,
-                            fontWeight = FontWeight.Bold,
-                            lineHeight = 32.sp
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Medium,
+                            lineHeight = 26.sp
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
@@ -242,10 +224,10 @@ fun AegisComposeApp(
                                 "Access to chats and servers requires registering or signing in to an account."
                             ),
                             color = AegisColors.muted,
-                            fontSize = 14.sp,
-                            lineHeight = 20.sp
+                            fontSize = 15.sp,
+                            lineHeight = 21.sp
                         )
-                        Spacer(Modifier.height(18.dp))
+                        Spacer(Modifier.height(16.dp))
                         StatusBanner(statusBanner)
                         Spacer(Modifier.height(12.dp))
 
@@ -268,7 +250,7 @@ fun AegisComposeApp(
                                     Text(
                                         tr("Регистрация", "Register"),
                                         color = if (!authTabLogin) AegisColors.onAccent else AegisColors.text,
-                                        fontWeight = FontWeight.Bold,
+                                        fontWeight = FontWeight.Medium,
                                         fontSize = 13.sp
                                     )
                                 }
@@ -286,21 +268,21 @@ fun AegisComposeApp(
                                     Text(
                                         tr("Вход", "Sign in"),
                                         color = if (authTabLogin) AegisColors.onAccent else AegisColors.text,
-                                        fontWeight = FontWeight.Bold,
+                                        fontWeight = FontWeight.Medium,
                                         fontSize = 13.sp
                                     )
                                 }
                             }
-                            Spacer(Modifier.height(14.dp))
+                            Spacer(Modifier.height(16.dp))
 
                             if (authTabLogin) {
                                 Text(
                                     tr("Вход в аккаунт", "Sign in to account"),
                                     color = AegisColors.text,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.Medium
                                 )
-                                Spacer(Modifier.height(10.dp))
+                                Spacer(Modifier.height(12.dp))
                                 OutlinedTextField(
                                     value = generatedNickname,
                                     onValueChange = { generatedNickname = it },
@@ -331,7 +313,7 @@ fun AegisComposeApp(
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 )
-                                Spacer(Modifier.height(14.dp))
+                                Spacer(Modifier.height(16.dp))
                                 Button(
                                     onClick = {
                                         bridge.loginAccount(
@@ -354,16 +336,16 @@ fun AegisComposeApp(
                                     modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(12.dp)
                                 ) {
-                                    Text(tr("Войти", "Sign in"), fontWeight = FontWeight.Bold)
+                                    Text(tr("Войти", "Sign in"), fontWeight = FontWeight.Medium)
                                 }
                             } else {
                                 Text(
                                     tr("Регистрация аккаунта", "Create account"),
                                     color = AegisColors.text,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.Medium
                                 )
-                                Spacer(Modifier.height(10.dp))
+                                Spacer(Modifier.height(12.dp))
 
                                 OutlinedTextField(
                                     value = generatedNickname,
@@ -380,7 +362,7 @@ fun AegisComposeApp(
                                     Text(
                                         tr("Сгенерировать случайный логин", "Generate random username"),
                                         color = AegisColors.info,
-                                        fontSize = 12.sp
+                                        fontSize = 13.sp
                                     )
                                 }
 
@@ -438,7 +420,7 @@ fun AegisComposeApp(
                                     fontSize = 11.sp
                                 )
 
-                                Spacer(Modifier.height(14.dp))
+                                Spacer(Modifier.height(16.dp))
                                 Button(
                                     onClick = {
                                         bridge.registerAccount(
@@ -464,7 +446,7 @@ fun AegisComposeApp(
                                     modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(12.dp)
                                 ) {
-                                    Text(tr("Зарегистрироваться", "Create account"), fontWeight = FontWeight.Bold)
+                                    Text(tr("Зарегистрироваться", "Create account"), fontWeight = FontWeight.Medium)
                                 }
                             }
                         }
@@ -483,14 +465,14 @@ fun AegisComposeApp(
                             modifier = Modifier
                                 .weight(1f)
                                 .verticalScroll(rememberScrollState())
-                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
                         ) {
                             SectionLabel(tr("Доверенные серверы (активны)", "Trusted servers (online)"))
                             bridge.starterServers.forEachIndexed { index, server ->
                                 val selected = index == bridge.activeServerIndex
                                 Surface(
                                     color = if (selected) AegisColors.panel2 else AegisColors.panel,
-                                    shape = RoundedCornerShape(14.dp),
+                                    shape = RoundedCornerShape(10.dp),
                                     border = BorderStroke(
                                         1.dp,
                                         if (selected) AegisColors.accent else AegisColors.line
@@ -510,15 +492,15 @@ fun AegisComposeApp(
                                         }
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(14.dp),
+                                        modifier = Modifier.padding(12.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
                                                 server.name,
                                                 color = AegisColors.text,
-                                                fontSize = 14.sp,
-                                                fontWeight = FontWeight.SemiBold
+                                                fontSize = 15.sp,
+                                                fontWeight = FontWeight.Medium
                                             )
                                             Text(
                                                 "${server.staticIpOrHost}:${server.port} · ${server.badge}",
@@ -526,11 +508,11 @@ fun AegisComposeApp(
                                                 fontSize = 11.sp
                                             )
                                         }
-                                        Text(
-                                            if (selected) "✓" else "→",
-                                            color = if (selected) AegisColors.accent else AegisColors.muted,
-                                            fontSize = 18.sp,
-                                            fontWeight = FontWeight.Bold
+                                        Icon(
+                                            imageVector = if (selected) AegisIcons.Check else AegisIcons.ArrowRight,
+                                            contentDescription = null,
+                                            tint = if (selected) AegisColors.accent else AegisColors.muted,
+                                            modifier = Modifier.size(18.dp)
                                         )
                                     }
                                 }
@@ -539,10 +521,10 @@ fun AegisComposeApp(
                             SectionLabel(tr("Или подключите свой адрес", "Or connect a custom address"))
                             Surface(
                                 color = AegisColors.panel,
-                                shape = RoundedCornerShape(14.dp),
+                                shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(14.dp)) {
+                                Column(Modifier.padding(12.dp)) {
                                     OutlinedTextField(
                                         value = customStaticIpInput,
                                         onValueChange = { customStaticIpInput = it },
@@ -578,10 +560,10 @@ fun AegisComposeApp(
                             SectionLabel(tr("Переключатели", "Toggles"))
                             Surface(
                                 color = AegisColors.panel,
-                                shape = RoundedCornerShape(14.dp),
+                                shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically
@@ -589,7 +571,7 @@ fun AegisComposeApp(
                                         Text(
                                             tr("Блокировка сети (Kill Switch)", "Network Lock (Kill Switch)"),
                                             color = AegisColors.text,
-                                            fontSize = 14.sp,
+                                            fontSize = 15.sp,
                                             modifier = Modifier.weight(1f)
                                         )
                                         Switch(
@@ -617,7 +599,7 @@ fun AegisComposeApp(
                                                 tr("SOCKS5 прокси и релей", "SOCKS5 proxy & relay")
                                             },
                                             color = AegisColors.info,
-                                            fontSize = 12.sp
+                                            fontSize = 13.sp
                                         )
                                     }
                                     if (showAdvancedNetwork) {
@@ -648,13 +630,13 @@ fun AegisComposeApp(
                                 }
                             }
 
-                            Spacer(Modifier.height(14.dp))
+                            Spacer(Modifier.height(16.dp))
                             Button(
                                 onClick = { go("STEP_3_CHAT_LIST") },
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
-                                Text(tr("Открыть чаты", "Open chats"), fontWeight = FontWeight.Bold)
+                                Text(tr("Открыть чаты", "Open chats"), fontWeight = FontWeight.Medium)
                             }
                             Spacer(Modifier.height(16.dp))
                         }
@@ -681,13 +663,13 @@ fun AegisComposeApp(
                             modifier = Modifier
                                 .weight(1f)
                                 .verticalScroll(rememberScrollState())
-                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
                         ) {
                             bridge.viewedUserProfile?.let { (peerName, peerUz, peerExtras) ->
                                 SectionLabel(tr("Профиль пользователя", "User Profile"))
                                 Surface(
                                     color = AegisColors.panel,
-                                    shape = RoundedCornerShape(16.dp),
+                                    shape = RoundedCornerShape(12.dp),
                                     border = BorderStroke(1.dp, AegisColors.accent.copy(alpha = 0.5f)),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
@@ -699,8 +681,8 @@ fun AegisComposeApp(
                                                 Text(
                                                     bridge.stripUsernameSuffix(peerName),
                                                     color = AegisColors.text,
-                                                    fontSize = 18.sp,
-                                                    fontWeight = FontWeight.Bold
+                                                    fontSize = 17.sp,
+                                                    fontWeight = FontWeight.Medium
                                                 )
                                                 Spacer(Modifier.height(4.dp))
                                                 val allUzs = (listOf("@$peerUz") + peerExtras.map { "@$it" }).joinToString(" · ")
@@ -708,7 +690,7 @@ fun AegisComposeApp(
                                                     "${tr("Юзернейм", "Username")}: $allUzs",
                                                     color = AegisColors.accent,
                                                     fontSize = 13.sp,
-                                                    fontWeight = FontWeight.SemiBold
+                                                    fontWeight = FontWeight.Medium
                                                 )
                                             }
                                         }
@@ -725,7 +707,13 @@ fun AegisComposeApp(
                                                 },
                                                 shape = RoundedCornerShape(10.dp)
                                             ) {
-                                                Text(tr("💬 Написать", "💬 Message"), fontWeight = FontWeight.Bold)
+                                                Icon(
+                                                    imageVector = AegisIcons.Chat,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(tr("Написать", "Message"), fontWeight = FontWeight.Medium)
                                             }
                                             TextButton(onClick = {
                                                 bridge.viewedUserProfile = null
@@ -745,24 +733,24 @@ fun AegisComposeApp(
                                 SectionLabel(tr("Мой профиль", "My Profile"))
                                 Surface(
                                     color = AegisColors.panel,
-                                    shape = RoundedCornerShape(16.dp),
+                                    shape = RoundedCornerShape(12.dp),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Column(Modifier.padding(16.dp)) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Avatar(bridge.profileStatusEmoji, size = 58.dp)
+                                            Avatar(cleanMyName, size = 56.dp)
                                             Spacer(Modifier.width(12.dp))
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
                                                     cleanMyName,
                                                     color = AegisColors.text,
-                                                    fontSize = 18.sp,
-                                                    fontWeight = FontWeight.Bold
+                                                    fontSize = 17.sp,
+                                                    fontWeight = FontWeight.Medium
                                                 )
                                                 Text(
                                                     bridge.profileBio,
                                                     color = AegisColors.muted,
-                                                    fontSize = 12.sp,
+                                                    fontSize = 13.sp,
                                                     maxLines = 2,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
@@ -771,7 +759,7 @@ fun AegisComposeApp(
                                                     "${tr("Основной @юз", "Primary @username")}: @${account.loginNickname}",
                                                     color = AegisColors.accent,
                                                     fontSize = 13.sp,
-                                                    fontWeight = FontWeight.SemiBold
+                                                    fontWeight = FontWeight.Medium
                                                 )
                                             }
                                         }
@@ -789,7 +777,7 @@ fun AegisComposeApp(
                                                 }
                                             }
                                         }
-                                        Spacer(Modifier.height(10.dp))
+                                        Spacer(Modifier.height(12.dp))
                                         OutlinedTextField(
                                             value = editNameInput,
                                             onValueChange = { editNameInput = it },
@@ -799,7 +787,7 @@ fun AegisComposeApp(
                                             keyboardOptions = incognitoKeyboardOptions,
                                             modifier = Modifier.fillMaxWidth()
                                         )
-                                        Spacer(Modifier.height(6.dp))
+                                        Spacer(Modifier.height(8.dp))
                                         SmallChoice(tr("Сохранить ник", "Save display name")) {
                                             bridge.setDisplayName(editNameInput.ifBlank { cleanMyName }).onSuccess {
                                                 editNameInput = ""
@@ -807,7 +795,7 @@ fun AegisComposeApp(
                                             }.onFailure { applyStatus("${it.message}") }
                                         }
 
-                                        Spacer(Modifier.height(10.dp))
+                                        Spacer(Modifier.height(12.dp))
                                         OutlinedTextField(
                                             value = editMainUzInput,
                                             onValueChange = { editMainUzInput = it },
@@ -817,7 +805,7 @@ fun AegisComposeApp(
                                             keyboardOptions = incognitoKeyboardOptions,
                                             modifier = Modifier.fillMaxWidth()
                                         )
-                                        Spacer(Modifier.height(6.dp))
+                                        Spacer(Modifier.height(8.dp))
                                         SmallChoice(tr("Изменить основной @юз", "Update primary @username")) {
                                             bridge.setPrimaryUsername(editMainUzInput).onSuccess { newUz ->
                                                 editMainUzInput = ""
@@ -826,7 +814,7 @@ fun AegisComposeApp(
                                         }
 
                                         if (bridge.isOwnerAccount()) {
-                                            Spacer(Modifier.height(10.dp))
+                                            Spacer(Modifier.height(12.dp))
                                             OutlinedTextField(
                                                 value = extraUzInput,
                                                 onValueChange = { extraUzInput = it },
@@ -835,7 +823,7 @@ fun AegisComposeApp(
                                                 keyboardOptions = incognitoKeyboardOptions,
                                                 modifier = Modifier.fillMaxWidth()
                                             )
-                                            Spacer(Modifier.height(6.dp))
+                                            Spacer(Modifier.height(8.dp))
                                             SmallChoice(tr("+ Добавить ещё @юз", "+ Add extra @username")) {
                                                 bridge.addExtraUsername(extraUzInput).onSuccess { ex ->
                                                     extraUzInput = ""
@@ -843,11 +831,11 @@ fun AegisComposeApp(
                                                 }.onFailure { applyStatus("${it.message}") }
                                             }
                                         } else {
-                                            Spacer(Modifier.height(10.dp))
+                                            Spacer(Modifier.height(12.dp))
                                             Text(
                                                 tr(
-                                                    "👑 Несколько @юзов доступны только владельцу (@owner).",
-                                                    "👑 Multiple @usernames are available only to the Owner (@owner)."
+                                                    "Несколько @юзов доступны только владельцу (@owner).",
+                                                    "Multiple @usernames are available only to the Owner (@owner)."
                                                 ),
                                                 color = AegisColors.muted,
                                                 fontSize = 11.sp
@@ -859,124 +847,55 @@ fun AegisComposeApp(
                                 Text(tr("Профиль ещё не создан.", "No profile created yet."), color = AegisColors.muted)
                             }
 
-                            SectionLabel(tr("🎨 Лютая кастомизация", "🎨 Deep customization"))
+                            SectionLabel(tr("Оформление", "Appearance"))
                             Surface(
                                 color = AegisColors.panel,
-                                shape = RoundedCornerShape(16.dp),
+                                shape = RoundedCornerShape(12.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(14.dp)) {
+                                Column(Modifier.padding(16.dp)) {
                                     Text(
-                                        tr("Цветовая тема", "Color theme"),
+                                        tr("Тема", "Theme"),
                                         color = AegisColors.muted,
                                         fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Medium
                                     )
-                                    Spacer(Modifier.height(6.dp))
-                                    Row(
-                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         listOf(
-                                            "cyber-neon" to tr("🌌 Кибер-Неон", "🌌 Cyber Neon"),
-                                            "emerald-monolith" to tr("💎 Изумруд", "💎 Emerald"),
-                                            "crimson-sunset" to tr("🔥 Багровый", "🔥 Crimson"),
-                                            "royal-amethyst" to tr("💜 Аметист", "💜 Amethyst"),
-                                            "gold-sovereign" to tr("👑 Золотой", "👑 Gold"),
-                                            "oled-black" to tr("🌑 OLED", "🌑 OLED")
+                                            "system" to tr("Системная", "System"),
+                                            "dark" to tr("Тёмная", "Dark"),
+                                            "light" to tr("Светлая", "Light")
                                         ).forEach { (id, label) ->
-                                            SmallChoice(if (bridge.uiTheme == id) "✓ $label" else label) {
+                                            SmallChoice(label, selected = bridge.uiTheme == id) {
                                                 bridge.uiTheme = id
                                                 bridge.saveWorkspaceToPrefs()
                                                 uiTick++
                                             }
                                         }
                                     }
-                                    Spacer(Modifier.height(12.dp))
-                                    Text(
-                                        tr("Фон чата", "Chat wallpaper"),
-                                        color = AegisColors.muted,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Row(
-                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
-                                        listOf(
-                                            "nebula" to tr("🌌 Неон", "🌌 Nebula"),
-                                            "grid" to tr("🕸 Сетка", "🕸 Grid"),
-                                            "dots" to tr("✨ Матрица", "✨ Matrix"),
-                                            "clean" to tr("🌑 Чистый", "🌑 Clean")
-                                        ).forEach { (id, label) ->
-                                            SmallChoice(if (bridge.chatWallpaper == id) "✓ $label" else label) {
-                                                bridge.chatWallpaper = id
-                                                bridge.saveWorkspaceToPrefs()
-                                                uiTick++
-                                            }
-                                        }
-                                    }
-                                    Spacer(Modifier.height(12.dp))
-                                    Text(
-                                        tr("Стиль пузырей", "Bubble style"),
-                                        color = AegisColors.muted,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        listOf(
-                                            "modern" to tr("💎 Градиент", "💎 Gradient"),
-                                            "neon" to tr("⚡ Неон", "⚡ Neon"),
-                                            "glass" to tr("🫧 Стекло", "🫧 Glass")
-                                        ).forEach { (id, label) ->
-                                            SmallChoice(if (bridge.bubbleStyle == id) "✓ $label" else label) {
-                                                bridge.bubbleStyle = id
-                                                bridge.saveWorkspaceToPrefs()
-                                                uiTick++
-                                            }
-                                        }
-                                    }
-                                    Spacer(Modifier.height(12.dp))
+                                    Spacer(Modifier.height(16.dp))
                                     Text(
                                         tr("Размер текста", "Font size"),
                                         color = AegisColors.muted,
                                         fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Medium
                                     )
-                                    Spacer(Modifier.height(6.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         listOf(
                                             "compact" to tr("Компактный", "Compact"),
                                             "normal" to tr("Обычный", "Normal"),
                                             "large" to tr("Крупный", "Large")
                                         ).forEach { (id, label) ->
-                                            SmallChoice(if (bridge.fontScale == id) "✓ $label" else label) {
+                                            SmallChoice(label, selected = bridge.fontScale == id) {
                                                 bridge.fontScale = id
                                                 bridge.saveWorkspaceToPrefs()
                                                 uiTick++
                                             }
                                         }
                                     }
-                                    Spacer(Modifier.height(12.dp))
-                                    Text(
-                                        tr("Значок статуса", "Status badge"),
-                                        color = AegisColors.muted,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        listOf("👑", "⚡", "🔥", "💎", "🛡", "👻").forEach { em ->
-                                            SmallChoice(if (bridge.profileStatusEmoji == em) "✓ $em" else em) {
-                                                bridge.profileStatusEmoji = em
-                                                bridge.saveWorkspaceToPrefs()
-                                                uiTick++
-                                            }
-                                        }
-                                    }
-                                    Spacer(Modifier.height(12.dp))
+                                    Spacer(Modifier.height(16.dp))
                                     OutlinedTextField(
                                         value = profileBioInput,
                                         onValueChange = { profileBioInput = it },
@@ -986,7 +905,7 @@ fun AegisComposeApp(
                                         keyboardOptions = incognitoKeyboardOptions,
                                         modifier = Modifier.fillMaxWidth()
                                     )
-                                    Spacer(Modifier.height(6.dp))
+                                    Spacer(Modifier.height(8.dp))
                                     SmallChoice(tr("Сохранить статус", "Save status")) {
                                         val bio = profileBioInput.trim().take(80)
                                         if (bio.isNotEmpty()) {
@@ -1002,7 +921,7 @@ fun AegisComposeApp(
                             SectionLabel(tr("Открыть профиль по @юзу", "Open profile by @username"))
                             Surface(
                                 color = AegisColors.panel,
-                                shape = RoundedCornerShape(14.dp),
+                                shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(Modifier.padding(12.dp)) {
@@ -1036,7 +955,7 @@ fun AegisComposeApp(
                             SectionLabel(tr("Аккаунты", "Accounts"))
                             Surface(
                                 color = AegisColors.panel,
-                                shape = RoundedCornerShape(14.dp),
+                                shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(Modifier.padding(12.dp)) {
@@ -1066,13 +985,13 @@ fun AegisComposeApp(
                                                         CircleShape
                                                     )
                                             )
-                                            Spacer(Modifier.width(10.dp))
+                                            Spacer(Modifier.width(12.dp))
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(bridge.stripUsernameSuffix(slot.displayName), color = AegisColors.text, fontSize = 13.sp)
                                             }
                                         }
                                     }
-                                    Spacer(Modifier.height(6.dp))
+                                    Spacer(Modifier.height(8.dp))
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         SmallChoice(tr("+ Новый аккаунт", "+ New account")) {
                                             bridge.logout()
@@ -1093,15 +1012,22 @@ fun AegisComposeApp(
                             SectionLabel(tr("Обновления и переключатели", "Updates & Toggles"))
                             Surface(
                                 color = AegisColors.panel,
-                                shape = RoundedCornerShape(14.dp),
+                                shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = AegisIcons.Bell,
+                                            contentDescription = null,
+                                            tint = AegisColors.muted,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(12.dp))
                                         Text(
-                                            tr("🔔 Пуш-уведомления", "🔔 Push notifications"),
+                                            tr("Пуш-уведомления", "Push notifications"),
                                             color = AegisColors.text,
-                                            fontSize = 13.sp,
+                                            fontSize = 15.sp,
                                             modifier = Modifier.weight(1f)
                                         )
                                         Switch(
@@ -1117,10 +1043,17 @@ fun AegisComposeApp(
                                         )
                                     }
                                     Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = AegisIcons.Volume,
+                                            contentDescription = null,
+                                            tint = AegisColors.muted,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(12.dp))
                                         Text(
-                                            tr("🔊 Звук уведомлений", "🔊 Notification sound"),
+                                            tr("Звук уведомлений", "Notification sound"),
                                             color = AegisColors.text,
-                                            fontSize = 13.sp,
+                                            fontSize = 15.sp,
                                             modifier = Modifier.weight(1f)
                                         )
                                         Switch(
@@ -1133,10 +1066,17 @@ fun AegisComposeApp(
                                         )
                                     }
                                     Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = AegisIcons.Clock,
+                                            contentDescription = null,
+                                            tint = AegisColors.muted,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(12.dp))
                                         Text(
-                                            tr("✨ Плавные анимации", "✨ Smooth animations"),
+                                            tr("Плавные анимации", "Smooth animations"),
                                             color = AegisColors.text,
-                                            fontSize = 13.sp,
+                                            fontSize = 15.sp,
                                             modifier = Modifier.weight(1f)
                                         )
                                         Switch(
@@ -1149,10 +1089,17 @@ fun AegisComposeApp(
                                         )
                                     }
                                     Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = AegisIcons.Refresh,
+                                            contentDescription = null,
+                                            tint = AegisColors.muted,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(12.dp))
                                         Text(
-                                            tr("🔄 Автоскачивание обновлений", "🔄 Auto-download updates"),
+                                            tr("Автоскачивание обновлений", "Auto-download updates"),
                                             color = AegisColors.text,
-                                            fontSize = 13.sp,
+                                            fontSize = 15.sp,
                                             modifier = Modifier.weight(1f)
                                         )
                                         Switch(
@@ -1165,7 +1112,7 @@ fun AegisComposeApp(
                                         )
                                     }
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        SmallChoice(tr("🔄 Проверить обновления", "🔄 Check updates")) {
+                                        SmallChoice(tr("Проверить обновления", "Check updates")) {
                                             bridge.checkForUpdatesAsync(true) { ver ->
                                                 applyStatus(
                                                     if (ver != null) tr("Найдена версия v$ver", "Found version v$ver")
@@ -1173,7 +1120,7 @@ fun AegisComposeApp(
                                                 )
                                             }
                                         }
-                                        SmallChoice(tr("⬇ Скачать APK", "⬇ Download APK")) {
+                                        SmallChoice(tr("Скачать APK", "Download APK")) {
                                             val v = bridge.latestAvailableVersion ?: "0.2.1"
                                             bridge.downloadUpdateApkAsync(v) { path ->
                                                 if (path != null) {
@@ -1182,7 +1129,7 @@ fun AegisComposeApp(
                                             }
                                         }
                                     }
-                                    Spacer(Modifier.height(6.dp))
+                                    Spacer(Modifier.height(8.dp))
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
                                             tr("Блокировка сети (Kill Switch)", "Network Lock (Kill Switch)"),
@@ -1211,22 +1158,22 @@ fun AegisComposeApp(
                             SectionLabel(tr("Приложение", "Application"))
                             Surface(
                                 color = AegisColors.panel,
-                                shape = RoundedCornerShape(14.dp),
+                                shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(14.dp)) {
+                                Column(Modifier.padding(12.dp)) {
                                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                         SmallChoice(if (isRu) "English" else "Русский") { toggleLanguage() }
                                         SmallChoice(tr("Серверы", "Servers")) { go("STEP_2_SERVERS") }
                                     }
-                                    Spacer(Modifier.height(10.dp))
+                                    Spacer(Modifier.height(12.dp))
                                     Button(
                                         onClick = { showPanicConfirm = true },
                                         colors = ButtonDefaults.buttonColors(containerColor = AegisColors.danger),
                                         shape = RoundedCornerShape(12.dp),
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
-                                        Text(tr("Стереть все данные", "Wipe all data"), fontWeight = FontWeight.Bold)
+                                        Text(tr("Стереть все данные", "Wipe all data"), fontWeight = FontWeight.Medium)
                                     }
                                 }
                             }
@@ -1247,7 +1194,7 @@ fun AegisComposeApp(
                     val currentChat = bridge.chats.getOrNull(safeIndex)
                     if (currentChat == null) {
                         Column(Modifier.fillMaxSize().padding(20.dp)) {
-                            Text(tr("Чат не найден", "Chat not found"), color = AegisColors.text, fontSize = 18.sp)
+                            Text(tr("Чат не найден", "Chat not found"), color = AegisColors.text, fontSize = 17.sp)
                             TextButton(onClick = { go("STEP_3_CHAT_LIST") }) {
                                 Text(tr("Вернуться к чатам", "Back to chats"), color = AegisColors.info)
                             }
@@ -1265,7 +1212,7 @@ fun AegisComposeApp(
                             Modifier
                                 .fillMaxSize()
                                 .imePadding()
-                                .background(aegisWallpaperBrush(bridge.chatWallpaper))
+                                .background(AegisColors.bg)
                         ) {
                             AppTopBar(
                                 title = bridge.stripUsernameSuffix(currentChat.title),
@@ -1302,10 +1249,10 @@ fun AegisComposeApp(
                                                 }
                                             }
                                         )
-                                        Text(
-                                            "⟳",
-                                            color = AegisColors.info,
-                                            fontSize = 22.sp,
+                                        Icon(
+                                            imageVector = AegisIcons.Refresh,
+                                            contentDescription = null,
+                                            tint = AegisColors.info,
                                             modifier = Modifier
                                                 .clickable {
                                                     if (!currentChat.isSavedNotes &&
@@ -1324,6 +1271,7 @@ fun AegisComposeApp(
                                                     }
                                                 }
                                                 .padding(8.dp)
+                                                .size(20.dp)
                                         )
                                     }
                                 }
@@ -1342,14 +1290,14 @@ fun AegisComposeApp(
                                             tr("Ключ собеседника изменился", "Contact key has changed"),
                                             color = AegisColors.warning,
                                             fontSize = 13.sp,
-                                            fontWeight = FontWeight.Bold
+                                            fontWeight = FontWeight.Medium
                                         )
-                                        Spacer(Modifier.height(6.dp))
+                                        Spacer(Modifier.height(8.dp))
                                         TextButton(onClick = {
                                             bridge.acknowledgeKeyChange(safeIndex)
                                             applyStatus(tr("Новый ключ подтверждён.", "New key approved."))
                                         }) {
-                                            Text(tr("Подтвердить", "Approve"), color = AegisColors.warning, fontSize = 12.sp)
+                                            Text(tr("Подтвердить", "Approve"), color = AegisColors.warning, fontSize = 13.sp)
                                         }
                                     }
                                 }
@@ -1367,7 +1315,7 @@ fun AegisComposeApp(
                                             tr("Обнаружены личные данные", "Sensitive data detected"),
                                             color = AegisColors.danger,
                                             fontSize = 13.sp,
-                                            fontWeight = FontWeight.Bold
+                                            fontWeight = FontWeight.Medium
                                         )
                                         Text(
                                             warning.maskedPreview,
@@ -1376,7 +1324,7 @@ fun AegisComposeApp(
                                             maxLines = 3,
                                             overflow = TextOverflow.Ellipsis
                                         )
-                                        Spacer(Modifier.height(6.dp))
+                                        Spacer(Modifier.height(8.dp))
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             TextButton(onClick = {
                                                 if (!currentChat.isSavedNotes && currentChat.keyChangeWarning != null) {
@@ -1409,7 +1357,7 @@ fun AegisComposeApp(
                                                     }
                                                 }
                                             }) {
-                                                Text(tr("Скрыть и отправить", "Mask & send"), color = AegisColors.accent, fontSize = 12.sp)
+                                                Text(tr("Скрыть и отправить", "Mask & send"), color = AegisColors.accent, fontSize = 13.sp)
                                             }
                                             TextButton(onClick = {
                                                 if (!currentChat.isSavedNotes && currentChat.keyChangeWarning != null) {
@@ -1442,10 +1390,10 @@ fun AegisComposeApp(
                                                     }
                                                 }
                                             }) {
-                                                Text(tr("Отправить как есть", "Send anyway"), color = AegisColors.danger, fontSize = 12.sp)
+                                                Text(tr("Отправить как есть", "Send anyway"), color = AegisColors.danger, fontSize = 13.sp)
                                             }
                                             TextButton(onClick = { pendingLeakWarning = null }) {
-                                                Text(tr("Отмена", "Cancel"), color = AegisColors.muted, fontSize = 12.sp)
+                                                Text(tr("Отмена", "Cancel"), color = AegisColors.muted, fontSize = 13.sp)
                                             }
                                         }
                                     }
@@ -1458,13 +1406,18 @@ fun AegisComposeApp(
                                     verticalArrangement = Arrangement.Center,
                                     horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
-                                    Text("🔒", fontSize = 42.sp)
+                                    Icon(
+                                        imageVector = AegisIcons.Lock,
+                                        contentDescription = null,
+                                        tint = AegisColors.muted,
+                                        modifier = Modifier.size(40.dp)
+                                    )
                                     Spacer(Modifier.height(8.dp))
                                     Text(
                                         tr("Чат закрыт", "Chat is locked"),
                                         color = AegisColors.text,
                                         fontSize = 20.sp,
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Medium
                                     )
                                     Text(
                                         tr("Введите PIN, чтобы открыть переписку.", "Enter PIN to unlock this conversation."),
@@ -1510,8 +1463,8 @@ fun AegisComposeApp(
                             } else {
                                 LazyColumn(
                                     modifier = Modifier.weight(1f),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
                                 ) {
                                     items(currentChat.messages) { message ->
                                         MessageBubble(message, isRu = isRu)
@@ -1519,17 +1472,28 @@ fun AegisComposeApp(
                                 }
                                 if (currentChat.queueTag == "channel://owner" && !bridge.isOwnerAccount()) {
                                     Surface(color = AegisColors.panel) {
-                                        Text(
-                                            tr(
-                                                "👑 Канал Owner · писать сообщения может только владелец",
-                                                "👑 Owner Channel · only the Owner can post messages"
-                                            ),
-                                            color = AegisColors.muted,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            textAlign = TextAlign.Center,
-                                            modifier = Modifier.fillMaxWidth().padding(16.dp)
-                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                            horizontalArrangement = Arrangement.Center,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = AegisIcons.Key,
+                                                contentDescription = null,
+                                                tint = AegisColors.muted,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(
+                                                tr(
+                                                    "Канал Owner · писать сообщения может только владелец",
+                                                    "Owner Channel · only the Owner can post messages"
+                                                ),
+                                                color = AegisColors.muted,
+                                                fontSize = 13.sp,
+                                                textAlign = TextAlign.Center
+                                            )
+                                        }
                                     }
                                 } else ComposerBar(
                                     isRu = isRu,
@@ -1635,16 +1599,17 @@ fun AegisComposeApp(
                                             }
                                         }
                                     )
-                                    Text(
-                                        "＋",
-                                        color = AegisColors.accent,
-                                        fontSize = 26.sp,
+                                    Icon(
+                                        imageVector = AegisIcons.Plus,
+                                        contentDescription = null,
+                                        tint = AegisColors.accent,
                                         modifier = Modifier
                                             .clickable {
                                                 newChatMode = "dm"
                                                 showNewChatDialog = true
                                             }
-                                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                                            .padding(8.dp)
+                                            .size(20.dp)
                                     )
                                 }
                             }
@@ -1670,15 +1635,15 @@ fun AegisComposeApp(
                                 .padding(horizontal = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            SmallChoice(tr("💬 Написать по @юзу", "💬 Message @user")) {
+                            SmallChoice(tr("Написать по @юзу", "Message @user")) {
                                 newChatMode = "dm"
                                 showNewChatDialog = true
                             }
-                            SmallChoice(tr("👥 Новая группа", "👥 New group")) {
+                            SmallChoice(tr("Новая группа", "New group")) {
                                 newChatMode = "group"
                                 showNewChatDialog = true
                             }
-                            SmallChoice(tr("📢 Новый канал", "📢 New channel")) {
+                            SmallChoice(tr("Новый канал", "New channel")) {
                                 newChatMode = "channel"
                                 showNewChatDialog = true
                             }
@@ -1723,19 +1688,19 @@ fun AegisComposeApp(
                                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Avatar(cleanFilter, size = 46.dp)
+                                            Avatar(cleanFilter, size = 40.dp)
                                             Spacer(Modifier.width(12.dp))
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
-                                                    tr("👤 Открыть профиль @$cleanFilter", "👤 Open profile @$cleanFilter"),
+                                                    tr("Открыть профиль @$cleanFilter", "Open profile @$cleanFilter"),
                                                     color = AegisColors.info,
                                                     fontSize = 15.sp,
-                                                    fontWeight = FontWeight.Bold
+                                                    fontWeight = FontWeight.Medium
                                                 )
                                                 Text(
                                                     tr("Посмотреть профиль и написать", "View profile and message"),
                                                     color = AegisColors.muted,
-                                                    fontSize = 12.sp
+                                                    fontSize = 13.sp
                                                 )
                                             }
                                         }
@@ -1760,19 +1725,19 @@ fun AegisComposeApp(
                                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Avatar(cleanFilter, size = 46.dp)
+                                            Avatar(cleanFilter, size = 40.dp)
                                             Spacer(Modifier.width(12.dp))
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
-                                                    tr("💬 Написать @$cleanFilter", "💬 Message @$cleanFilter"),
+                                                    tr("Написать @$cleanFilter", "Message @$cleanFilter"),
                                                     color = AegisColors.accent,
                                                     fontSize = 15.sp,
-                                                    fontWeight = FontWeight.Bold
+                                                    fontWeight = FontWeight.Medium
                                                 )
                                                 Text(
                                                     tr("Открыть личный чат по @юзу", "Open direct chat by @username"),
                                                     color = AegisColors.muted,
-                                                    fontSize = 12.sp
+                                                    fontSize = 13.sp
                                                 )
                                             }
                                         }
@@ -1781,9 +1746,9 @@ fun AegisComposeApp(
                                 items(dirMatches) { entry ->
                                     val cleanEntryTitle = bridge.stripUsernameSuffix(entry.title)
                                     val kindIcon = when (entry.kind) {
-                                        "group" -> "👥"
-                                        "channel" -> "📢"
-                                        else -> "👤"
+                                        "group" -> AegisIcons.Users
+                                        "channel" -> AegisIcons.Channel
+                                        else -> AegisIcons.User
                                     }
                                     val kindLabel = when (entry.kind) {
                                         "group" -> tr("Группа", "Group")
@@ -1816,19 +1781,30 @@ fun AegisComposeApp(
                                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Avatar(cleanEntryTitle, size = 46.dp)
+                                            Avatar(cleanEntryTitle, size = 40.dp)
                                             Spacer(Modifier.width(12.dp))
                                             Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    "$kindIcon $cleanEntryTitle",
-                                                    color = AegisColors.text,
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.SemiBold
-                                                )
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(
+                                                        imageVector = kindIcon,
+                                                        contentDescription = null,
+                                                        tint = AegisColors.muted,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                    Spacer(Modifier.width(8.dp))
+                                                    Text(
+                                                        cleanEntryTitle,
+                                                        color = AegisColors.text,
+                                                        fontSize = 15.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
                                                 Text(
                                                     kindLabel,
                                                     color = AegisColors.muted,
-                                                    fontSize = 11.sp
+                                                    fontSize = 13.sp
                                                 )
                                             }
                                         }
@@ -1855,10 +1831,13 @@ fun AegisComposeApp(
                                         }
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(min = 64.dp)
+                                            .padding(horizontal = 12.dp, vertical = 8.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Avatar(cleanChatTitle, size = 50.dp)
+                                        Avatar(cleanChatTitle, size = 40.dp)
                                         Spacer(Modifier.width(12.dp))
                                         Column(modifier = Modifier.weight(1f)) {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1866,19 +1845,24 @@ fun AegisComposeApp(
                                                     cleanChatTitle,
                                                     color = AegisColors.text,
                                                     fontSize = 15.sp,
-                                                    fontWeight = FontWeight.SemiBold,
+                                                    fontWeight = FontWeight.Medium,
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis,
                                                     modifier = Modifier.weight(1f)
                                                 )
                                                 if (chat.isLocked) {
-                                                    Text("🔒", fontSize = 12.sp)
+                                                    Icon(
+                                                        imageVector = AegisIcons.Lock,
+                                                        contentDescription = null,
+                                                        tint = AegisColors.muted,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
                                                 }
                                             }
                                             Text(
                                                 preview,
                                                 color = AegisColors.muted,
-                                                fontSize = 12.sp,
+                                                fontSize = 13.sp,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis
                                             )
@@ -1888,9 +1872,9 @@ fun AegisComposeApp(
                                 Box(
                                     Modifier
                                         .fillMaxWidth()
-                                        .padding(start = 74.dp)
+                                        .padding(start = 64.dp)
                                         .height(1.dp)
-                                        .background(AegisColors.line.copy(alpha = 0.55f))
+                                        .background(AegisColors.line)
                                 )
                             }
                         }
@@ -1955,11 +1939,11 @@ fun AegisComposeApp(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                SmallChoice(tr("💬 Чат", "💬 Chat")) { newChatMode = "dm" }
-                                SmallChoice(tr("👥 Группа", "👥 Group")) { newChatMode = "group" }
-                                SmallChoice(tr("📢 Канал", "📢 Channel")) { newChatMode = "channel" }
+                                SmallChoice(tr("Чат", "Chat")) { newChatMode = "dm" }
+                                SmallChoice(tr("Группа", "Group")) { newChatMode = "group" }
+                                SmallChoice(tr("Канал", "Channel")) { newChatMode = "channel" }
                             }
-                            Spacer(Modifier.height(10.dp))
+                            Spacer(Modifier.height(12.dp))
                             when (newChatMode) {
                                 "group" -> {
                                     OutlinedTextField(
@@ -2054,7 +2038,7 @@ fun AegisComposeApp(
                     },
                     confirmButton = {
                         TextButton(onClick = { runPanicWipe() }) {
-                            Text(tr("Стереть", "Wipe"), color = AegisColors.danger, fontWeight = FontWeight.Bold)
+                            Text(tr("Стереть", "Wipe"), color = AegisColors.danger, fontWeight = FontWeight.Medium)
                         }
                     },
                     dismissButton = {
@@ -2067,93 +2051,6 @@ fun AegisComposeApp(
     }
 }
 
-private object AegisVisuals {
-    var bubbleStyle: String = "modern"
-    var animationsEnabled: Boolean = true
-}
-
-private fun aegisWallpaperBrush(id: String): Brush = when (id) {
-    "grid" -> Brush.linearGradient(
-        listOf(
-            AegisColors.bg,
-            AegisColors.panel2.copy(alpha = 0.55f),
-            AegisColors.bg
-        )
-    )
-    "dots" -> Brush.radialGradient(
-        listOf(
-            AegisColors.accent.copy(alpha = 0.10f),
-            AegisColors.bg
-        )
-    )
-    "clean" -> Brush.linearGradient(listOf(AegisColors.bg, AegisColors.bg))
-    else -> Brush.linearGradient(
-        listOf(
-            AegisColors.bg,
-            AegisColors.info.copy(alpha = 0.10f),
-            AegisColors.accent.copy(alpha = 0.10f),
-            AegisColors.bg
-        )
-    )
-}
-
-private object AegisColors {
-    var bg = Color(0xFF0B141A)
-    var panel = Color(0xFF111B21)
-    var panel2 = Color(0xFF202C33)
-    var line = Color(0xFF2A3942)
-    var text = Color(0xFFE9EDEF)
-    var muted = Color(0xFF8696A0)
-    var accent = Color(0xFF00A884)
-    var onAccent = Color(0xFF042018)
-    var info = Color(0xFF53BDEB)
-    var danger = Color(0xFFF15C6D)
-    var warning = Color(0xFFF0B429)
-    var outgoing = Color(0xFF005C4B)
-    var incoming = Color(0xFF202C33)
-
-    fun applyTheme(themeId: String) {
-        when (themeId) {
-            "emerald-monolith" -> {
-                bg = Color(0xFF06120E); panel = Color(0xFF0A1C15); panel2 = Color(0xFF0F2A1F)
-                line = Color(0xFF1D4433); text = Color(0xFFE6FFF2); muted = Color(0xFF7FB39A)
-                accent = Color(0xFF34D399); onAccent = Color(0xFF042018); info = Color(0xFF6EE7B7)
-                outgoing = Color(0xFF065F46); incoming = Color(0xFF0F2A1F)
-            }
-            "crimson-sunset" -> {
-                bg = Color(0xFF150A0D); panel = Color(0xFF211016); panel2 = Color(0xFF2D1620)
-                line = Color(0xFF4A2230); text = Color(0xFFFFEEF1); muted = Color(0xFFC08A97)
-                accent = Color(0xFFFB7185); onAccent = Color(0xFF2A0410); info = Color(0xFFFDA4AF)
-                outgoing = Color(0xFF7F1D3A); incoming = Color(0xFF2D1620)
-            }
-            "royal-amethyst" -> {
-                bg = Color(0xFF0E0918); panel = Color(0xFF171027); panel2 = Color(0xFF201634)
-                line = Color(0xFF362653); text = Color(0xFFF2ECFF); muted = Color(0xFFA795C9)
-                accent = Color(0xFFC084FC); onAccent = Color(0xFF1A042A); info = Color(0xFFD8B4FE)
-                outgoing = Color(0xFF4C1D95); incoming = Color(0xFF201634)
-            }
-            "gold-sovereign" -> {
-                bg = Color(0xFF12100A); panel = Color(0xFF1C1810); panel2 = Color(0xFF272118)
-                line = Color(0xFF423720); text = Color(0xFFFFF8E7); muted = Color(0xFFBFA877)
-                accent = Color(0xFFFBBF24); onAccent = Color(0xFF2A1A02); info = Color(0xFFFCD34D)
-                outgoing = Color(0xFF78350F); incoming = Color(0xFF272118)
-            }
-            "oled-black" -> {
-                bg = Color(0xFF000000); panel = Color(0xFF070707); panel2 = Color(0xFF101010)
-                line = Color(0xFF1F1F1F); text = Color(0xFFF5F5F5); muted = Color(0xFF8A8A8A)
-                accent = Color(0xFFE5E5E5); onAccent = Color(0xFF000000); info = Color(0xFFD4D4D4)
-                outgoing = Color(0xFF262626); incoming = Color(0xFF101010)
-            }
-            else -> {
-                bg = Color(0xFF0B141A); panel = Color(0xFF111B21); panel2 = Color(0xFF202C33)
-                line = Color(0xFF2A3942); text = Color(0xFFE9EDEF); muted = Color(0xFF8696A0)
-                accent = Color(0xFF00A884); onAccent = Color(0xFF042018); info = Color(0xFF53BDEB)
-                outgoing = Color(0xFF005C4B); incoming = Color(0xFF202C33)
-            }
-        }
-    }
-}
-
 @Composable
 private fun WipedScreen(isRu: Boolean, onReset: () -> Unit) {
     Column(
@@ -2161,13 +2058,18 @@ private fun WipedScreen(isRu: Boolean, onReset: () -> Unit) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("✓", fontSize = 44.sp, color = AegisColors.accent)
+        Icon(
+            imageVector = AegisIcons.Shield,
+            contentDescription = null,
+            tint = AegisColors.accent,
+            modifier = Modifier.size(40.dp)
+        )
         Spacer(Modifier.height(12.dp))
         Text(
             if (isRu) "Данные удалены" else "Data wiped",
             color = AegisColors.text,
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Medium
         )
         Spacer(Modifier.height(8.dp))
         Text(
@@ -2188,7 +2090,7 @@ private fun WipedScreen(isRu: Boolean, onReset: () -> Unit) {
         ) {
             Text(
                 if (isRu) "Создать новый профиль" else "Create new profile",
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Medium
             )
         }
     }
@@ -2206,7 +2108,7 @@ private fun BrandMark(size: Dp) {
             "A",
             color = AegisColors.onAccent,
             fontSize = (size.value * 0.48f).sp,
-            fontWeight = FontWeight.Black
+            fontWeight = FontWeight.Medium
         )
     }
 }
@@ -2215,11 +2117,11 @@ private fun BrandMark(size: Dp) {
 private fun AuthCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         color = AegisColors.panel,
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(18.dp),
+            modifier = Modifier.padding(16.dp),
             content = content
         )
     }
@@ -2244,11 +2146,18 @@ private fun UpdateBanner(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Icon(
+                    imageVector = AegisIcons.Check,
+                    contentDescription = null,
+                    tint = AegisColors.accent,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(Modifier.width(8.dp))
                 Text(
-                    if (isRu) "✅ Обновление скачано автоматически" else "✅ Update auto-downloaded",
+                    if (isRu) "Обновление скачано автоматически" else "Update auto-downloaded",
                     color = AegisColors.accent,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -2266,14 +2175,21 @@ private fun UpdateBanner(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Icon(
+                    imageVector = AegisIcons.Download,
+                    contentDescription = null,
+                    tint = AegisColors.info,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(Modifier.width(8.dp))
                 Text(
-                    if (isRu) "🚀 Доступно обновление Aegis v$availVer" else "🚀 Update Aegis v$availVer available",
+                    if (isRu) "Доступно обновление Aegis v$availVer" else "Update Aegis v$availVer available",
                     color = AegisColors.info,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
                     modifier = Modifier.weight(1f)
                 )
-                SmallChoice(if (isRu) "⬇ Скачать" else "⬇ Download") {
+                SmallChoice(if (isRu) "Скачать" else "Download") {
                     bridge.downloadUpdateApkAsync(availVer) { onChanged() }
                 }
             }
@@ -2307,51 +2223,60 @@ private fun AppTopBar(
     onMenu: () -> Unit,
     trailing: (@Composable () -> Unit)? = null
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(AegisColors.panel)
-            .padding(horizontal = 6.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (onBack != null) {
-            Text(
-                "‹",
-                color = AegisColors.text,
-                fontSize = 30.sp,
-                modifier = Modifier.clickable { onBack() }.padding(horizontal = 10.dp)
+    Column(modifier = Modifier.fillMaxWidth().background(AegisColors.panel)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (onBack != null) {
+                Icon(
+                    imageVector = AegisIcons.ArrowLeft,
+                    contentDescription = null,
+                    tint = AegisColors.text,
+                    modifier = Modifier
+                        .clickable { onBack() }
+                        .padding(8.dp)
+                        .size(20.dp)
+                )
+            } else {
+                Spacer(Modifier.width(4.dp))
+                Avatar(title, size = 36.dp)
+                Spacer(Modifier.width(12.dp))
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    title,
+                    color = AegisColors.text,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    subtitle,
+                    color = AegisColors.muted,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (trailing != null) {
+                trailing()
+            }
+            Icon(
+                imageVector = AegisIcons.More,
+                contentDescription = null,
+                tint = AegisColors.muted,
+                modifier = Modifier
+                    .clickable(onClick = onMenu)
+                    .padding(8.dp)
+                    .size(20.dp)
             )
-        } else {
-            Spacer(Modifier.width(6.dp))
-            Avatar(title, size = 38.dp)
-            Spacer(Modifier.width(10.dp))
         }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                title,
-                color = AegisColors.text,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                subtitle,
-                color = AegisColors.muted,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        if (trailing != null) {
-            trailing()
-        }
-        Text(
-            "⋮",
-            color = AegisColors.muted,
-            fontSize = 22.sp,
-            modifier = Modifier.clickable(onClick = onMenu).padding(horizontal = 10.dp, vertical = 4.dp)
-        )
+        HorizontalDivider(color = AegisColors.line, thickness = 1.dp)
     }
 }
 
@@ -2363,60 +2288,55 @@ private fun AppBottomBar(
     onServers: () -> Unit,
     onProfile: () -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(AegisColors.panel)
-            .padding(vertical = 4.dp)
-    ) {
-        BottomItem("💬", if (isRu) "Чаты" else "Chats", active == "chats", onChats, Modifier.weight(1f))
-        BottomItem("🌐", if (isRu) "Серверы" else "Servers", active == "servers", onServers, Modifier.weight(1f))
-        BottomItem("👤", if (isRu) "Профиль" else "Profile", active == "profile", onProfile, Modifier.weight(1f))
+    Column(modifier = Modifier.fillMaxWidth().background(AegisColors.panel)) {
+        HorizontalDivider(color = AegisColors.line, thickness = 1.dp)
+        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+            BottomItem(AegisIcons.Chat, if (isRu) "Чаты" else "Chats", active == "chats", onChats, Modifier.weight(1f))
+            BottomItem(AegisIcons.Server, if (isRu) "Серверы" else "Servers", active == "servers", onServers, Modifier.weight(1f))
+            BottomItem(AegisIcons.User, if (isRu) "Профиль" else "Profile", active == "profile", onProfile, Modifier.weight(1f))
+        }
     }
 }
 
 @Composable
 private fun BottomItem(
-    icon: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier
 ) {
     Column(
-        modifier = modifier.clickable(onClick = onClick).padding(vertical = 4.dp),
+        modifier = modifier.clickable(onClick = onClick).padding(vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(icon, fontSize = 18.sp)
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (selected) AegisColors.accent else AegisColors.muted,
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(Modifier.height(4.dp))
         Text(
             label,
             color = if (selected) AegisColors.accent else AegisColors.muted,
-            fontSize = 10.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium
         )
     }
 }
 
 @Composable
 private fun Avatar(name: String, size: Dp) {
-    val palette = listOf(
-        Color(0xFF1F6F5F),
-        Color(0xFF2A5275),
-        Color(0xFF5B4A7A),
-        Color(0xFF7A4A4A),
-        Color(0xFF4A5F7A),
-        Color(0xFF6B5A2A)
-    )
-    val color = palette[(name.hashCode() and Int.MAX_VALUE) % palette.size]
     Box(
-        modifier = Modifier.size(size).background(color, CircleShape),
+        modifier = Modifier.size(size).background(AegisColors.panel3, CircleShape),
         contentAlignment = Alignment.Center
     ) {
         Text(
             name.trim().firstOrNull()?.uppercase() ?: "A",
-            color = Color.White,
-            fontSize = (size.value * 0.36f).sp,
-            fontWeight = FontWeight.Bold
+            color = AegisColors.muted,
+            fontSize = (size.value * 0.34f).sp,
+            fontWeight = FontWeight.Medium
         )
     }
 }
@@ -2427,7 +2347,7 @@ private fun SectionLabel(text: String) {
         text,
         color = AegisColors.muted,
         fontSize = 11.sp,
-        fontWeight = FontWeight.Bold,
+        fontWeight = FontWeight.Medium,
         modifier = Modifier.padding(top = 14.dp, bottom = 6.dp)
     )
 }
@@ -2444,123 +2364,106 @@ private fun PingBadge(pingMs: Int?, isRu: Boolean, onClick: () -> Unit) {
         isRu -> "$pingMs мс"
         else -> "$pingMs ms"
     }
-    Surface(
-        color = dotColor.copy(alpha = 0.14f),
-        shape = RoundedCornerShape(999.dp),
-        border = BorderStroke(1.dp, dotColor.copy(alpha = 0.45f)),
+    Row(
         modifier = Modifier
-            .padding(end = 6.dp)
             .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(7.dp)
-                    .background(dotColor, CircleShape)
-            )
-            Spacer(Modifier.width(5.dp))
-            Text(
-                label,
-                color = dotColor,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
+        Box(modifier = Modifier.size(6.dp).background(dotColor, CircleShape))
+        Spacer(Modifier.width(6.dp))
+        Text(label, color = AegisColors.muted, fontSize = 11.sp)
     }
 }
 
 @Composable
-private fun SmallChoice(label: String, danger: Boolean = false, onClick: () -> Unit) {
+private fun SmallChoice(
+    label: String,
+    danger: Boolean = false,
+    selected: Boolean = false,
+    onClick: () -> Unit
+) {
+    val tint = when {
+        danger -> AegisColors.danger
+        selected -> AegisColors.accent
+        else -> AegisColors.text
+    }
     Surface(
-        color = if (danger) AegisColors.danger.copy(alpha = 0.12f) else AegisColors.panel2,
-        shape = RoundedCornerShape(999.dp),
+        color = Color.Transparent,
+        shape = RoundedCornerShape(8.dp),
         border = BorderStroke(
             1.dp,
-            if (danger) AegisColors.danger.copy(alpha = 0.45f) else AegisColors.line
+            when {
+                danger -> AegisColors.danger.copy(alpha = 0.5f)
+                selected -> AegisColors.accent.copy(alpha = 0.5f)
+                else -> AegisColors.line
+            }
         ),
         modifier = Modifier.clickable(onClick = onClick)
     ) {
         Text(
             label,
-            color = if (danger) AegisColors.danger else AegisColors.text,
-            fontSize = 11.sp,
+            color = tint,
+            fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp)
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
         )
     }
 }
 
 @Composable
 private fun MessageBubble(message: AegisRustBridge.ChatMessageUi, isRu: Boolean) {
-    val style = AegisVisuals.bubbleStyle
-    val baseColor = if (message.outgoing) AegisColors.outgoing else AegisColors.incoming
-    val bubbleColor = when (style) {
-        "glass" -> baseColor.copy(alpha = 0.62f)
-        else -> baseColor
-    }
-    val bubbleBorder = when (style) {
-        "neon" -> BorderStroke(1.dp, AegisColors.accent.copy(alpha = 0.75f))
-        "glass" -> BorderStroke(1.dp, Color.White.copy(alpha = 0.16f))
-        else -> null
-    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (message.outgoing) Arrangement.End else Arrangement.Start
     ) {
         Surface(
-            color = bubbleColor,
-            border = bubbleBorder,
+            color = if (message.outgoing) AegisColors.outgoing else AegisColors.incoming,
             shape = RoundedCornerShape(
-                topStart = 14.dp,
-                topEnd = 14.dp,
-                bottomStart = if (message.outgoing) 14.dp else 4.dp,
-                bottomEnd = if (message.outgoing) 4.dp else 14.dp
+                topStart = 10.dp,
+                topEnd = 10.dp,
+                bottomStart = if (message.outgoing) 10.dp else 4.dp,
+                bottomEnd = if (message.outgoing) 4.dp else 10.dp
             ),
-            modifier = Modifier
-                .widthIn(max = 330.dp)
-                .then(
-                    if (AegisVisuals.animationsEnabled) {
-                        Modifier.animateContentSize()
-                    } else {
-                        Modifier
-                    }
-                )
+            modifier = Modifier.widthIn(max = 320.dp)
         ) {
-            Column(Modifier.padding(horizontal = 11.dp, vertical = 8.dp)) {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Text(
                     message.text,
                     color = AegisColors.text,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp
                 )
                 message.attachment?.let { attachment ->
                     Spacer(Modifier.height(4.dp))
-                    Text(
-                        "📷 ${attachment.filename}",
-                        color = AegisColors.info,
-                        fontSize = 11.sp
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = AegisIcons.Image,
+                            contentDescription = null,
+                            tint = AegisColors.muted,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            attachment.filename,
+                            color = AegisColors.muted,
+                            fontSize = 11.sp
+                        )
+                    }
                 }
-                Spacer(Modifier.height(3.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    message.ttlSeconds?.let { ttl ->
-                        val ttlLabel = if (isRu) {
+                message.ttlSeconds?.let { ttl ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (isRu) {
                             if (ttl >= 3600) "${ttl / 3600} ч" else if (ttl >= 60) "${ttl / 60} мин" else "${ttl} с"
                         } else {
                             if (ttl >= 3600) "${ttl / 3600} h" else if (ttl >= 60) "${ttl / 60} min" else "${ttl} s"
-                        }
-                        Text(
-                            ttlLabel,
-                            color = AegisColors.muted,
-                            fontSize = 9.sp
-                        )
-                    }
+                        },
+                        color = AegisColors.muted,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
         }
@@ -2574,29 +2477,34 @@ private fun ComposerBar(
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit
 ) {
-    Surface(color = AegisColors.panel) {
+    Column(modifier = Modifier.fillMaxWidth().background(AegisColors.panel)) {
+        HorizontalDivider(color = AegisColors.line, thickness = 1.dp)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.Bottom
         ) {
             OutlinedTextField(
                 value = draft,
                 onValueChange = onDraftChange,
-                placeholder = { Text(if (isRu) "Сообщение" else "Message") },
+                placeholder = { Text(if (isRu) "Сообщение" else "Message", fontSize = 15.sp) },
                 maxLines = 4,
-                shape = RoundedCornerShape(20.dp),
-                modifier = Modifier.weight(1f).padding(horizontal = 4.dp)
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.weight(1f)
             )
-            Text(
-                "➤",
-                color = AegisColors.accent,
-                fontSize = 24.sp,
+            Box(
                 modifier = Modifier
                     .clickable(onClick = onSend)
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
-            )
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
+            ) {
+                Icon(
+                    imageVector = AegisIcons.Send,
+                    contentDescription = null,
+                    tint = AegisColors.accent,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         }
     }
 }

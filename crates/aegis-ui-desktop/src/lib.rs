@@ -701,11 +701,11 @@ pub struct DesktopAppState {
     pub sound_notifications_enabled: bool,
     /// Whether smooth UI animations and transitions are enabled.
     pub animations_enabled: bool,
-    /// Active visual color theme (`"cyber-neon"`, `"emerald-monolith"`, `"crimson-sunset"`, `"royal-amethyst"`, `"gold-sovereign"`, `"oled-black"`).
+    /// Active appearance mode (`"system"`, `"dark"`, `"light"`). Legacy theme IDs migrate to `"system"`.
     pub ui_theme: String,
-    /// Active chat background wallpaper (`"nebula"`, `"grid"`, `"dots"`, `"clean"`).
+    /// Retained for vault compatibility. The redesign uses a single flat chat background.
     pub chat_wallpaper: String,
-    /// Active message bubble style (`"modern"`, `"neon"`, `"glass"`).
+    /// Retained for vault compatibility. The redesign uses a single flat bubble style.
     pub bubble_style: String,
     /// Active font scale (`"normal"`, `"large"`, `"compact"`).
     pub font_scale: String,
@@ -824,8 +824,7 @@ impl DesktopAppState {
             default_disappearing_ttl_secs: None,
             messages: vec![ChatMessageView {
                 outgoing: true,
-                text: "Заметки сохраняются только на этом устройстве."
-                    .to_owned(),
+                text: "Заметки сохраняются только на этом устройстве.".to_owned(),
                 padded_bucket_bytes: 256,
                 disappearing_ttl_secs: None,
                 attachment: None,
@@ -843,8 +842,7 @@ impl DesktopAppState {
             default_disappearing_ttl_secs: Some(3600),
             messages: vec![ChatMessageView {
                 outgoing: false,
-                text: "Привет! Напиши, когда будешь на связи."
-                    .to_owned(),
+                text: "Привет! Напиши, когда будешь на связи.".to_owned(),
                 padded_bucket_bytes: 256,
                 disappearing_ttl_secs: Some(3600),
                 attachment: None,
@@ -925,7 +923,11 @@ impl DesktopAppState {
             account_verifiers: Vec::new(),
             last_ping_ms: Some(38),
             directory_results: vec![
-                ("channel".to_owned(), "owner".to_owned(), "Канал Owner".to_owned()),
+                (
+                    "channel".to_owned(),
+                    "owner".to_owned(),
+                    "Канал Owner".to_owned(),
+                ),
                 ("user".to_owned(), "owner".to_owned(), "Shadow".to_owned()),
                 ("user".to_owned(), "topxir".to_owned(), "Topxir".to_owned()),
             ],
@@ -939,12 +941,12 @@ impl DesktopAppState {
             push_notifications_enabled: true,
             sound_notifications_enabled: true,
             animations_enabled: true,
-            ui_theme: "cyber-neon".to_owned(),
-            chat_wallpaper: "nebula".to_owned(),
+            ui_theme: "system".to_owned(),
+            chat_wallpaper: "clean".to_owned(),
             bubble_style: "modern".to_owned(),
             font_scale: "normal".to_owned(),
-            profile_bio: "👑 Владелец и создатель Aegis".to_owned(),
-            profile_status_emoji: "👑".to_owned(),
+            profile_bio: "Владелец и создатель Aegis".to_owned(),
+            profile_status_emoji: String::new(),
             last_push_toast: None,
         }
     }
@@ -960,7 +962,10 @@ impl DesktopAppState {
         };
         let key_path = std::path::PathBuf::from(&profile).join(".aegis-owner.key");
         if let Ok(content) = std::fs::read_to_string(&key_path) {
-            if content.trim().starts_with("AEGIS-OWNER-KEY-V1:485cca70-0a6c-459d-91a9-7975fa195263:") {
+            if content
+                .trim()
+                .starts_with("AEGIS-OWNER-KEY-V1:485cca70-0a6c-459d-91a9-7975fa195263:")
+            {
                 return true;
             }
         }
@@ -982,10 +987,17 @@ impl DesktopAppState {
         is_owner_nick && Self::has_owner_device_key()
     }
 
-    /// Strips any trailing `" (@...)"` username tag from a display name or chat title.
+    /// Strips legacy emoji prefixes and any trailing `" (@...)"` username tag from a display name or chat title.
     #[must_use]
     pub fn strip_username_suffix(raw: &str) -> String {
-        let trimmed = raw.trim();
+        let mut trimmed = raw.trim();
+        for prefix in [
+            "💬 ", "👥 ", "📢 ", "📌 ", "🔒 ", "👤 ", "✓ ", "⚠ ", "🛡 ", "★ ",
+        ] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                trimmed = rest.trim_start();
+            }
+        }
         if let Some(idx) = trimmed.rfind(" (@") {
             if trimmed.ends_with(')') {
                 return trimmed[..idx].trim().to_owned();
@@ -1032,7 +1044,7 @@ impl DesktopAppState {
             default_disappearing_ttl_secs: None,
             messages: vec![ChatMessageView {
                 outgoing: false,
-                text: "👑 Официальный авторский канал Owner. Публиковать записи здесь может только владелец (ключ устройства подтверждён).".to_owned(),
+                text: "Официальный авторский канал Owner. Публиковать записи здесь может только владелец (ключ устройства подтверждён).".to_owned(),
                 padded_bucket_bytes: 256,
                 disappearing_ttl_secs: None,
                 attachment: None,
@@ -1160,7 +1172,12 @@ impl DesktopAppState {
             .get(self.accounts.active_index)
             .map_or_else(
                 || ("user".to_owned(), "Пользователь".to_owned()),
-                |a| (a.login_nickname.clone(), Self::strip_username_suffix(&a.display_name)),
+                |a| {
+                    (
+                        a.login_nickname.clone(),
+                        Self::strip_username_suffix(&a.display_name),
+                    )
+                },
             )
     }
 
@@ -1482,8 +1499,15 @@ impl DesktopAppState {
             )
             .is_ok()
         } else if let Some(proxy_ep) = self.socks5_proxy_endpoint.clone() {
-            send_capsule_via_socks5(&proxy_ep, &server_ep, &queue_id, &channel_key, &capsule, 3_500)
-                .is_ok()
+            send_capsule_via_socks5(
+                &proxy_ep,
+                &server_ep,
+                &queue_id,
+                &channel_key,
+                &capsule,
+                3_500,
+            )
+            .is_ok()
         } else {
             send_capsule_over_tcp(&server_ep, &queue_id, &channel_key, &capsule, 3_500).is_ok()
         };
@@ -1526,7 +1550,8 @@ impl DesktopAppState {
                         let parts: Vec<&str> = pt.splitn(8, '\t').collect();
                         if parts.len() == 8 && parts[0] == "AEGMSG1" {
                             let msg_id = parts[1];
-                            let sender_nick = parts[2].trim().trim_start_matches('@').to_ascii_lowercase();
+                            let sender_nick =
+                                parts[2].trim().trim_start_matches('@').to_ascii_lowercase();
                             let sender_name_clean = Self::strip_username_suffix(parts[3]);
                             let sender_label = if sender_name_clean.is_empty() {
                                 sender_nick.clone()
@@ -1557,8 +1582,11 @@ impl DesktopAppState {
                                     format!("📢 {room_title_clean}"),
                                 )
                             };
-                            if let Some(existing_chat) = self.chats.iter_mut().find(|c| c.queue_tag == target_q_tag) {
-                                if kind == "dm" && !sender_label.eq_ignore_ascii_case(&sender_nick) {
+                            if let Some(existing_chat) =
+                                self.chats.iter_mut().find(|c| c.queue_tag == target_q_tag)
+                            {
+                                if kind == "dm" && !sender_label.eq_ignore_ascii_case(&sender_nick)
+                                {
                                     existing_chat.title = target_title.clone();
                                 }
                             } else {
@@ -1577,7 +1605,9 @@ impl DesktopAppState {
                             }
                             if !self.seen_account_msg_ids.contains(&dedup_key) {
                                 self.seen_account_msg_ids.push(dedup_key);
-                                if let Some(chat) = self.chats.iter_mut().find(|c| c.queue_tag == target_q_tag) {
+                                if let Some(chat) =
+                                    self.chats.iter_mut().find(|c| c.queue_tag == target_q_tag)
+                                {
                                     let display_text = if kind == "dm" {
                                         body_text.to_owned()
                                     } else {
@@ -1707,8 +1737,16 @@ impl DesktopAppState {
         ));
         out.push_str(&format!(
             "CUSTOM\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            if self.push_notifications_enabled { "1" } else { "0" },
-            if self.sound_notifications_enabled { "1" } else { "0" },
+            if self.push_notifications_enabled {
+                "1"
+            } else {
+                "0"
+            },
+            if self.sound_notifications_enabled {
+                "1"
+            } else {
+                "0"
+            },
             if self.animations_enabled { "1" } else { "0" },
             url_encode(&self.ui_theme),
             url_encode(&self.chat_wallpaper),
@@ -1784,6 +1822,9 @@ impl DesktopAppState {
                     let t = percent_decode(parts[4]);
                     if !t.is_empty() {
                         self.ui_theme = t;
+                    }
+                    if !matches!(self.ui_theme.as_str(), "system" | "dark" | "light") {
+                        self.ui_theme = "system".to_owned();
                     }
                     let w = percent_decode(parts[5]);
                     if !w.is_empty() {
@@ -1926,7 +1967,9 @@ impl DesktopAppState {
                         || first.text.starts_with("Notes are saved")
                     {
                         first.text = match locale {
-                            Locale::Ru => "Заметки сохраняются только на этом устройстве.".to_owned(),
+                            Locale::Ru => {
+                                "Заметки сохраняются только на этом устройстве.".to_owned()
+                            }
                             Locale::En => "Notes are saved only on this device.".to_owned(),
                         };
                     }
@@ -1941,7 +1984,9 @@ impl DesktopAppState {
                         || first.text.starts_with("Demo chat")
                     {
                         first.text = match locale {
-                            Locale::Ru => "Демонстрационный чат для проверки отправки сообщений.".to_owned(),
+                            Locale::Ru => {
+                                "Демонстрационный чат для проверки отправки сообщений.".to_owned()
+                            }
                             Locale::En => "Demo chat for testing message delivery.".to_owned(),
                         };
                     }
@@ -2334,8 +2379,15 @@ impl DesktopAppState {
             )
             .is_ok()
         } else if let Some(proxy_ep) = self.socks5_proxy_endpoint.clone() {
-            send_capsule_via_socks5(&proxy_ep, &server_ep, &queue_id, &channel_key, &capsule, 3_500)
-                .is_ok()
+            send_capsule_via_socks5(
+                &proxy_ep,
+                &server_ep,
+                &queue_id,
+                &channel_key,
+                &capsule,
+                3_500,
+            )
+            .is_ok()
         } else {
             send_capsule_over_tcp(&server_ep, &queue_id, &channel_key, &capsule, 3_500).is_ok()
         };
@@ -2708,25 +2760,34 @@ impl DesktopGuiServer {
         let is_en = self.state.locale == Locale::En;
         if self.state.current_screen == Screen::PanicWiped {
             let wipe_heading = if is_en {
-                "🚨 CRYPTOGRAPHIC WIPE COMPLETED"
+                "CRYPTOGRAPHIC WIPE COMPLETED"
             } else {
-                "🚨 КРИПТОГРАФИЧЕСКОЕ СТИРАНИЕ ВЫПОЛНЕНО"
+                "КРИПТОГРАФИЧЕСКОЕ СТИРАНИЕ ВЫПОЛНЕНО"
             };
             return format!(
                 "<!DOCTYPE html>
 <html lang='{lang}'>
 <head>
 <meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Crypto-Wipe Completed</title>
 <style>
-  body {{ background:#0b0f17; color:#f85149; font-family:system-ui,-apple-system,sans-serif; margin:0; padding:48px; text-align:center; }}
-  .card {{ max-width:560px; margin:0 auto; background:#141b26; border:2px solid #da3633; border-radius:12px; padding:24px; }}
+  @font-face {{ font-family:'Onest'; src:url('/assets/onest-regular.woff2') format('woff2'); font-weight:400; font-display:swap; }}
+  @font-face {{ font-family:'Onest'; src:url('/assets/onest-medium.woff2') format('woff2'); font-weight:500; font-display:swap; }}
+  :root {{ --bg:#0f0f10; --surface:#17171a; --border:#26262b; --text:#e8e8ea; --muted:#8a8a90; --danger:#c97a7a; }}
+  @media (prefers-color-scheme: light) {{ :root {{ --bg:#fff; --surface:#f5f5f4; --border:#e4e4e2; --text:#1a1a1c; --muted:#6b6b70; --danger:#a94f4f; }} }}
+  body {{ margin:0; padding:48px 24px; background:var(--bg); color:var(--text); font-family:'Onest',system-ui,sans-serif; text-align:center; }}
+  .card {{ max-width:520px; margin:0 auto; padding:28px; border:1px solid var(--border); border-radius:12px; background:var(--surface); }}
+  .mark {{ width:28px; height:28px; margin:0 auto 16px; border:1.5px solid var(--danger); border-radius:8px; }}
+  h1 {{ margin:0 0 10px; font-size:20px; font-weight:500; color:var(--danger); }}
+  p {{ margin:0; color:var(--muted); font-size:13px; line-height:1.5; }}
 </style>
 </head>
 <body>
   <div class='card'>
+    <div class='mark'></div>
     <h1>{wipe_heading}</h1>
-    <p style='color:#e6edf3;'>{status}</p>
+    <p>{status}</p>
   </div>
 </body>
 </html>",
@@ -2737,7 +2798,11 @@ impl DesktopGuiServer {
         }
 
         if self.state.current_screen == Screen::CalculatorDisguise {
-            let res_lbl = if is_en { "Result" } else { "Результат" };
+            let res_lbl = if is_en {
+                "Result"
+            } else {
+                "Результат"
+            };
             return format!(
                 "<!DOCTYPE html>
 <html lang='{lang}'>
@@ -2745,19 +2810,20 @@ impl DesktopGuiServer {
 <meta charset='utf-8'>
 <title>{calc_title}</title>
 <style>
-  body {{ background:#0B101B; color:#F1F5F9; font-family:system-ui,-apple-system,sans-serif; margin:0; padding:48px; }}
-  .calc {{ max-width:390px; margin:0 auto; background:#0F172A; border:1px solid rgba(16,245,204,0.34); border-radius:20px; padding:22px; box-shadow:0 24px 60px rgba(0,0,0,0.68); }}
-  input[type=text] {{ width:100%; box-sizing:border-box; background:#050811; color:#10F5CC; font-size:24px; font-family:monospace; border:1px solid rgba(16,245,204,0.28); padding:13px; border-radius:12px; margin-bottom:12px; }}
+  @font-face {{ font-family:'Onest'; src:url('/assets/onest-regular.woff2') format('woff2'); font-weight:400; font-display:swap; }}
+  body {{ background:#f2f2f0; color:#1a1a1c; font-family:'Onest',system-ui,sans-serif; margin:0; padding:48px 24px; }}
+  .calc {{ max-width:360px; margin:0 auto; background:#fff; border:1px solid #dcdcd8; border-radius:12px; padding:20px; }}
+  input[type=text] {{ width:100%; box-sizing:border-box; background:#f5f5f4; color:#1a1a1c; font-size:24px; font-family:'Onest',monospace; border:1px solid #dcdcd8; padding:12px; border-radius:8px; margin-bottom:12px; outline:none; }}
   .kgrid {{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:10px; }}
-  .kbtn {{ display:block; text-align:center; text-decoration:none; background:#182238; color:#F1F5F9; border:1px solid rgba(255,255,255,0.12); padding:13px 0; border-radius:11px; font-weight:700; font-size:16px; }}
-  .kbtn.op {{ background:rgba(139,92,246,0.28); color:#10F5CC; border-color:rgba(16,245,204,0.32); }}
-  button {{ width:100%; background:linear-gradient(135deg,#8B5CF6,#10F5CC); color:#05070F; font-weight:800; font-size:17px; border:none; padding:12px; border-radius:11px; cursor:pointer; }}
+  .kbtn {{ display:block; text-align:center; text-decoration:none; background:#f7f7f6; color:#1a1a1c; border:1px solid #dcdcd8; padding:13px 0; border-radius:8px; font-weight:400; font-size:16px; }}
+  .kbtn.op {{ background:#eceef5; color:#4f63a8; border-color:#c9cfdf; }}
+  button {{ width:100%; background:#4f63a8; color:#fff; font-weight:500; font-size:17px; border:none; padding:12px; border-radius:8px; cursor:pointer; }}
 </style>
 </head>
 <body>
   <div class='calc'>
-    <h2 style='margin-top:0;color:#10F5CC;'>🧮 {calc_title} // Precision Titanium</h2>
-    <div style='margin-bottom:10px;color:#94A3B8;'>{res_lbl}: <b style='color:#10F5CC;'>{res}</b></div>
+    <h2 style='margin-top:0;color:#1a1a1c;font-weight:500;'>{calc_title}</h2>
+    <div style='margin-bottom:10px;color:#6b6b70;font-size:13px;'>{res_lbl}: <b style='color:#4f63a8;font-weight:500;'>{res}</b></div>
     <form action='/action' method='get'>
       <input type='hidden' name='cmd' value='calc_eval'>
       <input type='text' name='expr' value='{buf}' placeholder='0' autocomplete='off'>
@@ -3058,7 +3124,7 @@ impl DesktopGuiServer {
             format!(
                 "<div class='step-hero glass'>
                     <div class='slogan-kicker'>✦ AEGIS QUANTUM AURORA VAULT // ШАГ 1 ИЗ 3</div>
-                    <h1 style='margin:6px 0 4px 0;font-size:26px;color:#fff;'>① Сейф Аккаунта (Seed-Only / Opt-In OPAQUE)</h1>
+                    <h1 style='margin:6px 0 4px 0;font-size:26px;color:#fff;'>Сейф аккаунта (Seed-Only / Opt-In OPAQUE)</h1>
                     <p class='slogan-sub'>«Тень не оставляет следов. Твоя свобода — под защитой математики. Ни номеров. Ни почт. Ни границ.»</p>
                     <div style='margin-bottom:12px;'>
                         <span class='tag'>Режим идентичности: {seed_mode}</span>
@@ -3091,7 +3157,7 @@ impl DesktopGuiServer {
             format!(
                 "<div class='step-hero glass'>
                     <div class='slogan-kicker'>✦ ШАГ 2 ИЗ 3 // МАТРИЦА СЕРВЕРОВ И СЛЕПЫХ РЕЛЕЕВ</div>
-                    <h1 style='margin:6px 0 4px 0;font-size:24px;color:#fff;'>② Матрица Серверов и Релеев (Static IP / Tor / Blind Relay)</h1>
+                    <h1 style='margin:6px 0 4px 0;font-size:24px;color:#fff;'>Серверы и релеи (Static IP / Tor / Blind Relay)</h1>
                     <p class='slogan-sub'>«Создан быть невидимым. Спроектирован быть непобедимым.» Стартовые Static-IP узлы работают сразу без Tor, а Слепой Релей скрывает ваш IP от целевого сервера.</p>
                     <ul style='list-style:none;padding:0;margin:14px 0;'>{servers}</ul>
                     <form action='/action' method='get' style='display:flex;gap:8px;margin:10px 0;'>
@@ -3477,8 +3543,8 @@ impl DesktopGuiServer {
       <span class='brand-logo'>AEGIS // AURORA</span>
       <strong>{title}</strong>
       <div class='steps'>
-        <a class='{s1}' href='/action?cmd=step_account'>① Сейф Аккаунта</a>
-        <a class='{s2}' href='/action?cmd=step_servers'>② Матрица Серверов и Релеев ({srv_ep})</a>
+        <a class='{s1}' href='/action?cmd=step_account'>Сейф аккаунта</a>
+        <a class='{s2}' href='/action?cmd=step_servers'>Серверы и релеи ({srv_ep})</a>
         <a class='{s3}' href='/action?cmd=step_chats'>③ Защищённые Контуры и Капсулы</a>
       </div>
     </div>
@@ -3538,17 +3604,33 @@ impl DesktopGuiServer {
             }
         };
         let s = self.state.strings();
-        let lang = if self.state.locale == Locale::En { "en" } else { "ru" };
+        let lang = if self.state.locale == Locale::En {
+            "en"
+        } else {
+            "ru"
+        };
+        let theme = match self.state.ui_theme.as_str() {
+            "dark" => "dark",
+            "light" => "light",
+            _ => "system",
+        };
+        let font_scale = match self.state.font_scale.as_str() {
+            "compact" => "compact",
+            "large" => "large",
+            _ => "normal",
+        };
         format!(
             "<!DOCTYPE html>
-<html lang='{lang}'>
+<html lang='{lang}' data-theme='{theme}' data-font='{font_scale}'>
 <head>
 <meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
+<meta name='color-scheme' content='dark light'>
 <title>{title}</title>
 <style>{DESKTOP_CSS}</style>
 </head>
 <body>
+{ICON_SPRITE}
 {body}
 </body>
 </html>",
@@ -3643,7 +3725,9 @@ impl DesktopGuiServer {
                 .state
                 .account_verifiers
                 .last()
-                .map_or(self.state.onboarding_nickname.as_str(), |(n, _, _)| n.as_str());
+                .map_or(self.state.onboarding_nickname.as_str(), |(n, _, _)| {
+                    n.as_str()
+                });
             format!(
                 "<form class='form-stack' action='/action' method='get'>
         <input type='hidden' name='cmd' value='signin_account'>
@@ -3711,7 +3795,7 @@ impl DesktopGuiServer {
       <div class='eyebrow'>{step_label}</div>
       <h2>{heading}</h2>
       <p class='lead'>{lead}</p>
-      <div class='seg-row' style='grid-template-columns:repeat(2,1fr);margin-bottom:12px;'>
+      <div class='seg-row two' style='margin-bottom:12px;'>
         <a class='seg {reg_active}' href='/action?cmd=auth_mode_register'>{tab_reg}</a>
         <a class='seg {login_active}' href='/action?cmd=auth_mode_login'>{tab_login}</a>
       </div>
@@ -3724,17 +3808,32 @@ impl DesktopGuiServer {
                 "Мессенджер без номера телефона и почты.",
                 "Messenger with no phone number or email required."
             ),
-            pt1 = self.tr("Регистрация и вход только по логину и паролю", "Register and sign in with username and password only"),
-            pt2 = self.tr("Доступ к чатам только после авторизации", "Chat access requires an authenticated account"),
-            pt3 = self.tr("Скрытый Anycast-туннель без раскрытия IP вашего ПК", "Hidden Anycast tunnel without exposing your PC's IP"),
+            pt1 = self.tr(
+                "Регистрация и вход только по логину и паролю",
+                "Register and sign in with username and password only"
+            ),
+            pt2 = self.tr(
+                "Доступ к чатам только после авторизации",
+                "Chat access requires an authenticated account"
+            ),
+            pt3 = self.tr(
+                "Скрытый Anycast-туннель без раскрытия IP вашего ПК",
+                "Hidden Anycast tunnel without exposing your PC's IP"
+            ),
             steps = Self::render_step_dots(1),
             actions = self.render_top_actions(),
             step_label = self.tr("Шаг 1 из 3", "Step 1 of 3"),
-            heading = self.tr("① Сейф Аккаунта", "① Account Vault"),
+            heading = self.tr("Сейф аккаунта", "Account vault"),
             lead = if is_login {
-                self.tr("Войдите в свой аккаунт Aegis.", "Sign in to your Aegis account.")
+                self.tr(
+                    "Войдите в свой аккаунт Aegis.",
+                    "Sign in to your Aegis account.",
+                )
             } else {
-                self.tr("Зарегистрируйте аккаунт для доступа к чатам.", "Register an account to access chats.")
+                self.tr(
+                    "Зарегистрируйте аккаунт для доступа к чатам.",
+                    "Register an account to access chats.",
+                )
             },
             reg_active = reg_active,
             login_active = login_active,
@@ -3752,16 +3851,22 @@ impl DesktopGuiServer {
                 continue;
             }
             let active = idx == self.state.selected_server_index;
-            let badge = match srv.badge {
-                ServerBadge::OfficialDoubleCheck => self.tr(
-                    "✓✓ Доверенный · Статический Anycast IP (скрывает IP сервера)",
-                    "✓✓ Trusted · Static Anycast IP (hides server IP)",
+            let (badge, badge_icon) = match srv.badge {
+                ServerBadge::OfficialDoubleCheck => (
+                    self.tr(
+                        "Доверенный · статический Anycast IP",
+                        "Trusted · static Anycast IP",
+                    ),
+                    icon("check"),
                 ),
-                ServerBadge::VerifiedSingleCheck => self.tr(
-                    "✓ Доверенный туннель (скрывает IP сервера)",
-                    "✓ Trusted tunnel (hides server IP)",
+                ServerBadge::VerifiedSingleCheck => (
+                    self.tr("Доверенный туннель", "Trusted tunnel"),
+                    icon("check"),
                 ),
-                ServerBadge::CommunityUnverified => self.tr("Пользовательский узел", "Custom node"),
+                ServerBadge::CommunityUnverified => (
+                    self.tr("Пользовательский узел", "Custom node"),
+                    String::new(),
+                ),
             };
             let switch_cls = if active { "on" } else { "" };
             servers_html.push_str(&format!(
@@ -3769,7 +3874,7 @@ impl DesktopGuiServer {
   <div class='server-card-head'>
     <div>
       <div class='server-name'>{endpoint}</div>
-      <div class='server-badge'>{badge}</div>
+      <div class='server-badge'>{badge_icon}{badge}</div>
     </div>
     <span class='switch {switch_cls}'></span>
   </div>
@@ -3777,11 +3882,15 @@ impl DesktopGuiServer {
                 active_cls = if active { "active" } else { "" },
                 endpoint = html_escape(&srv.endpoint),
                 badge = badge,
+                badge_icon = badge_icon,
                 idx = idx,
                 switch_cls = switch_cls,
             ));
         }
-        let is_killed = matches!(self.state.shield_evaluation.status, NetworkRouteStatus::Offline);
+        let is_killed = matches!(
+            self.state.shield_evaluation.status,
+            NetworkRouteStatus::Offline
+        );
         let kill_on = if is_killed { "on" } else { "" };
         let kill_href = if is_killed {
             "/action?cmd=route_direct"
@@ -3821,7 +3930,7 @@ impl DesktopGuiServer {
         </div>
       </form>
       <div class='toggle-list'>
-        <a class='toggle-row' href='{kill_href}'><span>{kill_lbl}</span><span class='switch {kill_on}'></span></a>
+        <a class='toggle-row' href='{kill_href}'><span class='toggle-label'>{shield_icon}{kill_lbl}</span><span class='switch {kill_on}'></span></a>
       </div>
       <details class='panel'>
         <summary>{proxy_sum}</summary>
@@ -3853,7 +3962,7 @@ impl DesktopGuiServer {
             steps = Self::render_step_dots(2),
             actions = self.render_top_actions(),
             step_label = self.tr("Шаг 2 из 3", "Step 2 of 3"),
-            heading = self.tr("② Матрица Серверов и Релеев", "② Servers & Relays"),
+            heading = self.tr("Серверы и релеи", "Servers & relays"),
             lead = self.tr("Выберите доверенный узел из списка или укажите свой.", "Select a trusted node from the list or enter your own."),
             status = self.render_status_banner(),
             trusted_title = self.tr("Доверенные серверы (активны)", "Trusted servers (online)"),
@@ -3864,6 +3973,7 @@ impl DesktopGuiServer {
             kill_href = kill_href,
             kill_lbl = self.tr("Блокировка сети (Kill Switch)", "Network Lock (Kill Switch)"),
             kill_on = kill_on,
+            shield_icon = icon("shield"),
             proxy_sum = self.tr("SOCKS5 прокси и релей", "SOCKS5 proxy & relay"),
             relay_ph = self.tr("Релей (host:port)", "Relay (host:port)"),
             save_relay_btn = self.tr("Сохранить релей", "Save relay"),
@@ -3877,25 +3987,27 @@ impl DesktopGuiServer {
     fn render_update_banner(&self) -> String {
         if let Some(ref dl_path) = self.state.downloaded_update_path {
             return format!(
-                "<div class='banner' style='background:#0f2e24;color:#6ee7a8;border-color:rgba(37,211,102,0.45);display:flex;justify-content:space-between;align-items:center;gap:10px;'>
-  <span>✅ {msg}: <code>{path}</code></span>
+                "<div class='banner update-ready'>
+  <span class='banner-text'>{check_icon}{msg}: <code>{path}</code></span>
   <a class='btn primary small' href='/action?cmd=apply_update'>{run_btn}</a>
 </div>",
-                msg = self.tr("Обновление автоматически скачано", "Update auto-downloaded"),
+                check_icon = icon("check"),
+                msg = self.tr("Обновление скачано", "Update downloaded"),
                 path = html_escape(dl_path),
-                run_btn = self.tr("Запустить обновление", "Launch update"),
+                run_btn = self.tr("Запустить", "Launch"),
             );
         }
         if let Some(ref ver) = self.state.latest_available_version {
             if ver != DesktopAppState::APP_VERSION {
                 return format!(
-                    "<div class='banner' style='background:#102a3b;color:#7dd3fc;border-color:rgba(56,189,248,0.45);display:flex;justify-content:space-between;align-items:center;gap:10px;'>
-  <span>🚀 {avail} <b>Aegis v{ver_esc}</b></span>
-  <a class='btn primary small' href='/action?cmd=download_update'>⬇ {dl_btn}</a>
+                    "<div class='banner update-available'>
+  <span class='banner-text'>{download_icon}{avail} <b>Aegis v{ver_esc}</b></span>
+  <a class='btn primary small' href='/action?cmd=download_update'>{dl_btn}</a>
 </div>",
-                    avail = self.tr("Доступно новое обновление", "New update available"),
+                    download_icon = icon("download"),
+                    avail = self.tr("Доступно обновление", "Update available"),
                     ver_esc = html_escape(ver),
-                    dl_btn = self.tr("Скачать и обновить", "Download & update"),
+                    dl_btn = self.tr("Скачать", "Download"),
                 );
             }
         }
@@ -3910,14 +4022,16 @@ impl DesktopGuiServer {
             if !clean_q.is_empty() {
                 chat_items.push_str(&format!(
                     "<a class='chat-item' href='/action?cmd=open_profile&amp;user={q_url}'>
-  <span class='avatar small'>👤</span>
+  <span class='avatar small'>{user_icon}</span>
   <span class='chat-item-meta'><span class='chat-item-name'>{prof_lbl} @{q_esc}</span><span class='chat-item-preview'>{prof_sub}</span></span>
 </a>
 <a class='chat-item' href='/action?cmd=open_dm&amp;user={q_url}'>
-  <span class='avatar small'>💬</span>
+  <span class='avatar small'>{chat_icon}</span>
   <span class='chat-item-meta'><span class='chat-item-name'>{write_lbl} @{q_esc}</span><span class='chat-item-preview'>{dm_sub}</span></span>
 </a>",
                     q_url = url_encode(clean_q),
+                    user_icon = icon("user"),
+                    chat_icon = icon("chat"),
                     prof_lbl = self.tr("Профиль", "Profile"),
                     q_esc = html_escape(clean_q),
                     prof_sub = self.tr("Открыть профиль по @юзу", "Open profile by @username"),
@@ -3926,16 +4040,18 @@ impl DesktopGuiServer {
                 ));
             }
             for (kind, slug, title) in &self.state.directory_results {
-                if slug.to_lowercase().contains(clean_q) || title.to_lowercase().contains(&search_filter) {
+                if slug.to_lowercase().contains(clean_q)
+                    || title.to_lowercase().contains(&search_filter)
+                {
                     let clean_title = DesktopAppState::strip_username_suffix(title);
-                    let (icon, kind_lbl, href) = match kind.as_str() {
+                    let (icon_name, kind_lbl, href) = match kind.as_str() {
                         "user" => (
-                            "👤",
+                            "user",
                             format!("{} · @{}", self.tr("Профиль", "Profile"), html_escape(slug)),
                             format!("/action?cmd=open_profile&amp;user={}", url_encode(slug)),
                         ),
                         "group" => (
-                            "👥",
+                            "users",
                             self.tr("Группа", "Group").to_owned(),
                             format!(
                                 "/action?cmd=open_dir_item&amp;kind=group&amp;slug={}&amp;title={}",
@@ -3944,7 +4060,7 @@ impl DesktopGuiServer {
                             ),
                         ),
                         _ => (
-                            "📢",
+                            "channel",
                             self.tr("Канал", "Channel").to_owned(),
                             format!(
                                 "/action?cmd=open_dir_item&amp;kind=channel&amp;slug={}&amp;title={}",
@@ -3955,11 +4071,11 @@ impl DesktopGuiServer {
                     };
                     chat_items.push_str(&format!(
                         "<a class='chat-item' href='{href}'>
-  <span class='avatar small'>{icon}</span>
+  <span class='avatar small'>{icon_html}</span>
   <span class='chat-item-meta'><span class='chat-item-name'>{title_esc}</span><span class='chat-item-preview'>{kind_lbl}</span></span>
 </a>",
                         href = href,
-                        icon = icon,
+                        icon_html = icon(icon_name),
                         title_esc = html_escape(&clean_title),
                         kind_lbl = kind_lbl,
                     ));
@@ -3970,21 +4086,25 @@ impl DesktopGuiServer {
             if !search_filter.is_empty()
                 && !c.title.to_lowercase().contains(&search_filter)
                 && !c.queue_tag.to_lowercase().contains(&search_filter)
-                && (c.is_locked || !c.messages.iter().any(|m| m.text.to_lowercase().contains(&search_filter)))
+                && (c.is_locked
+                    || !c
+                        .messages
+                        .iter()
+                        .any(|m| m.text.to_lowercase().contains(&search_filter)))
             {
                 continue;
             }
             let active = idx == self.state.active_chat_index && !self.state.profile_modal_open;
-            let icon = if c.is_local_saved_notes {
-                "★"
+            let icon_name = if c.is_local_saved_notes {
+                "star"
             } else if c.is_locked {
-                "🔒"
+                "lock"
             } else if c.queue_tag.starts_with("group://") {
-                "👥"
+                "users"
             } else if c.queue_tag.starts_with("channel://") {
-                "📢"
+                "channel"
             } else {
-                "💬"
+                "chat"
             };
             let clean_title = DesktopAppState::strip_username_suffix(&c.title);
             let preview = if c.is_locked {
@@ -3997,12 +4117,12 @@ impl DesktopGuiServer {
             };
             chat_items.push_str(&format!(
                 "<a class='chat-item {active_cls}' href='/action?cmd=select_chat&amp;idx={idx}'>
-  <span class='avatar small'>{icon}</span>
+  <span class='avatar small'>{icon_html}</span>
   <span class='chat-item-meta'><span class='chat-item-name'>{title}</span><span class='chat-item-preview'>{preview}</span></span>
 </a>",
                 active_cls = if active { "active" } else { "" },
                 idx = idx,
-                icon = icon,
+                icon_html = icon(icon_name),
                 title = html_escape(&clean_title),
                 preview = html_escape(&preview),
             ));
@@ -4018,24 +4138,53 @@ impl DesktopGuiServer {
         if let Some(chat) = active_chat {
             if chat.is_locked {
                 messages_html.push_str(&format!(
-                    "<div class='empty-state'><div class='empty-icon'>🔒</div><h3>{}</h3><p>{}</p></div>",
+                    "<div class='empty-state'><div class='empty-icon'>{}</div><h3>{}</h3><p>{}</p></div>",
+                    icon("lock"),
                     self.tr("Чат закрыт", "Chat is locked"),
                     self.tr("Введите PIN, чтобы открыть переписку.", "Enter PIN to unlock this conversation."),
                 ));
             } else {
+                let is_group = chat.queue_tag.starts_with("group://");
+                let chat_initial = DesktopAppState::strip_username_suffix(&chat.title)
+                    .trim()
+                    .chars()
+                    .next()
+                    .map_or_else(|| "A".to_owned(), |c| c.to_uppercase().to_string());
                 let mut shown = 0usize;
-                for m in &chat.messages {
-                    if !search_filter.is_empty() && !m.text.to_lowercase().contains(&search_filter) {
+                for (idx, m) in chat.messages.iter().enumerate() {
+                    if !search_filter.is_empty() && !m.text.to_lowercase().contains(&search_filter)
+                    {
                         continue;
                     }
                     shown = shown.saturating_add(1);
                     let side = if m.outgoing { "out" } else { "in" };
+                    let group_start = idx == 0 || chat.messages[idx - 1].outgoing != m.outgoing;
+                    let show_avatar = is_group
+                        && !m.outgoing
+                        && chat
+                            .messages
+                            .get(idx + 1)
+                            .is_none_or(|next| next.outgoing);
+                    let avatar = if show_avatar {
+                        format!(
+                            "<span class='message-avatar'>{}</span>",
+                            html_escape(&chat_initial)
+                        )
+                    } else {
+                        String::new()
+                    };
                     let ttl = m
                         .disappearing_ttl_secs
                         .map_or_else(String::new, |t| human_ttl_locale(t, is_en));
+                    let meta = if ttl.is_empty() {
+                        String::new()
+                    } else {
+                        format!("<div class='message-meta'>{ttl}</div>")
+                    };
                     let attachment = m.attachment.as_ref().map_or(String::new(), |a| {
                         format!(
-                            "<div class='attachment'>📷 {}{}</div>",
+                            "<div class='attachment'>{}{}{}</div>",
+                            icon("image"),
                             html_escape(&a.filename),
                             if a.consumed {
                                 self.tr(" · просмотрено", " · viewed")
@@ -4045,20 +4194,22 @@ impl DesktopGuiServer {
                         )
                     });
                     messages_html.push_str(&format!(
-                        "<div class='message-row {side}'>
+                        "<div class='message-row {side}{group_cls}'>
+  {avatar}
   <div class='bubble'>
     <div class='message-text'>{text}</div>
     {attachment}
-    <div class='message-meta'>{ttl}</div>
+    {meta}
   </div>
 </div>",
+                        group_cls = if group_start { " group-start" } else { "" },
                         text = html_escape(&m.text),
-                        ttl = ttl,
                     ));
                 }
                 if shown == 0 {
                     messages_html.push_str(&format!(
-                        "<div class='empty-state'><div class='empty-icon'>⌕</div><h3>{}</h3><p>{}</p></div>",
+                        "<div class='empty-state'><div class='empty-icon'>{}</div><h3>{}</h3><p>{}</p></div>",
+                        icon("search"),
                         self.tr("Ничего не найдено", "Nothing found"),
                         self.tr("Попробуйте изменить запрос.", "Try a different search query."),
                     ));
@@ -4066,7 +4217,8 @@ impl DesktopGuiServer {
             }
         } else {
             messages_html.push_str(&format!(
-                "<div class='empty-state'><div class='empty-icon'>💬</div><h3>{}</h3><p>{}</p></div>",
+                "<div class='empty-state'><div class='empty-icon'>{}</div><h3>{}</h3><p>{}</p></div>",
+                icon("chat"),
                 self.tr("Выберите чат", "Select a chat"),
                 self.tr("Слева — список ваших переписок.", "Your conversations are listed on the left."),
             ));
@@ -4078,25 +4230,33 @@ impl DesktopGuiServer {
         let (my_nick, my_name) = self.state.active_account_identity();
         let is_owner = self.state.is_owner_account();
         let extra_uzs = self.state.active_account_extra_usernames();
+        let profile_initial = my_name
+            .trim()
+            .chars()
+            .next()
+            .map_or_else(|| "A".to_owned(), |c| c.to_uppercase().to_string());
+
         let mut uz_badges = format!(
-            "<span class='chip' style='font-size:13px;padding:6px 12px;color:#6ee7a8;border-color:rgba(37,211,102,0.4);'>@{}</span>",
+            "<span class='chip accent'>@{}</span>",
             html_escape(&my_nick)
         );
         if is_owner {
             for ex in &extra_uzs {
                 uz_badges.push_str(&format!(
-                    " <span class='chip' style='font-size:13px;padding:6px 10px;'>@{ex_esc} <a href='/action?cmd=remove_extra_username&amp;uz={ex_url}' style='color:#ffb3ba;margin-left:6px;' title='{del_lbl}'>×</a></span>",
+                    " <span class='chip'>@{ex_esc} <a href='/action?cmd=remove_extra_username&amp;uz={ex_url}' title='{del_lbl}'>{x_icon}</a></span>",
                     ex_esc = html_escape(ex),
                     ex_url = url_encode(ex),
                     del_lbl = self.tr("Удалить @юз", "Remove @username"),
+                    x_icon = icon("x"),
                 ));
             }
         }
 
         let owner_badge_html = if is_owner {
             format!(
-                "<span class='chip' style='background:linear-gradient(135deg,#f59e0b,#eab308);color:#1a1002;border:none;font-weight:800;margin-left:8px;'>👑 {}</span>",
-                self.tr("Owner · Ключ устройства подтверждён", "Owner · Device Key Verified")
+                "<span class='chip accent'>{key_icon}{label}</span>",
+                key_icon = icon("key"),
+                label = self.tr("Owner · ключ устройства", "Owner · device key"),
             )
         } else {
             String::new()
@@ -4106,22 +4266,23 @@ impl DesktopGuiServer {
             format!(
                 "<form class='form-stack' action='/action' method='get'>
       <input type='hidden' name='cmd' value='add_extra_username'>
-      <label>👑 {extra_uz_lbl}</label>
+      <label>{extra_uz_lbl}</label>
       <div class='input-row'>
         <input type='text' name='uz' placeholder='{extra_uz_ph}' autocomplete='off' spellcheck='false'>
-        <button class='btn primary' type='submit'>+ {add_uz_btn}</button>
+        <button class='btn primary' type='submit'>{plus_icon}{add_uz_btn}</button>
       </div>
     </form>",
                 extra_uz_lbl = self.tr(
-                    "Дополнительные @юзы (привилегия Owner — можно сделать несколько)",
-                    "Additional @usernames (Owner privilege — add multiple)"
+                    "Дополнительные @юзы (привилегия Owner)",
+                    "Additional @usernames (Owner privilege)"
                 ),
                 extra_uz_ph = self.tr("@второй_юз (от 3 букв)", "@second_username (3+ chars)"),
-                add_uz_btn = self.tr("Добавить @юз", "Add @username"),
+                plus_icon = icon("plus"),
+                add_uz_btn = self.tr("Добавить", "Add"),
             )
         } else {
             format!(
-                "<div class='notice compact' style='margin-top:10px;'>👑 {}</div>",
+                "<div class='notice compact'>{}</div>",
                 self.tr(
                     "Несколько @юзов сейчас доступны только владельцу (Owner).",
                     "Multiple @usernames are currently available only to the Owner."
@@ -4129,92 +4290,89 @@ impl DesktopGuiServer {
             )
         };
 
-        let viewed_card = if let Some((ref p_name, ref p_uz, ref p_extras)) = self.state.viewed_user_profile {
-            let mut p_badges = format!(
-                "<span class='chip' style='font-size:13px;padding:6px 12px;color:#6ee7a8;'>@{}</span>",
-                html_escape(p_uz)
-            );
+        let viewed_card = if let Some((ref p_name, ref p_uz, ref p_extras)) =
+            self.state.viewed_user_profile
+        {
+            let mut p_badges = format!("<span class='chip accent'>@{}</span>", html_escape(p_uz));
             for ex in p_extras {
-                p_badges.push_str(&format!(
-                    " <span class='chip' style='font-size:13px;padding:6px 10px;'>@{}</span>",
-                    html_escape(ex)
-                ));
+                p_badges.push_str(&format!(" <span class='chip'>@{}</span>", html_escape(ex)));
             }
-            let peer_is_owner = p_uz.eq_ignore_ascii_case("owner") || p_uz.eq_ignore_ascii_case("ceo");
-            let peer_crown = if peer_is_owner { " 👑" } else { "" };
+            let peer_is_owner =
+                p_uz.eq_ignore_ascii_case("owner") || p_uz.eq_ignore_ascii_case("ceo");
+            let peer_crown = if peer_is_owner {
+                format!(
+                    "<span class='chip accent'>{}{}</span>",
+                    icon("key"),
+                    self.tr("Owner", "Owner")
+                )
+            } else {
+                String::new()
+            };
             format!(
-                "<div class='auth-card' style='margin:0 auto 16px;max-width:640px;'>
+                "<div class='profile-card'>
   <div class='eyebrow'>{peer_eyebrow}</div>
-  <div style='display:flex;align-items:center;gap:14px;margin:10px 0 14px;'>
-    <span class='avatar large'>👤</span>
+  <div class='profile-head'>
+    <span class='avatar large'>{user_icon}</span>
     <div>
-      <h2 style='margin:0;'>{p_name_esc}{peer_crown}</h2>
-      <div class='muted' style='margin-top:6px;'>{uz_lbl}: {p_badges}</div>
+      <div class='profile-name-row'><h2>{p_name_esc}</h2>{peer_crown}</div>
+      <div class='muted'>{uz_lbl}: {p_badges}</div>
     </div>
   </div>
   <div class='actions-row'>
-    <a class='btn primary' href='/action?cmd=open_dm&amp;user={p_uz_url}'>💬 {msg_btn}</a>
-    <a class='btn ghost' href='/action?cmd=open_my_profile'>{my_prof_btn}</a>
+    <a class='btn primary' href='/action?cmd=open_dm&amp;user={p_uz_url}'>{chat_icon}{msg_btn}</a>
+    <a class='btn ghost' href='/action?cmd=open_my_profile'>{user_icon}{my_prof_btn}</a>
   </div>
 </div>",
                 peer_eyebrow = self.tr("Профиль пользователя", "User Profile"),
                 p_name_esc = html_escape(p_name),
                 peer_crown = peer_crown,
-                uz_lbl = self.tr("Юзернейм (@юз)", "Username"),
+                uz_lbl = self.tr("Юзернейм", "Username"),
                 p_badges = p_badges,
                 p_uz_url = url_encode(p_uz),
-                msg_btn = self.tr("Написать сообщение", "Send message"),
+                msg_btn = self.tr("Написать", "Message"),
                 my_prof_btn = self.tr("Мой профиль", "My profile"),
+                user_icon = icon("user"),
+                chat_icon = icon("chat"),
             )
         } else {
             String::new()
         };
 
-        let auto_upd_on = if self.state.auto_download_updates { "on" } else { "" };
-        let push_on = if self.state.push_notifications_enabled { "on" } else { "" };
-        let sound_on = if self.state.sound_notifications_enabled { "on" } else { "" };
-        let anim_on = if self.state.animations_enabled { "on" } else { "" };
+        let auto_upd_on = if self.state.auto_download_updates {
+            "on"
+        } else {
+            ""
+        };
+        let push_on = if self.state.push_notifications_enabled {
+            "on"
+        } else {
+            ""
+        };
+        let sound_on = if self.state.sound_notifications_enabled {
+            "on"
+        } else {
+            ""
+        };
+        let anim_on = if self.state.animations_enabled {
+            "on"
+        } else {
+            ""
+        };
 
         let themes = [
-            ("cyber-neon", self.tr("🌌 Кибер-Неон", "🌌 Cyber Neon")),
-            ("emerald-monolith", self.tr("💎 Изумруд", "💎 Emerald")),
-            ("crimson-sunset", self.tr("🔥 Багровый Закат", "🔥 Crimson Sunset")),
-            ("royal-amethyst", self.tr("💜 Аметист", "💜 Amethyst")),
-            ("gold-sovereign", self.tr("👑 Золотой Owner", "👑 Gold Owner")),
-            ("oled-black", self.tr("🌑 Чистый OLED", "🌑 Pure OLED")),
+            ("system", self.tr("Системная", "System")),
+            ("dark", self.tr("Тёмная", "Dark")),
+            ("light", self.tr("Светлая", "Light")),
         ];
         let mut theme_btns = String::new();
         for (tid, tlabel) in themes {
-            let cls = if self.state.ui_theme == tid { "active" } else { "" };
+            let cls = if self.state.ui_theme == tid {
+                "active"
+            } else {
+                ""
+            };
             theme_btns.push_str(&format!(
                 "<a class='seg {cls}' href='/action?cmd=set_custom_theme&amp;theme={tid}'>{tlabel}</a>"
-            ));
-        }
-
-        let wallpapers = [
-            ("nebula", self.tr("🌌 Неон", "🌌 Nebula")),
-            ("grid", self.tr("🕸 Сетка", "🕸 Grid")),
-            ("dots", self.tr("✨ Матрица", "✨ Matrix")),
-            ("clean", self.tr("🌑 Чистый", "🌑 Clean")),
-        ];
-        let mut wp_btns = String::new();
-        for (wid, wlabel) in wallpapers {
-            let cls = if self.state.chat_wallpaper == wid { "active" } else { "" };
-            wp_btns.push_str(&format!(
-                "<a class='seg {cls}' href='/action?cmd=set_wallpaper&amp;wp={wid}'>{wlabel}</a>"
-            ));
-        }
-
-        let bubbles = [
-            ("modern", self.tr("💎 Градиент", "💎 Gradient")),
-            ("neon", self.tr("⚡ Неоновая рамка", "⚡ Neon Border")),
-            ("glass", self.tr("🫧 Стекло", "🫧 Glass")),
-        ];
-        let mut bub_btns = String::new();
-        for (bid, blabel) in bubbles {
-            let cls = if self.state.bubble_style == bid { "active" } else { "" };
-            bub_btns.push_str(&format!(
-                "<a class='seg {cls}' href='/action?cmd=set_bubble_style&amp;style={bid}'>{blabel}</a>"
             ));
         }
 
@@ -4225,42 +4383,38 @@ impl DesktopGuiServer {
         ];
         let mut font_btns = String::new();
         for (fid, flabel) in fonts {
-            let cls = if self.state.font_scale == fid { "active" } else { "" };
+            let cls = if self.state.font_scale == fid {
+                "active"
+            } else {
+                ""
+            };
             font_btns.push_str(&format!(
                 "<a class='seg {cls}' href='/action?cmd=set_font_scale&amp;scale={fid}'>{flabel}</a>"
             ));
         }
 
-        let emojis = ["👑", "⚡", "🔥", "💎", "🛡", "👻"];
-        let mut emoji_btns = String::new();
-        for em in emojis {
-            let cls = if self.state.profile_status_emoji == em { "active" } else { "" };
-            emoji_btns.push_str(&format!(
-                "<a class='seg {cls}' href='/action?cmd=set_status_emoji&amp;emoji={em_url}'>{em}</a>",
-                cls = cls,
-                em_url = url_encode(em),
-                em = em
-            ));
-        }
+        let bio_display = if self.state.profile_bio.trim().is_empty() {
+            self.tr("Статус не задан", "No status set").to_owned()
+        } else {
+            self.state.profile_bio.clone()
+        };
 
         format!(
-            "<div style='flex:1;overflow-y:auto;padding:18px;'>
+            "<div class='profile-scroll'>
   {viewed_card}
-  <div class='auth-card' style='margin:0 auto 16px;max-width:640px;'>
+  <div class='profile-card'>
     <div class='eyebrow'>{my_prof_hdr}</div>
-    <div style='display:flex;align-items:center;gap:14px;margin:10px 0 14px;'>
-      <span class='avatar large'>{status_emoji}</span>
-      <div>
-        <div style='display:flex;align-items:center;flex-wrap:wrap;'>
-          <h2 style='margin:0;'>{my_name_esc}</h2>
+    <div class='profile-head'>
+      <span class='avatar large'>{profile_initial}</span>
+      <div style='min-width:0;'>
+        <div class='profile-name-row'>
+          <h2>{my_name_esc}</h2>
           {owner_badge_html}
         </div>
-        <div class='muted' style='margin-top:4px;'>{bio_esc}</div>
-        <div class='muted' style='margin-top:6px;'>{my_uz_lbl}: {uz_badges}</div>
+        <div class='muted'>{bio_esc}</div>
+        <div class='muted'>{my_uz_lbl}: {uz_badges}</div>
       </div>
     </div>
-    <div class='section-title' style='margin-top:8px;'>{emoji_lbl}</div>
-    <div class='seg-row' style='grid-template-columns:repeat(6,1fr);margin-bottom:10px;'>{emoji_btns}</div>
     <form class='form-stack' action='/action' method='get'>
       <input type='hidden' name='cmd' value='set_display_name'>
       <label>{name_lbl}</label>
@@ -4288,75 +4442,64 @@ impl DesktopGuiServer {
     {extra_uz_section}
   </div>
 
-  <div class='auth-card' style='margin:0 auto 16px;max-width:640px;'>
-    <div class='eyebrow'>🎨 {cust_hdr}</div>
-    <div class='section-title' style='margin-top:10px;'>{theme_lbl}</div>
-    <div class='seg-row' style='grid-template-columns:repeat(3,1fr);'>{theme_btns}</div>
-    <div class='section-title' style='margin-top:12px;'>{wp_lbl}</div>
-    <div class='seg-row' style='grid-template-columns:repeat(4,1fr);'>{wp_btns}</div>
-    <div class='section-title' style='margin-top:12px;'>{bub_lbl}</div>
-    <div class='seg-row' style='grid-template-columns:repeat(3,1fr);'>{bub_btns}</div>
-    <div class='section-title' style='margin-top:12px;'>{font_lbl}</div>
-    <div class='seg-row' style='grid-template-columns:repeat(3,1fr);'>{font_btns}</div>
+  <div class='profile-card'>
+    <div class='eyebrow'>{cust_hdr}</div>
+    <div class='section-title'>{theme_lbl}</div>
+    <div class='seg-row'>{theme_btns}</div>
+    <div class='section-title'>{font_lbl}</div>
+    <div class='seg-row'>{font_btns}</div>
   </div>
 
-  <div class='auth-card' style='margin:0 auto 16px;max-width:640px;'>
-    <div class='eyebrow'>🔔 {notif_hdr} · v{ver}</div>
+  <div class='profile-card'>
+    <div class='eyebrow'>{notif_hdr}</div>
     <div class='toggle-list'>
-      <a class='toggle-row' href='/action?cmd=toggle_push_notifications'><span>🔔 {push_lbl}</span><span class='switch {push_on}'></span></a>
-      <a class='toggle-row' href='/action?cmd=toggle_sound_notifications'><span>🔊 {sound_lbl}</span><span class='switch {sound_on}'></span></a>
-      <a class='toggle-row' href='/action?cmd=toggle_animations'><span>✨ {anim_lbl}</span><span class='switch {anim_on}'></span></a>
-      <a class='toggle-row' href='/action?cmd=toggle_auto_update'><span>🔄 {auto_upd_lbl}</span><span class='switch {auto_upd_on}'></span></a>
+      <a class='toggle-row' href='/action?cmd=toggle_push_notifications'><span class='toggle-label'>{bell_icon}{push_lbl}</span><span class='switch {push_on}'></span></a>
+      <a class='toggle-row' href='/action?cmd=toggle_sound_notifications'><span class='toggle-label'>{volume_icon}{sound_lbl}</span><span class='switch {sound_on}'></span></a>
+      <a class='toggle-row' href='/action?cmd=toggle_animations'><span class='toggle-label'>{motion_icon}{anim_lbl}</span><span class='switch {anim_on}'></span></a>
+      <a class='toggle-row' href='/action?cmd=toggle_auto_update'><span class='toggle-label'>{refresh_icon}{auto_upd_lbl}</span><span class='switch {auto_upd_on}'></span></a>
     </div>
-    <div class='actions-row wrap' style='margin-top:10px;'>
-      <a class='btn primary small' href='/action?cmd=check_update'>🔄 {chk_upd_btn}</a>
-      <a class='btn ghost small' href='/action?cmd=download_update'>⬇ {dl_upd_btn}</a>
-      <a class='btn ghost small' href='/action?cmd=step_chats'>← {back_chats_btn}</a>
+    <div class='actions-row wrap'>
+      <a class='btn primary small' href='/action?cmd=check_update'>{refresh_icon}{chk_upd_btn}</a>
+      <a class='btn ghost small' href='/action?cmd=download_update'>{download_icon}{dl_upd_btn}</a>
+      <a class='btn ghost small' href='/action?cmd=step_chats'>{back_icon}{back_chats_btn}</a>
     </div>
   </div>
 
-  <div class='auth-card' style='margin:0 auto 16px;max-width:640px;'>
-    <div class='eyebrow'>🔍 {lookup_hdr}</div>
+  <div class='profile-card'>
+    <div class='eyebrow'>{lookup_hdr}</div>
     <form class='form-stack' action='/action' method='get'>
       <input type='hidden' name='cmd' value='open_profile'>
       <div class='input-row'>
         <input type='text' name='user' placeholder='{lookup_ph}' autocomplete='off' spellcheck='false'>
-        <button class='btn primary' type='submit'>{lookup_btn}</button>
+        <button class='btn primary' type='submit'>{search_icon}{lookup_btn}</button>
       </div>
     </form>
   </div>
 </div>",
             viewed_card = viewed_card,
-            my_prof_hdr = self.tr("Мой профиль и настройки", "My Profile & Settings"),
-            status_emoji = html_escape(&self.state.profile_status_emoji),
+            my_prof_hdr = self.tr("Мой профиль", "My Profile"),
+            profile_initial = html_escape(&profile_initial),
             my_name_esc = html_escape(&my_name),
             owner_badge_html = owner_badge_html,
-            bio_esc = html_escape(&self.state.profile_bio),
+            bio_esc = html_escape(&bio_display),
             my_nick_esc = html_escape(&my_nick),
             my_uz_lbl = self.tr("Мои @юзы", "My @usernames"),
             uz_badges = uz_badges,
-            emoji_lbl = self.tr("Значок статуса в профиле", "Profile status badge"),
-            emoji_btns = emoji_btns,
             name_lbl = self.tr("Ник (отображается без @юза)", "Display Name (shown without @username)"),
             name_ph = self.tr("Ваш ник", "Your display name"),
             save_btn = self.tr("Сохранить", "Save"),
             bio_lbl = self.tr("О себе / Статус", "Bio / Status"),
             bio_ph = self.tr("Напишите статус о себе...", "Write a short bio..."),
-            main_uz_lbl = self.tr("Основной @юз (любой от 3 букв)", "Primary @username (any 3+ chars)"),
+            main_uz_lbl = self.tr("Основной @юз (от 3 букв)", "Primary @username (3+ chars)"),
             uz_ph = self.tr("@юз (от 3 символов)", "@username (3+ chars)"),
             change_uz_btn = self.tr("Изменить @юз", "Change @username"),
             extra_uz_section = extra_uz_section,
-            cust_hdr = self.tr("Лютая кастомизация интерфейса", "Deep UI Customization"),
-            theme_lbl = self.tr("Цветовая тема", "Color Theme"),
+            cust_hdr = self.tr("Оформление", "Appearance"),
+            theme_lbl = self.tr("Тема", "Theme"),
             theme_btns = theme_btns,
-            wp_lbl = self.tr("Фон чата", "Chat Wallpaper"),
-            wp_btns = wp_btns,
-            bub_lbl = self.tr("Стиль пузырей сообщений", "Message Bubble Style"),
-            bub_btns = bub_btns,
-            font_lbl = self.tr("Размер текста", "Font Size"),
+            font_lbl = self.tr("Размер текста", "Font size"),
             font_btns = font_btns,
-            notif_hdr = self.tr("Уведомления, анимации и автообновление", "Notifications, Animations & Auto-Update"),
-            ver = DesktopAppState::APP_VERSION,
+            notif_hdr = self.tr("Уведомления и обновления", "Notifications & Updates"),
             push_lbl = self.tr("Пуш-уведомления о новых сообщениях", "Push notifications for new messages"),
             push_on = push_on,
             sound_lbl = self.tr("Звук уведомлений", "Notification sound"),
@@ -4369,8 +4512,15 @@ impl DesktopGuiServer {
             dl_upd_btn = self.tr("Скачать обновление", "Download update"),
             back_chats_btn = self.tr("К чатам", "Back to chats"),
             lookup_hdr = self.tr("Открыть профиль по @юзу", "Open profile by @username"),
-            lookup_ph = self.tr("Введите @юз человека (напр. @topxir)", "Enter @username (e.g. @topxir)"),
-            lookup_btn = self.tr("Открыть профиль", "Open profile"),
+            lookup_ph = self.tr("Введите @юз (напр. @topxir)", "Enter @username (e.g. @topxir)"),
+            lookup_btn = self.tr("Открыть", "Open"),
+            bell_icon = icon("bell"),
+            volume_icon = icon("volume"),
+            motion_icon = icon("clock"),
+            refresh_icon = icon("refresh"),
+            download_icon = icon("download"),
+            back_icon = icon("arrow-left"),
+            search_icon = icon("search"),
         )
     }
 
@@ -4381,9 +4531,12 @@ impl DesktopGuiServer {
         let raw_chat_title = active_chat.map_or(default_chat_title, |c| c.title.as_str());
         let clean_chat_title = DesktopAppState::strip_username_suffix(raw_chat_title);
         let chat_title = clean_chat_title.as_str();
+        let chat_icon = icon(chat_icon_for(chat_title));
         let chat_locked = active_chat.is_some_and(|c| c.is_locked);
         let is_saved_notes = active_chat.is_some_and(|c| c.is_local_saved_notes);
-        let active_ttl = active_chat.and_then(|c| c.default_disappearing_ttl_secs).unwrap_or(0);
+        let active_ttl = active_chat
+            .and_then(|c| c.default_disappearing_ttl_secs)
+            .unwrap_or(0);
 
         let chat_items = self.render_chat_list_items_html();
         let messages_html = self.render_messages_list_html();
@@ -4403,10 +4556,14 @@ impl DesktopGuiServer {
             String::new()
         };
 
-        let leak_modal = self.state.leak_guard_modal.as_ref().map_or(String::new(), |modal| {
-            format!(
-                "<div class='modal-card'>
-  <div class='modal-title'>{title}</div>
+        let leak_modal = self
+            .state
+            .leak_guard_modal
+            .as_ref()
+            .map_or(String::new(), |modal| {
+                format!(
+                    "<div class='modal-card'>
+  <div class='modal-title'>{warning_icon}{title}</div>
   <p>{desc} ({count}).</p>
   <div class='code-block'>{redacted}</div>
   <div class='actions-row'>
@@ -4414,25 +4571,30 @@ impl DesktopGuiServer {
     <a class='btn danger' href='/action?cmd=leak_force'>{force}</a>
   </div>
 </div>",
-                title = html_escape(s.leak_guard_modal_title),
-                desc = self.tr("Обнаружены личные данные", "Sensitive data detected"),
-                count = modal.warnings.len(),
-                redacted = html_escape(&modal.redacted_preview),
-                mask = html_escape(s.leak_guard_mask_btn),
-                force = html_escape(s.leak_guard_send_anyway_btn),
-            )
-        });
+                    warning_icon = icon("warning"),
+                    title = html_escape(s.leak_guard_modal_title),
+                    desc = self.tr("Обнаружены личные данные", "Sensitive data detected"),
+                    count = modal.warnings.len(),
+                    redacted = html_escape(&modal.redacted_preview),
+                    mask = html_escape(s.leak_guard_mask_btn),
+                    force = html_escape(s.leak_guard_send_anyway_btn),
+                )
+            });
 
         let key_change = self.state.key_change_warning.as_ref().map_or(String::new(), |_| {
             format!(
-                "<div class='banner warn'><b>{}</b> <a href='/action?cmd=ack_key_change'>{}</a></div>",
+                "<div class='banner warn'><span class='banner-text'>{warning_icon}<b>{}</b></span><a href='/action?cmd=ack_key_change'>{}</a></div>",
                 self.tr("Ключ собеседника изменился.", "Contact key has changed."),
                 self.tr("Подтвердить", "Approve"),
+                warning_icon = icon("warning"),
             )
         });
 
         let accounts_html = if self.state.accounts.profiles.is_empty() {
-            format!("<div class='muted'>{}</div>", self.tr("Профиль не выбран", "No profile selected"))
+            format!(
+                "<div class='muted'>{}</div>",
+                self.tr("Профиль не выбран", "No profile selected")
+            )
         } else {
             self.state
                 .accounts
@@ -4451,13 +4613,17 @@ impl DesktopGuiServer {
                         } else {
                             ""
                         },
-                        name = html_escape(&DesktopAppState::strip_username_suffix(&acc.display_name)),
+                        name =
+                            html_escape(&DesktopAppState::strip_username_suffix(&acc.display_name)),
                     )
                 })
                 .collect()
         };
 
-        let is_killed = matches!(self.state.shield_evaluation.status, NetworkRouteStatus::Offline);
+        let is_killed = matches!(
+            self.state.shield_evaluation.status,
+            NetworkRouteStatus::Offline
+        );
         let kill_on = if is_killed { "on" } else { "" };
         let kill_href = if is_killed {
             "/action?cmd=route_direct"
@@ -4479,30 +4645,38 @@ impl DesktopGuiServer {
         } else if active_tag.starts_with("channel://") {
             self.tr("Публичный канал", "Public channel")
         } else {
-            self.tr("Личный чат · нажмите для открытия профиля", "Direct chat · click to open profile")
+            self.tr(
+                "Личный чат · нажмите для открытия профиля",
+                "Direct chat · click to open profile",
+            )
         };
-        let ping_badge = format!("<span class='ping-slot'>{}</span>", self.render_ping_badge());
+        let ping_badge = format!(
+            "<span class='ping-slot'>{}</span>",
+            self.render_ping_badge()
+        );
         let is_channel = active_tag.starts_with("channel://");
         let is_owner = self.state.is_owner_account();
         let composer_html = if chat_locked || self.state.profile_modal_open {
             String::new()
         } else if is_channel && !is_owner {
             format!(
-                "<div class='composer' style='justify-content:center;color:var(--muted);font-weight:600;padding:14px;'>👑 {}</div>",
+                "<div class='composer' style='justify-content:center;color:var(--muted);font-size:var(--fs-secondary);'>{owner_icon}{}</div>",
                 self.tr(
                     "Канал Owner · писать сообщения может только владелец",
                     "Owner Channel · only the Owner can post messages"
-                )
+                ),
+                owner_icon = icon("key"),
             )
         } else {
             format!(
                 "<form class='composer' action='/action' method='get'>
       <input type='hidden' name='cmd' value='send_text'>
       <input id='msg-input' class='composer-input' type='text' name='text' placeholder='{msg_ph}' autocomplete='off' autofocus>
-      <button class='send-btn' type='submit' title='{send_tip}'>➤</button>
+      <button class='send-btn' type='submit' title='{send_tip}'>{send_icon}</button>
     </form>",
                 msg_ph = self.tr("Написать сообщение...", "Write a message..."),
                 send_tip = self.tr("Отправить", "Send"),
+                send_icon = icon("send"),
             )
         };
 
@@ -4519,13 +4693,25 @@ impl DesktopGuiServer {
             )
         };
 
-        let nav_chats_cls = if self.state.profile_modal_open { "" } else { "active" };
-        let nav_prof_cls = if self.state.profile_modal_open { "active" } else { "" };
-        let anim_cls = if self.state.animations_enabled { "anim-on" } else { "no-anim" };
+        let nav_chats_cls = if self.state.profile_modal_open {
+            ""
+        } else {
+            "active"
+        };
+        let nav_prof_cls = if self.state.profile_modal_open {
+            "active"
+        } else {
+            ""
+        };
+        let anim_cls = if self.state.animations_enabled {
+            "anim-on"
+        } else {
+            "no-anim"
+        };
         let channel_creator_html = if is_owner {
             format!(
                 "<details class='new-chat'>
-      <summary>📢 {ch_sum}</summary>
+      <summary>{channel_icon}{ch_sum}</summary>
       <form class='form-stack' action='/action' method='get'>
         <input type='hidden' name='cmd' value='new_channel_easy'>
         <input type='text' name='title' placeholder='{ch_title_ph}' autocomplete='off'>
@@ -4533,6 +4719,7 @@ impl DesktopGuiServer {
         <button class='btn primary' type='submit'>{ch_btn}</button>
       </form>
     </details>",
+                channel_icon = icon("channel"),
                 ch_sum = self.tr("Создать канал (Owner)", "Create channel (Owner)"),
                 ch_title_ph = self.tr("Название канала", "Channel title"),
                 ch_slug_ph = self.tr("@юз канала (напр. @owner)", "@channel_tag (e.g. @owner)"),
@@ -4543,7 +4730,7 @@ impl DesktopGuiServer {
         };
 
         format!(
-            "<div class='app {anim_cls}' data-theme='{ui_theme}' data-wallpaper='{chat_wp}' data-bubble='{bub_style}' data-font='{font_scale}'>
+            "<div class='app {anim_cls}'>
   <div id='push-toast-box' class='push-toast-box'></div>
   <aside class='sidebar'>
     <div class='sidebar-head'>
@@ -4558,7 +4745,7 @@ impl DesktopGuiServer {
     </div>
     <div id='chat-list-box' class='chat-list'>{chat_items}</div>
     <details class='new-chat'>
-      <summary>💬 {dm_sum}</summary>
+      <summary>{chat_icon_sm}{dm_sum}</summary>
       <form class='form-stack' action='/action' method='get'>
         <input type='hidden' name='cmd' value='open_dm'>
         <input type='text' name='user' placeholder='{dm_user_ph}' autocomplete='off' spellcheck='false'>
@@ -4566,7 +4753,7 @@ impl DesktopGuiServer {
       </form>
     </details>
     <details class='new-chat'>
-      <summary>👥 {grp_sum}</summary>
+      <summary>{users_icon}{grp_sum}</summary>
       <form class='form-stack' action='/action' method='get'>
         <input type='hidden' name='cmd' value='new_group_easy'>
         <input type='text' name='title' placeholder='{grp_title_ph}' autocomplete='off'>
@@ -4576,14 +4763,14 @@ impl DesktopGuiServer {
     </details>
     {channel_creator_html}
     <nav class='sidebar-nav'>
-      <a class='nav-item {nav_chats_cls}' href='/action?cmd=step_chats'><span>💬</span>{nav_chats}</a>
-      <a class='nav-item' href='/action?cmd=step_servers'><span>🌐</span>{nav_servers}</a>
-      <a class='nav-item {nav_prof_cls}' href='/action?cmd=open_my_profile'><span>👤</span>{nav_account}</a>
+      <a class='nav-item {nav_chats_cls}' href='/action?cmd=step_chats'>{chat_icon_sm}{nav_chats}</a>
+      <a class='nav-item' href='/action?cmd=step_servers'>{globe_icon}{nav_servers}</a>
+      <a class='nav-item {nav_prof_cls}' href='/action?cmd=open_my_profile'>{user_icon}{nav_account}</a>
     </nav>
   </aside>
   <main class='main'>
     <header class='chat-head'>
-      <a href='/action?cmd=open_active_chat_profile' style='display:flex;align-items:center;gap:12px;flex:1;min-width:0;'>
+      <a href='/action?cmd=open_active_chat_profile'>
         <span class='avatar'>{chat_icon}</span>
         <div class='chat-head-meta'>
           <div class='chat-title'>{chat_title}</div>
@@ -4592,9 +4779,9 @@ impl DesktopGuiServer {
       </a>
       <div class='chat-actions'>
         {ping_badge}
-        <a class='icon-btn' href='/action?cmd=open_my_profile' title='{prof_tip}'>🎨</a>
-        <a class='icon-btn' href='/action?cmd=sync_remote' title='{sync_tip}'>⟳</a>
-        <a class='icon-btn' href='/action?cmd=toggle_chat_pin' title='{pin_tip}'>🔒</a>
+        <a class='icon-btn' href='/action?cmd=open_my_profile' title='{prof_tip}'>{settings_icon}</a>
+        <a class='icon-btn' href='/action?cmd=sync_remote' title='{sync_tip}'>{refresh_icon}</a>
+        <a class='icon-btn' href='/action?cmd=toggle_chat_pin' title='{pin_tip}'>{lock_icon}</a>
       </div>
     </header>
     <div id='update-slot'>{update_banner}</div>
@@ -4608,18 +4795,18 @@ impl DesktopGuiServer {
       <span class='avatar large'>{chat_icon}</span>
       <h3>{chat_title}</h3>
       <div class='muted'>{chat_sub}</div>
-      <div class='actions-row wrap' style='justify-content:center;margin-top:8px;'>
-        <a class='btn ghost small' href='/action?cmd=open_active_chat_profile'>👤 {open_prof_btn}</a>
-        <a class='btn ghost small' href='/action?cmd=open_my_profile'>🎨 {my_prof_btn}</a>
+      <div class='actions-row wrap'>
+        <a class='btn ghost small' href='/action?cmd=open_active_chat_profile'>{user_icon}{open_prof_btn}</a>
+        <a class='btn ghost small' href='/action?cmd=open_my_profile'>{settings_icon}{my_prof_btn}</a>
       </div>
     </div>
     <div class='panel'>
       <div class='section-title'>{sec_route_title}</div>
       <div class='toggle-list'>
-        <a class='toggle-row' href='/action?cmd=toggle_push_notifications'><span>🔔 {push_short_lbl}</span><span class='switch {push_on_cls}'></span></a>
-        <a class='toggle-row' href='/action?cmd=toggle_animations'><span>✨ {anim_short_lbl}</span><span class='switch {anim_on_cls}'></span></a>
-        <a class='toggle-row' href='/action?cmd=toggle_chat_pin'><span>{chat_pin_lbl}</span><span class='switch {lock_on}'></span></a>
-        <a class='toggle-row' href='{kill_href}'><span>{kill_lbl}</span><span class='switch {kill_on}'></span></a>
+        <a class='toggle-row' href='/action?cmd=toggle_push_notifications'><span class='toggle-label'>{bell_icon}{push_short_lbl}</span><span class='switch {push_on_cls}'></span></a>
+        <a class='toggle-row' href='/action?cmd=toggle_animations'><span class='toggle-label'>{motion_icon}{anim_short_lbl}</span><span class='switch {anim_on_cls}'></span></a>
+        <a class='toggle-row' href='/action?cmd=toggle_chat_pin'><span class='toggle-label'>{lock_icon}{chat_pin_lbl}</span><span class='switch {lock_on}'></span></a>
+        <a class='toggle-row' href='{kill_href}'><span class='toggle-label'>{shield_icon}{kill_lbl}</span><span class='switch {kill_on}'></span></a>
       </div>
     </div>
     <div class='panel'>
@@ -4634,8 +4821,8 @@ impl DesktopGuiServer {
       <div class='section-title'>{profiles_sum}</div>
       {accounts}
       <div class='actions-row wrap'>
-        <a class='btn ghost small' href='/action?cmd=open_my_profile'>👤 {my_prof_btn}</a>
-        <a class='btn ghost small' href='/action?cmd=logout'>{logout_btn}</a>
+        <a class='btn ghost small' href='/action?cmd=open_my_profile'>{user_icon}{my_prof_btn}</a>
+        <a class='btn ghost small' href='/action?cmd=logout'>{logout_icon}{logout_btn}</a>
       </div>
     </div>
     <div class='panel'>
@@ -4643,8 +4830,8 @@ impl DesktopGuiServer {
       <div class='actions-row wrap'>
         <a class='btn ghost small' href='/action?cmd=lang_ru'>RU</a>
         <a class='btn ghost small' href='/action?cmd=lang_en'>EN</a>
-        <a class='btn ghost small' href='/action?cmd=check_update'>🔄 {upd_short_btn}</a>
-        <a class='btn danger small' href='/action?cmd=panic'>{wipe_btn}</a>
+        <a class='btn ghost small' href='/action?cmd=check_update'>{refresh_icon}{upd_short_btn}</a>
+        <a class='btn danger small' href='/action?cmd=panic'>{trash_icon}{wipe_btn}</a>
       </div>
     </div>
   </aside>
@@ -4689,7 +4876,7 @@ impl DesktopGuiServer {
     if (tBox) {{
       var item = document.createElement('div');
       item.className = 'push-toast';
-      item.innerHTML = '<div class=\"push-toast-title\">🔔 ' + title + '</div><div class=\"push-toast-body\">' + text + '</div>';
+      item.innerHTML = '<div class=\"push-toast-title\">' + title + '</div><div class=\"push-toast-body\">' + text + '</div>';
       tBox.appendChild(item);
       setTimeout(function() {{ if (item.parentNode) item.parentNode.removeChild(item); }}, 4500);
     }}
@@ -4732,14 +4919,23 @@ impl DesktopGuiServer {
 }})();
 </script>",
             anim_cls = anim_cls,
-            ui_theme = html_escape(&self.state.ui_theme),
-            chat_wp = html_escape(&self.state.chat_wallpaper),
-            bub_style = html_escape(&self.state.bubble_style),
-            font_scale = html_escape(&self.state.font_scale),
             ping_badge = ping_badge,
             search_q = html_escape(&self.state.search_query),
             search_ph = self.tr("Поиск: @юз, группа, канал...", "Search: @username, group, channel..."),
             chat_items = chat_items,
+            chat_icon_sm = icon("chat"),
+            users_icon = icon("users"),
+            globe_icon = icon("globe"),
+            user_icon = icon("user"),
+            settings_icon = icon("settings"),
+            refresh_icon = icon("refresh"),
+            lock_icon = icon("lock"),
+            bell_icon = icon("bell"),
+            motion_icon = icon("clock"),
+            shield_icon = icon("shield"),
+            logout_icon = icon("logout"),
+            trash_icon = icon("trash"),
+            chat_icon = chat_icon,
             dm_sum = self.tr("Написать по @юзу", "Message by @username"),
             dm_user_ph = self.tr("@юз собеседника (от 3 букв)", "@username (3+ chars)"),
             dm_btn = self.tr("Открыть чат", "Open chat"),
@@ -4753,10 +4949,9 @@ impl DesktopGuiServer {
             nav_chats = self.tr("Чаты", "Chats"),
             nav_servers = self.tr("Серверы", "Servers"),
             nav_account = self.tr("Профиль", "Profile"),
-            chat_icon = chat_icon_for(chat_title),
             chat_title = html_escape(chat_title),
             chat_sub = chat_sub,
-            prof_tip = self.tr("Профиль и кастомизация", "Profile & Customization"),
+            prof_tip = self.tr("Профиль и оформление", "Profile & appearance"),
             sync_tip = self.tr("Обновить", "Refresh"),
             pin_tip = self.tr("PIN чата", "Chat PIN"),
             update_banner = update_banner,
@@ -4765,7 +4960,7 @@ impl DesktopGuiServer {
             leak_modal = leak_modal,
             main_body_html = main_body_html,
             open_prof_btn = self.tr("Профиль", "Profile"),
-            my_prof_btn = self.tr("Кастомизация", "Customize"),
+            my_prof_btn = self.tr("Оформление", "Appearance"),
             sec_route_title = self.tr("Переключатели", "Toggles"),
             push_short_lbl = self.tr("Пуш-уведомления", "Push notifications"),
             push_on_cls = if self.state.push_notifications_enabled { "on" } else { "" },
@@ -4774,7 +4969,7 @@ impl DesktopGuiServer {
             chat_pin_lbl = self.tr("PIN-код чата", "Chat PIN lock"),
             lock_on = lock_on,
             kill_href = kill_href,
-            kill_lbl = self.tr("Блокировка сети (Kill Switch)", "Network Lock (Kill Switch)"),
+            kill_lbl = self.tr("Блокировка сети", "Network lock"),
             kill_on = kill_on,
             ttl_title = self.tr("Исчезающие сообщения", "Disappearing messages"),
             ttl_off = ttl_off,
@@ -4785,10 +4980,10 @@ impl DesktopGuiServer {
             ttl_1h_lbl = self.tr("1 час", "1 hour"),
             profiles_sum = self.tr("Профили", "Profiles"),
             accounts = accounts_html,
-            logout_btn = self.tr("Выйти из аккаунта", "Log out"),
+            logout_btn = self.tr("Выйти", "Log out"),
             theme_sum = self.tr("Язык и управление", "Language & Controls"),
             upd_short_btn = self.tr("Обновления", "Updates"),
-            wipe_btn = self.tr("Стереть данные", "Wipe data"),
+            wipe_btn = self.tr("Стереть", "Wipe"),
         )
     }
 
@@ -4875,18 +5070,17 @@ impl DesktopGuiServer {
                 let pwd = extract_query_param(query, "pwd").unwrap_or_default();
                 if nick.is_empty() || pwd.is_empty() {
                     self.state.status_banner = self
-                        .tr("Введите логин и пароль.", "Enter your username and password.")
+                        .tr(
+                            "Введите логин и пароль.",
+                            "Enter your username and password.",
+                        )
                         .to_owned();
                     return;
                 }
                 let candidate = DesktopAppState::compute_password_verifier(&nick, &pwd);
-                let matched_idx = self
-                    .state
-                    .account_verifiers
-                    .iter()
-                    .position(|(n, _, v)| {
-                        n.eq_ignore_ascii_case(&nick) && constant_time_eq(v, &candidate)
-                    });
+                let matched_idx = self.state.account_verifiers.iter().position(|(n, _, v)| {
+                    n.eq_ignore_ascii_case(&nick) && constant_time_eq(v, &candidate)
+                });
                 if let Some(idx) = matched_idx {
                     if idx < self.state.accounts.profiles.len() {
                         self.state.accounts.active_index = idx;
@@ -4978,11 +5172,11 @@ impl DesktopGuiServer {
                             alias.clone_from(&clean_name);
                         }
                     }
-                    self.state.register_in_server_directory("user", &my_nick, &clean_name);
+                    self.state
+                        .register_in_server_directory("user", &my_nick, &clean_name);
                     self.state.save_desktop_vault();
-                    self.state.status_banner = self
-                        .tr("Ник обновлён.", "Display name updated.")
-                        .to_owned();
+                    self.state.status_banner =
+                        self.tr("Ник обновлён.", "Display name updated.").to_owned();
                 }
             }
             "set_primary_username" => {
@@ -5007,7 +5201,8 @@ impl DesktopGuiServer {
                             owner.clone_from(&new_uz);
                         }
                     }
-                    self.state.register_in_server_directory("user", &new_uz, &my_name);
+                    self.state
+                        .register_in_server_directory("user", &new_uz, &my_name);
                     self.state.save_desktop_vault();
                     let _ = self.state.sync_all_chats_and_inbox();
                     self.state.status_banner = if is_en {
@@ -5031,11 +5226,21 @@ impl DesktopGuiServer {
                     let count = self.state.active_account_extra_usernames().len();
                     if count >= 6 {
                         self.state.status_banner = self
-                            .tr("Достигнут лимит дополнительных @юзов.", "Additional @username limit reached.")
+                            .tr(
+                                "Достигнут лимит дополнительных @юзов.",
+                                "Additional @username limit reached.",
+                            )
                             .to_owned();
-                    } else if !self.state.all_active_account_usernames().contains(&extra_uz) {
-                        self.state.extra_usernames.push((my_nick.clone(), extra_uz.clone()));
-                        self.state.register_in_server_directory("user", &my_nick, &my_name);
+                    } else if !self
+                        .state
+                        .all_active_account_usernames()
+                        .contains(&extra_uz)
+                    {
+                        self.state
+                            .extra_usernames
+                            .push((my_nick.clone(), extra_uz.clone()));
+                        self.state
+                            .register_in_server_directory("user", &my_nick, &my_name);
                         self.state.save_desktop_vault();
                         let _ = self.state.sync_all_chats_and_inbox();
                         self.state.status_banner = if is_en {
@@ -5057,59 +5262,66 @@ impl DesktopGuiServer {
                 let raw_uz = extract_query_param(query, "uz").unwrap_or_default();
                 let clean = raw_uz.trim().trim_start_matches('@').to_ascii_lowercase();
                 let (my_nick, my_name) = self.state.active_account_identity();
+                self.state.extra_usernames.retain(|(o, u)| {
+                    !(o.eq_ignore_ascii_case(&my_nick) && u.eq_ignore_ascii_case(&clean))
+                });
                 self.state
-                    .extra_usernames
-                    .retain(|(o, u)| !(o.eq_ignore_ascii_case(&my_nick) && u.eq_ignore_ascii_case(&clean)));
-                self.state.register_in_server_directory("user", &my_nick, &my_name);
+                    .register_in_server_directory("user", &my_nick, &my_name);
                 self.state.save_desktop_vault();
             }
             "toggle_auto_update" => {
                 self.state.auto_download_updates = !self.state.auto_download_updates;
                 self.state.save_desktop_vault();
                 self.state.status_banner = if self.state.auto_download_updates {
-                    self.tr("Автоскачивание обновлений включено.", "Auto-download updates enabled.").to_owned()
+                    self.tr(
+                        "Автоскачивание обновлений включено.",
+                        "Auto-download updates enabled.",
+                    )
+                    .to_owned()
                 } else {
-                    self.tr("Автоскачивание обновлений выключено.", "Auto-download updates disabled.").to_owned()
+                    self.tr(
+                        "Автоскачивание обновлений выключено.",
+                        "Auto-download updates disabled.",
+                    )
+                    .to_owned()
                 };
             }
             "toggle_push_notifications" => {
                 self.state.push_notifications_enabled = !self.state.push_notifications_enabled;
                 self.state.save_desktop_vault();
                 self.state.status_banner = if self.state.push_notifications_enabled {
-                    self.tr("Пуш-уведомления включены.", "Push notifications enabled.").to_owned()
+                    self.tr("Пуш-уведомления включены.", "Push notifications enabled.")
+                        .to_owned()
                 } else {
-                    self.tr("Пуш-уведомления выключены.", "Push notifications disabled.").to_owned()
+                    self.tr("Пуш-уведомления выключены.", "Push notifications disabled.")
+                        .to_owned()
                 };
             }
             "toggle_sound_notifications" => {
                 self.state.sound_notifications_enabled = !self.state.sound_notifications_enabled;
                 self.state.save_desktop_vault();
                 self.state.status_banner = if self.state.sound_notifications_enabled {
-                    self.tr("Звук уведомлений включён.", "Notification sound enabled.").to_owned()
+                    self.tr("Звук уведомлений включён.", "Notification sound enabled.")
+                        .to_owned()
                 } else {
-                    self.tr("Звук уведомлений выключен.", "Notification sound disabled.").to_owned()
+                    self.tr("Звук уведомлений выключен.", "Notification sound disabled.")
+                        .to_owned()
                 };
             }
             "toggle_animations" => {
                 self.state.animations_enabled = !self.state.animations_enabled;
                 self.state.save_desktop_vault();
                 self.state.status_banner = if self.state.animations_enabled {
-                    self.tr("Анимации включены.", "Animations enabled.").to_owned()
+                    self.tr("Анимации включены.", "Animations enabled.")
+                        .to_owned()
                 } else {
-                    self.tr("Анимации выключены.", "Animations disabled.").to_owned()
+                    self.tr("Анимации выключены.", "Animations disabled.")
+                        .to_owned()
                 };
             }
             "set_custom_theme" => {
                 let theme = extract_query_param(query, "theme").unwrap_or_default();
-                let allowed = [
-                    "cyber-neon",
-                    "emerald-monolith",
-                    "crimson-sunset",
-                    "royal-amethyst",
-                    "gold-sovereign",
-                    "oled-black",
-                ];
-                if allowed.contains(&theme.as_str()) {
+                if ["system", "dark", "light"].contains(&theme.as_str()) {
                     self.state.ui_theme = theme;
                     self.state.save_desktop_vault();
                 }
@@ -5161,10 +5373,7 @@ impl DesktopGuiServer {
                     }
                 }
                 self.state.status_banner = self
-                    .tr(
-                        "Проверка обновлений завершена.",
-                        "Update check completed.",
-                    )
+                    .tr("Проверка обновлений завершена.", "Update check completed.")
                     .to_owned();
             }
             "download_update" => {
@@ -5185,16 +5394,27 @@ impl DesktopGuiServer {
                 if let Some(ref path) = self.state.downloaded_update_path {
                     let _ = std::process::Command::new(path).spawn();
                     self.state.status_banner = self
-                        .tr("Запущена новая версия приложения.", "Launched updated application.")
+                        .tr(
+                            "Запущена новая версия приложения.",
+                            "Launched updated application.",
+                        )
                         .to_owned();
                 }
             }
             "toggle_seed_only" => {
                 self.state.seed_only_mode = !self.state.seed_only_mode;
                 self.state.status_banner = if self.state.seed_only_mode {
-                    self.tr("Ключи хранятся только на этом устройстве.", "Keys stay on this device only.").to_owned()
+                    self.tr(
+                        "Ключи хранятся только на этом устройстве.",
+                        "Keys stay on this device only.",
+                    )
+                    .to_owned()
                 } else {
-                    self.tr("Включено восстановление через аккаунт.", "Account recovery enabled.").to_owned()
+                    self.tr(
+                        "Включено восстановление через аккаунт.",
+                        "Account recovery enabled.",
+                    )
+                    .to_owned()
                 };
             }
             "gen_recovery_phrase" => {
@@ -5209,14 +5429,19 @@ impl DesktopGuiServer {
                 }
                 if let Ok(phrase) = RecoveryPhrase::generate(&entropy) {
                     self.state.recovery_phrase_preview = Some(phrase.words().join(" "));
-                    self.state.status_banner =
-                        self.tr("Фраза восстановления создана.", "Recovery phrase generated.").to_owned();
+                    self.state.status_banner = self
+                        .tr(
+                            "Фраза восстановления создана.",
+                            "Recovery phrase generated.",
+                        )
+                        .to_owned();
                 }
             }
             "search_messages" => {
                 let q = extract_query_param(query, "q").unwrap_or_default();
                 self.state.search_query = q.trim().to_owned();
-                self.state.search_server_directory(&self.state.search_query.clone());
+                self.state
+                    .search_server_directory(&self.state.search_query.clone());
                 self.state.status_banner.clear();
             }
             "open_dm" => {
@@ -5227,7 +5452,9 @@ impl DesktopGuiServer {
                     let disp_name = self.state.resolve_display_name_for_uz(&peer);
                     let (my_nick, _) = self.state.active_account_identity();
                     let tag = DesktopAppState::dm_pair_tag(&my_nick, &peer);
-                    if let Some(existing_idx) = self.state.chats.iter().position(|c| c.queue_tag == tag) {
+                    if let Some(existing_idx) =
+                        self.state.chats.iter().position(|c| c.queue_tag == tag)
+                    {
                         self.state.chats[existing_idx].title = format!("💬 {disp_name}");
                         self.state.active_chat_index = existing_idx;
                     } else {
@@ -5274,7 +5501,8 @@ impl DesktopGuiServer {
                             format!("grp_{}", self.state.chats.len() + 1)
                         };
                         let tag = format!("group://{clean_slug}");
-                        if let Some(idx) = self.state.chats.iter().position(|c| c.queue_tag == tag) {
+                        if let Some(idx) = self.state.chats.iter().position(|c| c.queue_tag == tag)
+                        {
                             self.state.active_chat_index = idx;
                         } else {
                             let id_byte = (self.state.chats.len() as u8).wrapping_add(15);
@@ -5291,14 +5519,16 @@ impl DesktopGuiServer {
                             });
                             self.state.active_chat_index = self.state.chats.len() - 1;
                         }
-                        self.state.register_in_server_directory("group", &clean_slug, &t);
+                        self.state
+                            .register_in_server_directory("group", &clean_slug, &t);
                         let (my_nick, my_name) = self.state.active_account_identity();
                         for mem in members_raw.split(|c: char| c == ',' || c.is_whitespace()) {
                             let m_nick = mem.trim().trim_start_matches('@').to_ascii_lowercase();
                             if !m_nick.is_empty() && m_nick != my_nick {
                                 self.state.outbound_capsule_seq =
                                     self.state.outbound_capsule_seq.wrapping_add(1);
-                                let msg_id = format!("inv_{}_{}", my_nick, self.state.outbound_capsule_seq);
+                                let msg_id =
+                                    format!("inv_{}_{}", my_nick, self.state.outbound_capsule_seq);
                                 let invite_txt = if is_en {
                                     format!("Added you to group \"{t}\"")
                                 } else {
@@ -5307,7 +5537,9 @@ impl DesktopGuiServer {
                                 let wire = format!(
                                     "AEGMSG1\t{msg_id}\t{my_nick}\t{my_name}\tgroup\t{clean_slug}\t{t}\t{invite_txt}"
                                 );
-                                let _ = self.state.send_raw_capsule_to_tag(&format!("inbox://{m_nick}"), &wire);
+                                let _ = self
+                                    .state
+                                    .send_raw_capsule_to_tag(&format!("inbox://{m_nick}"), &wire);
                             }
                         }
                         self.state.profile_modal_open = false;
@@ -5338,7 +5570,8 @@ impl DesktopGuiServer {
                             format!("ch_{}", self.state.chats.len() + 1)
                         };
                         let tag = format!("channel://{clean_slug}");
-                        if let Some(idx) = self.state.chats.iter().position(|c| c.queue_tag == tag) {
+                        if let Some(idx) = self.state.chats.iter().position(|c| c.queue_tag == tag)
+                        {
                             self.state.active_chat_index = idx;
                         } else {
                             let id_byte = (self.state.chats.len() as u8).wrapping_add(25);
@@ -5355,7 +5588,8 @@ impl DesktopGuiServer {
                             });
                             self.state.active_chat_index = self.state.chats.len() - 1;
                         }
-                        self.state.register_in_server_directory("channel", &clean_slug, &t);
+                        self.state
+                            .register_in_server_directory("channel", &clean_slug, &t);
                         self.state.profile_modal_open = false;
                         self.state.current_screen = Screen::ChatWorkspace;
                         self.state.save_desktop_vault();
@@ -5415,8 +5649,9 @@ impl DesktopGuiServer {
             "verify_contact" => {
                 self.state.peer_verified = true;
                 self.state.key_change_warning = None;
-                self.state.status_banner =
-                    self.tr("Ключ собеседника подтверждён.", "Contact key verified.").to_owned();
+                self.state.status_banner = self
+                    .tr("Ключ собеседника подтверждён.", "Contact key verified.")
+                    .to_owned();
             }
             "simulate_key_change" => {
                 if detect_identity_key_change(Some(&[0xB2; 32]), &[0xE9; 32]).is_some() {
@@ -5428,20 +5663,29 @@ impl DesktopGuiServer {
                         )
                         .to_owned(),
                     );
-                    self.state.status_banner =
-                        self.tr("Обнаружена смена ключа собеседника.", "Contact key change detected.").to_owned();
+                    self.state.status_banner = self
+                        .tr(
+                            "Обнаружена смена ключа собеседника.",
+                            "Contact key change detected.",
+                        )
+                        .to_owned();
                 }
             }
             "ack_key_change" => {
                 self.state.key_change_warning = None;
                 self.state.peer_verified = true;
-                self.state.status_banner =
-                    self.tr("Новый ключ собеседника подтверждён.", "New contact key approved.").to_owned();
+                self.state.status_banner = self
+                    .tr(
+                        "Новый ключ собеседника подтверждён.",
+                        "New contact key approved.",
+                    )
+                    .to_owned();
             }
             "rotate_queue" => {
                 if self.state.rotate_active_chat_queue().is_some() {
-                    self.state.status_banner =
-                        self.tr("Канал чата обновлён.", "Chat channel refreshed.").to_owned();
+                    self.state.status_banner = self
+                        .tr("Канал чата обновлён.", "Chat channel refreshed.")
+                        .to_owned();
                 }
             }
             "set_chat_ttl" => {
@@ -5449,7 +5693,8 @@ impl DesktopGuiServer {
                     .and_then(|v| v.parse::<u32>().ok())
                     .unwrap_or(0);
                 let status = if ttl_val == 0 {
-                    self.tr("Таймер сообщений выключен.", "Disappearing timer disabled.").to_owned()
+                    self.tr("Таймер сообщений выключен.", "Disappearing timer disabled.")
+                        .to_owned()
                 } else {
                     format!(
                         "{}: {}.",
@@ -5506,14 +5751,16 @@ impl DesktopGuiServer {
                 };
                 if let Ok(uri) = invite.to_uri() {
                     self.state.active_invite_uri.clone_from(&uri);
-                    self.state.status_banner =
-                        self.tr("Создано новое приглашение.", "New invite created.").to_owned();
+                    self.state.status_banner = self
+                        .tr("Создано новое приглашение.", "New invite created.")
+                        .to_owned();
                 }
             }
             "export_backup" => match self.state.export_explicit_encrypted_backup() {
                 Ok(_) => {
-                    self.state.status_banner =
-                        self.tr("Резервная копия создана.", "Backup created.").to_owned();
+                    self.state.status_banner = self
+                        .tr("Резервная копия создана.", "Backup created.")
+                        .to_owned();
                 }
                 Err(e) => {
                     self.state.status_banner = if is_en {
@@ -5587,12 +5834,8 @@ impl DesktopGuiServer {
                     .unwrap_or_else(|| self.tr("Основной профиль", "Main Profile").to_owned());
                 let Some(pwd) = extract_query_param(query, "pwd").filter(|s| !s.trim().is_empty())
                 else {
-                    self.state.status_banner = self
-                        .tr(
-                            "Введите пароль.",
-                            "Enter a password.",
-                        )
-                        .to_owned();
+                    self.state.status_banner =
+                        self.tr("Введите пароль.", "Enter a password.").to_owned();
                     return;
                 };
                 if let Some(pwd2) = extract_query_param(query, "pwd2").filter(|s| !s.is_empty()) {
@@ -5624,8 +5867,7 @@ impl DesktopGuiServer {
                             password_score: 85,
                         });
                     }
-                    let verifier =
-                        DesktopAppState::compute_password_verifier(&clean_nick, &pwd);
+                    let verifier = DesktopAppState::compute_password_verifier(&clean_nick, &pwd);
                     self.state.account_verifiers.push((
                         clean_nick.clone(),
                         clean_alias.clone(),
@@ -5636,7 +5878,8 @@ impl DesktopGuiServer {
                     self.state.is_authenticated = true;
                     self.state.profile_modal_open = false;
                     self.state.recovery_phrase_preview = None;
-                    self.state.register_in_server_directory("user", &clean_nick, &clean_alias);
+                    self.state
+                        .register_in_server_directory("user", &clean_nick, &clean_alias);
                     self.state.current_screen = if self.state.auth_gate_enabled {
                         Screen::ChatWorkspace
                     } else {
@@ -5750,8 +5993,9 @@ impl DesktopGuiServer {
                             }
                         }
                     } else {
-                        self.state.status_banner =
-                            self.tr("Некорректный порт сервера.", "Invalid server port.").to_owned();
+                        self.state.status_banner = self
+                            .tr("Некорректный порт сервера.", "Invalid server port.")
+                            .to_owned();
                     }
                 }
             }
@@ -5897,8 +6141,9 @@ impl DesktopGuiServer {
                         }
                     } else if let Some(c) = self.state.chats.get_mut(idx) {
                         c.is_locked = true;
-                        self.state.status_banner =
-                            self.tr("Чат закрыт PIN-кодом.", "Chat locked with PIN.").to_owned();
+                        self.state.status_banner = self
+                            .tr("Чат закрыт PIN-кодом.", "Chat locked with PIN.")
+                            .to_owned();
                     }
                 }
             }
@@ -5908,18 +6153,24 @@ impl DesktopGuiServer {
             }
             "route_vpn" => {
                 let _ = self.state.update_network_route(false, true, true, false);
-                self.state.status_banner =
-                    self.tr("VPN / Прокси включён.", "VPN / Proxy enabled.").to_owned();
+                self.state.status_banner = self
+                    .tr("VPN / Прокси включён.", "VPN / Proxy enabled.")
+                    .to_owned();
             }
             "route_direct" => {
                 let _ = self.state.update_network_route(false, false, false, false);
-                self.state.status_banner =
-                    self.tr("Прямое соединение включено.", "Direct connection enabled.").to_owned();
+                self.state.status_banner = self
+                    .tr("Прямое соединение включено.", "Direct connection enabled.")
+                    .to_owned();
             }
             "route_leak" => {
                 let _ = self.state.update_network_route(false, true, true, true);
-                self.state.status_banner =
-                    self.tr("Сеть заблокирована (Kill Switch).", "Network locked (Kill Switch).").to_owned();
+                self.state.status_banner = self
+                    .tr(
+                        "Сеть заблокирована (Kill Switch).",
+                        "Network locked (Kill Switch).",
+                    )
+                    .to_owned();
             }
             "test_leak_card" => {
                 let sample =
@@ -6013,8 +6264,9 @@ impl DesktopGuiServer {
                     .send_chat_message(&caption, true, Some(att))
                     .is_ok()
                 {
-                    self.state.status_banner =
-                        self.tr("Одноразовое фото отправлено.", "View-once photo sent.").to_owned();
+                    self.state.status_banner = self
+                        .tr("Одноразовое фото отправлено.", "View-once photo sent.")
+                        .to_owned();
                 }
             }
             "launch_vps" => {
@@ -6022,16 +6274,24 @@ impl DesktopGuiServer {
                     .state
                     .server_launcher
                     .configure(LaunchTarget::VpsDocker, 8443, 30);
-                self.state.status_banner =
-                    self.tr("Настройки VPS-сервера готовы.", "VPS server settings ready.").to_owned();
+                self.state.status_banner = self
+                    .tr(
+                        "Настройки VPS-сервера готовы.",
+                        "VPS server settings ready.",
+                    )
+                    .to_owned();
             }
             "launch_onion" => {
                 let _ =
                     self.state
                         .server_launcher
                         .configure(LaunchTarget::TorOnionService, 9001, 14);
-                self.state.status_banner =
-                    self.tr("Настройки Tor-сервера готовы.", "Tor server settings ready.").to_owned();
+                self.state.status_banner = self
+                    .tr(
+                        "Настройки Tor-сервера готовы.",
+                        "Tor server settings ready.",
+                    )
+                    .to_owned();
             }
             "launch_desktop" => {
                 let _ = self
@@ -6111,21 +6371,20 @@ impl DesktopGuiServer {
                         Ok(_) => {
                             if !is_local_notes && !self.state.duress_mode_active {
                                 let (my_nick, my_name) = self.state.active_account_identity();
-                                let my_clean = my_nick.trim().trim_start_matches('@').to_ascii_lowercase();
+                                let my_clean =
+                                    my_nick.trim().trim_start_matches('@').to_ascii_lowercase();
                                 self.state.outbound_capsule_seq =
                                     self.state.outbound_capsule_seq.wrapping_add(1);
-                                let msg_id = format!(
-                                    "m_{}_{}",
-                                    my_clean, self.state.outbound_capsule_seq
-                                );
+                                let msg_id =
+                                    format!("m_{}_{}", my_clean, self.state.outbound_capsule_seq);
                                 self.state
                                     .seen_account_msg_ids
                                     .push(format!("{my_clean}:{msg_id}"));
-                                let (kind, slug) = if let Some(rest) = channel_code.strip_prefix("dm://") {
-                                    let peer = rest
-                                        .split(':')
-                                        .find(|p| *p != my_clean)
-                                        .unwrap_or(rest);
+                                let (kind, slug) = if let Some(rest) =
+                                    channel_code.strip_prefix("dm://")
+                                {
+                                    let peer =
+                                        rest.split(':').find(|p| *p != my_clean).unwrap_or(rest);
                                     ("dm", peer.to_owned())
                                 } else if let Some(rest) = channel_code.strip_prefix("group://") {
                                     ("group", rest.to_owned())
@@ -6137,7 +6396,8 @@ impl DesktopGuiServer {
                                 let wire = format!(
                                     "AEGMSG1\t{msg_id}\t{my_clean}\t{my_name}\t{kind}\t{slug}\t{chat_title}\t{trimmed}"
                                 );
-                                let sent_ok = self.state.send_raw_capsule_to_tag(&channel_code, &wire);
+                                let sent_ok =
+                                    self.state.send_raw_capsule_to_tag(&channel_code, &wire);
                                 if kind == "dm" && !slug.is_empty() && !slug.contains(':') {
                                     let _ = self
                                         .state
@@ -6170,7 +6430,8 @@ impl DesktopGuiServer {
             }
             "sync_remote" => {
                 let n = self.state.sync_all_chats_and_inbox();
-                self.state.search_server_directory(&self.state.search_query.clone());
+                self.state
+                    .search_server_directory(&self.state.search_query.clone());
                 if n > 0 {
                     self.state.status_banner = if is_en {
                         format!("New messages: {n}.")
@@ -6180,8 +6441,9 @@ impl DesktopGuiServer {
                 } else if self.state.last_ping_ms.is_some() {
                     self.state.status_banner.clear();
                 } else {
-                    self.state.status_banner =
-                        self.tr("Сервер сейчас недоступен.", "Server is currently offline.").to_owned();
+                    self.state.status_banner = self
+                        .tr("Сервер сейчас недоступен.", "Server is currently offline.")
+                        .to_owned();
                 }
             }
             _ => {}
@@ -6208,6 +6470,22 @@ impl DesktopGuiServer {
                 if !is_trusted_local_http_request(&req) {
                     let forbidden = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 9\r\nCache-Control: no-store\r\nConnection: close\r\n\r\nForbidden";
                     let _ = stream.write_all(forbidden.as_bytes());
+                    let _ = stream.flush();
+                    handled = handled.saturating_add(1);
+                    if let Some(limit) = max_requests {
+                        if handled >= limit {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if let Some((content_type, bytes)) = desktop_asset(&req) {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: public, max-age=31536000, immutable\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(bytes);
                     let _ = stream.flush();
                     handled = handled.saturating_add(1);
                     if let Some(limit) = max_requests {
@@ -6268,7 +6546,7 @@ impl DesktopGuiServer {
 
             let html = self.render_html();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nContent-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nContent-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n{}",
                 html.len(),
                 html
             );
@@ -6283,6 +6561,15 @@ impl DesktopGuiServer {
             }
         }
         Ok(())
+    }
+}
+
+fn desktop_asset(req: &str) -> Option<(&'static str, &'static [u8])> {
+    let path = req.lines().next()?.split_whitespace().nth(1)?;
+    match path {
+        "/assets/onest-regular.woff2" => Some(("font/woff2", ONEST_REGULAR_WOFF2)),
+        "/assets/onest-medium.woff2" => Some(("font/woff2", ONEST_MEDIUM_WOFF2)),
+        _ => None,
     }
 }
 
@@ -6411,13 +6698,16 @@ pub fn is_trusted_local_http_request(raw_request: &str) -> bool {
                 if header_val == "null" {
                     saw_null_origin = true;
                 } else {
-                    let valid_origin = ["http://127.0.0.1", "http://localhost"]
-                        .iter()
-                        .any(|prefix| {
-                            header_val.strip_prefix(prefix).is_some_and(|rest| {
-                                rest.is_empty() || rest.starts_with(':') || rest.starts_with('/')
-                            })
-                        });
+                    let valid_origin =
+                        ["http://127.0.0.1", "http://localhost"]
+                            .iter()
+                            .any(|prefix| {
+                                header_val.strip_prefix(prefix).is_some_and(|rest| {
+                                    rest.is_empty()
+                                        || rest.starts_with(':')
+                                        || rest.starts_with('/')
+                                })
+                            });
                     if !valid_origin {
                         return false;
                     }
@@ -6478,574 +6768,51 @@ fn json_escape(input: &str) -> String {
     out
 }
 
-const DESKTOP_CSS: &str = r#"
-:root {
-  --bg: #0b141a;
-  --panel: #111b21;
-  --panel-2: #17212b;
-  --line: #24323d;
-  --text: #e9edef;
-  --muted: #8696a0;
-  --accent: #53bdeb;
-  --accent-2: #00a884;
-  --bubble-in: #182533;
-  --bubble-out: #2a5275;
-  --danger: #f15c6d;
-  --warn: #f0b429;
-  --ok: #25d366;
-}
-* { box-sizing: border-box; }
-html, body { height: 100%; }
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-  font-size: 14px;
-  line-height: 1.4;
-}
-a { color: inherit; text-decoration: none; }
-button, input { font: inherit; }
-.app { display: flex; height: 100vh; overflow: hidden; }
-.sidebar {
-  width: 340px;
-  min-width: 280px;
-  background: var(--panel);
-  border-right: 1px solid var(--line);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.sidebar-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 16px 10px;
-}
-.brand-row { display: flex; align-items: center; gap: 10px; }
-.brand-mark {
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, var(--accent-2), var(--accent));
-  color: #06202a;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 800;
-  font-size: 17px;
-  flex: 0 0 auto;
-}
-.brand-mark.large { width: 54px; height: 54px; border-radius: 16px; font-size: 28px; }
-.brand-name { font-weight: 700; font-size: 18px; letter-spacing: 0.2px; }
-.ping-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  border: 1px solid var(--line);
-  background: var(--panel-2);
-}
-.ping-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.ping-badge.ok { color: #6ee7a8; border-color: rgba(37, 211, 102, 0.35); background: rgba(37, 211, 102, 0.1); }
-.ping-badge.ok .ping-dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
-.ping-badge.warn { color: #f3c96b; border-color: rgba(240, 180, 41, 0.35); background: rgba(240, 180, 41, 0.1); }
-.ping-badge.warn .ping-dot { background: var(--warn); }
-.ping-badge.off { color: #ffb3ba; border-color: rgba(241, 92, 109, 0.35); background: rgba(241, 92, 109, 0.1); }
-.ping-badge.off .ping-dot { background: var(--danger); }
-.icon-btn {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
-  border: 1px solid transparent;
-}
-.icon-btn:hover { background: var(--panel-2); color: var(--text); border-color: var(--line); }
-.sidebar-search { padding: 0 12px 10px; }
-.sidebar-search input {
-  width: 100%;
-  background: var(--panel-2);
-  border: 1px solid transparent;
-  border-radius: 10px;
-  padding: 9px 12px;
-  color: var(--text);
-  outline: none;
-}
-.sidebar-search input:focus { border-color: var(--accent); }
-.chat-list { flex: 1; overflow-y: auto; padding: 2px 8px 8px; }
-.chat-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 10px;
-  border-radius: 10px;
-  margin-bottom: 2px;
-}
-.chat-item:hover { background: var(--panel-2); }
-.chat-item.active { background: #2a3a46; }
-.avatar {
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-  background: #2a3a46;
-  color: var(--accent);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 18px;
-  flex: 0 0 auto;
-}
-.avatar.small { width: 42px; height: 42px; font-size: 16px; }
-.avatar.large { width: 64px; height: 64px; font-size: 26px; }
-.chat-item-meta { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.chat-item-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-item-preview { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.new-chat { border-top: 1px solid var(--line); padding: 10px 12px; }
-.new-chat summary { cursor: pointer; color: var(--accent); font-weight: 600; list-style: none; }
-.new-chat summary::-webkit-details-marker { display: none; }
-.new-chat[open] summary { margin-bottom: 10px; }
-.sidebar-nav {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  border-top: 1px solid var(--line);
-  background: var(--panel);
-}
-.nav-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 9px 4px;
-  font-size: 11px;
-  color: var(--muted);
-}
-.nav-item span { font-size: 17px; }
-.nav-item.active { color: var(--accent); }
-.main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg);
-  position: relative;
-}
-.chat-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 16px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  min-height: 64px;
-}
-.chat-head-meta { min-width: 0; flex: 1; }
-.chat-title { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-actions { display: flex; gap: 2px; }
-.status-banner {
-  margin: 8px 16px 0;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: #1a2a33;
-  border: 1px solid var(--line);
-  color: #c7d4dc;
-  font-size: 12px;
-}
-.messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 18px 20px 8px;
-  background-image: radial-gradient(circle at 20% 10%, rgba(83, 189, 235, 0.04), transparent 34%), radial-gradient(circle at 80% 80%, rgba(0, 168, 132, 0.04), transparent 30%);
-}
-.message-row { display: flex; margin-bottom: 8px; }
-.message-row.out { justify-content: flex-end; }
-.bubble {
-  max-width: 72%;
-  padding: 8px 11px 6px;
-  border-radius: 12px;
-  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.18);
-}
-.message-row.in .bubble { background: var(--bubble-in); border-bottom-left-radius: 4px; }
-.message-row.out .bubble { background: var(--bubble-out); border-bottom-right-radius: 4px; }
-.message-text { white-space: pre-wrap; word-break: break-word; }
-.message-meta { color: rgba(233, 237, 239, 0.62); font-size: 10px; text-align: right; margin-top: 3px; }
-.attachment {
-  margin-top: 6px;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.16);
-  color: #cfe6ef;
-  font-size: 12px;
-}
-.composer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 16px 6px;
-  background: var(--panel);
-  border-top: 1px solid var(--line);
-}
-.composer-input {
-  flex: 1;
-  background: var(--panel-2);
-  border: 1px solid transparent;
-  border-radius: 10px;
-  padding: 10px 12px;
-  color: var(--text);
-  outline: none;
-}
-.composer-input:focus { border-color: var(--accent); }
-.send-btn {
-  width: 40px;
-  height: 38px;
-  border: none;
-  border-radius: 10px;
-  background: var(--accent-2);
-  color: #042018;
-  font-size: 17px;
-  cursor: pointer;
-}
-.composer-hint { padding: 0 16px 10px; background: var(--panel); color: var(--muted); font-size: 10px; }
-.info-panel {
-  width: 320px;
-  min-width: 280px;
-  background: var(--panel);
-  border-left: 1px solid var(--line);
-  overflow-y: auto;
-  padding: 12px;
-}
-.info-card { text-align: center; padding: 12px 8px 14px; }
-.info-card h3 { margin: 8px 0 2px; font-size: 16px; }
-.safety { margin: 12px 0; padding: 10px; border-radius: 10px; background: var(--panel-2); }
-.safety code { display: block; margin: 5px 0; color: #cfe6ef; font-size: 11px; word-break: break-all; }
-.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; }
-.pill.ok { background: rgba(37, 211, 102, 0.14); color: #6ee7a8; }
-.pill.warn { background: rgba(240, 180, 41, 0.14); color: #f3c96b; }
-.panel {
-  border-top: 1px solid var(--line);
-  padding: 10px 4px;
-}
-.panel summary { cursor: pointer; font-weight: 600; color: #c7d4dc; list-style: none; }
-.panel summary::-webkit-details-marker { display: none; }
-.panel summary::before { content: "›"; display: inline-block; width: 14px; color: var(--muted); }
-.panel[open] summary::before { transform: rotate(90deg); }
-.kv { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; color: var(--muted); font-size: 12px; }
-.kv b { color: var(--text); font-weight: 500; text-align: right; word-break: break-all; }
-.actions-row { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
-.actions-row.wrap { flex-wrap: wrap; }
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 7px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-  font-weight: 600;
-  font-size: 12px;
-}
-.btn:hover { background: var(--panel-2); }
-.btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #042018; }
-.btn.primary:hover { filter: brightness(1.06); }
-.btn.ghost { color: #c7d4dc; }
-.btn.danger { color: #ffb3ba; border-color: rgba(241, 92, 109, 0.45); background: rgba(241, 92, 109, 0.1); }
-.btn.small { padding: 4px 8px; font-size: 11px; }
-.btn.wide { width: 100%; }
-.chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 5px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  color: #c7d4dc;
-  font-size: 11px;
-  font-weight: 600;
-}
-.chip.danger { color: #ffb3ba; border-color: rgba(241, 92, 109, 0.45); }
-.top-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-.auth-page { display: grid; grid-template-columns: 1.05fr 1fr; min-height: 100vh; background: var(--bg); }
-.auth-brand {
-  padding: 64px clamp(28px, 6vw, 86px);
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  background: linear-gradient(160deg, #10212b 0%, #0b141a 62%);
-  border-right: 1px solid var(--line);
-}
-.auth-brand h1 { font-size: 46px; margin: 18px 0 10px; letter-spacing: -1px; }
-.brand-lead { color: #c7d4dc; font-size: 17px; max-width: 440px; }
-.brand-points { margin: 24px 0 30px; padding: 0; list-style: none; color: var(--muted); }
-.brand-points li { margin: 9px 0; padding-left: 20px; position: relative; }
-.brand-points li::before { content: "✓"; position: absolute; left: 0; color: var(--accent-2); }
-.brand-foot { color: #5f7480; font-size: 11px; letter-spacing: 0.4px; }
-.auth-side { padding: 28px clamp(22px, 5vw, 64px) 48px; overflow-y: auto; }
-.auth-top { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 28px; }
-.step-dots { display: flex; gap: 6px; }
-.step-dot {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  color: var(--muted);
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-}
-.step-dot.active { background: var(--accent-2); color: #042018; border-color: var(--accent-2); }
-.auth-card {
-  max-width: 520px;
-  margin: 0 auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 26px;
-}
-.auth-card.wide { max-width: 680px; }
-.eyebrow { color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; }
-.auth-card h2 { margin: 5px 0 6px; font-size: 24px; }
-.lead { color: var(--muted); margin: 0 0 16px; }
-.muted { color: var(--muted); font-size: 12px; }
-.mode-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--panel-2);
-  margin: 12px 0 8px;
-}
-.notice { margin: 12px 0; padding: 12px; border-radius: 10px; background: #1a2a33; border: 1px solid var(--line); }
-.notice.compact { margin: 8px 0 0; }
-.notice-title { font-weight: 700; margin-bottom: 4px; }
-.notice p { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
-code, .secret, .invite, pre { font-family: "Cascadia Mono", Consolas, monospace; }
-.secret, .invite { display: block; color: #cfe6ef; font-size: 11px; word-break: break-all; }
-.form-stack { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
-.form-stack label { color: #c7d4dc; font-size: 12px; font-weight: 600; margin-top: 4px; }
-input[type="text"], input[type="password"] {
-  width: 100%;
-  background: #0e181f;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  padding: 10px 12px;
-  color: var(--text);
-  outline: none;
-}
-input[type="text"]:focus, input[type="password"]:focus { border-color: var(--accent); }
-.input-row { display: flex; gap: 8px; align-items: center; }
-.input-row input { flex: 1; min-width: 0; }
-.hint { color: var(--muted); font-size: 11px; margin: 2px 0 8px; }
-.auth-links { margin-top: 14px; font-size: 12px; color: var(--accent); }
-.server-list { display: flex; flex-direction: column; gap: 8px; margin: 14px 0; }
-.server-card { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
-.server-card.active { border-color: var(--accent-2); box-shadow: inset 0 0 0 1px rgba(0, 168, 132, 0.3); }
-.server-card-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
-.server-name { font-weight: 700; word-break: break-all; }
-.server-badge { color: var(--muted); font-size: 11px; margin-top: 2px; }
-.server-card p { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
-.banner { margin: 8px 16px 0; padding: 9px 12px; border-radius: 8px; font-size: 12px; background: #2b2111; color: #f3c96b; border: 1px solid rgba(240, 180, 41, 0.35); }
-.banner.warn a { color: #ffe1a3; text-decoration: underline; margin-left: 6px; }
-.modal-card { margin: 8px 16px 0; padding: 14px; border-radius: 10px; background: #2a161a; border: 1px solid rgba(241, 92, 109, 0.5); }
-.modal-title { font-weight: 700; color: #ffb3ba; margin-bottom: 6px; }
-.modal-card p { margin: 0 0 8px; color: #e7c9cc; font-size: 12px; }
-.code-block { padding: 8px 10px; margin: 6px 0; border-radius: 8px; background: #160d0f; color: #f0d6d9; font-family: Consolas, monospace; font-size: 11px; word-break: break-word; }
-.account-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #4a5b66; flex: 0 0 auto; }
-.status-dot.online { background: var(--ok); }
-.account-meta { min-width: 0; flex: 1; }
-.account-meta b { display: block; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.score { color: var(--muted); font-size: 11px; }
-pre { margin: 8px 0 0; padding: 10px; border-radius: 8px; background: #0e181f; color: #b9d4df; font-size: 10px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
-.empty-state { margin: 12vh auto 0; max-width: 340px; text-align: center; color: var(--muted); }
-.empty-icon { font-size: 40px; margin-bottom: 8px; opacity: 0.7; }
-.empty-state h3 { color: var(--text); margin: 0 0 6px; font-size: 16px; }
-.empty-state p { margin: 0; font-size: 12px; }
-.unlock-form { display: flex; gap: 8px; padding: 10px 16px; background: var(--panel); }
-.unlock-form input { flex: 1; }
-.section-title { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
-.toggle-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
-.toggle-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 9px 11px;
-  border-radius: 10px;
-  background: var(--panel-2);
-  border: 1px solid transparent;
-  font-size: 13px;
-  font-weight: 500;
-}
-.toggle-row:hover { border-color: var(--line); }
-.switch {
-  width: 38px;
-  height: 22px;
-  border-radius: 999px;
-  background: #2b3942;
-  position: relative;
-  flex: 0 0 auto;
-  transition: background 0.15s ease;
-}
-.switch::after {
-  content: "";
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #cfd8dc;
-  transition: transform 0.15s ease, background 0.15s ease;
-}
-.switch.on { background: rgba(0, 168, 132, 0.32); }
-.switch.on::after { transform: translateX(16px); background: var(--accent-2); }
-.seg-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; }
-.seg {
-  text-align: center;
-  padding: 7px 6px;
-  border-radius: 8px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--muted);
-}
-.seg.active { background: var(--accent-2); border-color: var(--accent-2); color: #042018; }
-@media (max-width: 1180px) { .info-panel { display: none; } }
-@media (max-width: 820px) {
-  .sidebar { width: 280px; min-width: 240px; }
-  .auth-page { grid-template-columns: 1fr; }
-  .auth-brand { display: none; }
-}
-@media (max-width: 620px) {
-  .app { display: block; }
-  .sidebar { width: 100%; height: 44vh; border-right: none; border-bottom: 1px solid var(--line); }
-  .main { height: 56vh; }
-  .info-panel { display: none; }
-  .chat-head { min-height: 54px; }
-  .bubble { max-width: 86%; }
-}
+const DESKTOP_CSS: &str = include_str!("../assets/app.css");
 
-/* ================= Themes ================= */
-.app[data-theme="emerald-monolith"] {
-  --bg: #06120e; --panel: #0a1c15; --panel-2: #0f2a1f; --line: #1d4433;
-  --text: #e6fff2; --muted: #7fb39a; --accent: #34d399; --accent-2: #059669;
-  --bubble-in: #0f2a1f; --bubble-out: #065f46; --ok: #34d399;
-}
-.app[data-theme="crimson-sunset"] {
-  --bg: #150a0d; --panel: #211016; --panel-2: #2d1620; --line: #4a2230;
-  --text: #ffeef1; --muted: #c08a97; --accent: #fb7185; --accent-2: #e11d48;
-  --bubble-in: #2d1620; --bubble-out: #7f1d3a; --ok: #fb7185;
-}
-.app[data-theme="royal-amethyst"] {
-  --bg: #0e0918; --panel: #171027; --panel-2: #201634; --line: #362653;
-  --text: #f2ecff; --muted: #a795c9; --accent: #c084fc; --accent-2: #7c3aed;
-  --bubble-in: #201634; --bubble-out: #4c1d95; --ok: #c084fc;
-}
-.app[data-theme="gold-sovereign"] {
-  --bg: #12100a; --panel: #1c1810; --panel-2: #272118; --line: #423720;
-  --text: #fff8e7; --muted: #bfa877; --accent: #fbbf24; --accent-2: #d97706;
-  --bubble-in: #272118; --bubble-out: #78350f; --ok: #fbbf24;
-}
-.app[data-theme="oled-black"] {
-  --bg: #000000; --panel: #070707; --panel-2: #101010; --line: #1f1f1f;
-  --text: #f5f5f5; --muted: #8a8a8a; --accent: #e5e5e5; --accent-2: #a3a3a3;
-  --bubble-in: #101010; --bubble-out: #262626; --ok: #4ade80;
-}
-.app[data-theme="oled-black"] .brand-mark { color: #000; }
+const ONEST_REGULAR_WOFF2: &[u8] = include_bytes!("../assets/fonts/onest-regular.woff2");
+const ONEST_MEDIUM_WOFF2: &[u8] = include_bytes!("../assets/fonts/onest-medium.woff2");
 
-/* ================= Chat wallpapers ================= */
-.main { position: relative; }
-.main::before {
-  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0;
-  opacity: 0.55; transition: background 0.35s ease;
-}
-.main > * { position: relative; z-index: 1; }
-.app[data-wallpaper="nebula"] .main::before {
-  background:
-    radial-gradient(900px 500px at 15% 0%, rgba(83,189,235,0.16), transparent 60%),
-    radial-gradient(700px 500px at 85% 100%, rgba(0,168,132,0.16), transparent 60%);
-}
-.app[data-wallpaper="grid"] .main::before {
-  background-image:
-    linear-gradient(rgba(255,255,255,0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.045) 1px, transparent 1px);
-  background-size: 34px 34px;
-}
-.app[data-wallpaper="dots"] .main::before {
-  background-image: radial-gradient(rgba(255,255,255,0.10) 1px, transparent 1px);
-  background-size: 18px 18px;
-}
-.app[data-wallpaper="clean"] .main::before { background: none; }
+/// Inline SVG symbol sheet. One 24px / 1.5px stroke set for the whole desktop UI.
+const ICON_SPRITE: &str = r#"<svg class='svg-sprite' xmlns='http://www.w3.org/2000/svg' aria-hidden='true'>
+<symbol id='i-chat' viewBox='0 0 24 24'><path d='M4 5.5h16v11H9l-5 3.5v-14.5z'/></symbol>
+<symbol id='i-users' viewBox='0 0 24 24'><circle cx='9' cy='8' r='3'/><path d='M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5'/><path d='M15.5 5.6a3 3 0 0 1 0 5.8'/><path d='M17 14.2c2.1.4 3.5 2.1 3.5 4.8'/></symbol>
+<symbol id='i-channel' viewBox='0 0 24 24'><path d='M4 10v4h3l7 4V6l-7 4H4z'/><path d='M17 9.5a4 4 0 0 1 0 5'/><path d='M19.5 7a7 7 0 0 1 0 10'/></symbol>
+<symbol id='i-user' viewBox='0 0 24 24'><circle cx='12' cy='8' r='3.5'/><path d='M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6'/></symbol>
+<symbol id='i-lock' viewBox='0 0 24 24'><rect x='5' y='10.5' width='14' height='9.5' rx='2'/><path d='M8 10.5V8a4 4 0 0 1 8 0v2.5'/></symbol>
+<symbol id='i-star' viewBox='0 0 24 24'><path d='M12 4l2.4 5 5.6.8-4 3.9.9 5.5-4.9-2.6-4.9 2.6.9-5.5-4-3.9 5.6-.8L12 4z'/></symbol>
+<symbol id='i-send' viewBox='0 0 24 24'><path d='M4 11.5L20 4l-6.5 16-2.4-6.1L4 11.5z'/><path d='M11.1 13.9L20 4'/></symbol>
+<symbol id='i-settings' viewBox='0 0 24 24'><path d='M4 7h10'/><path d='M18 7h2'/><path d='M4 17h2'/><path d='M10 17h10'/><circle cx='16' cy='7' r='2'/><circle cx='8' cy='17' r='2'/></symbol>
+<symbol id='i-globe' viewBox='0 0 24 24'><circle cx='12' cy='12' r='8'/><path d='M4 12h16'/><path d='M12 4c2.5 2.4 3.7 5 3.7 8s-1.2 5.6-3.7 8c-2.5-2.4-3.7-5-3.7-8s1.2-5.6 3.7-8z'/></symbol>
+<symbol id='i-refresh' viewBox='0 0 24 24'><path d='M19 8a7.5 7.5 0 0 0-13-1.5L4 9'/><path d='M4 4v5h5'/><path d='M5 16a7.5 7.5 0 0 0 13 1.5L20 15'/><path d='M20 20v-5h-5'/></symbol>
+<symbol id='i-search' viewBox='0 0 24 24'><circle cx='10.5' cy='10.5' r='5.5'/><path d='M15 15l4.5 4.5'/></symbol>
+<symbol id='i-bell' viewBox='0 0 24 24'><path d='M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15L6 16z'/><path d='M10 20h4'/></symbol>
+<symbol id='i-volume' viewBox='0 0 24 24'><path d='M4 10v4h3l4 3V7l-4 3H4z'/><path d='M15 9.5a4 4 0 0 1 0 5'/><path d='M17.5 7a7 7 0 0 1 0 10'/></symbol>
+<symbol id='i-download' viewBox='0 0 24 24'><path d='M12 4v10'/><path d='M8 10.5l4 4 4-4'/><path d='M5 19h14'/></symbol>
+<symbol id='i-check' viewBox='0 0 24 24'><path d='M5 12.5l4.2 4.2L19 7'/></symbol>
+<symbol id='i-arrow-left' viewBox='0 0 24 24'><path d='M19 12H5'/><path d='M10 7l-5 5 5 5'/></symbol>
+<symbol id='i-arrow-right' viewBox='0 0 24 24'><path d='M5 12h14'/><path d='M14 7l5 5-5 5'/></symbol>
+<symbol id='i-trash' viewBox='0 0 24 24'><path d='M5 7h14'/><path d='M9 7V5h6v2'/><path d='M7 7l1 13h8l1-13'/><path d='M10 11v5'/><path d='M14 11v5'/></symbol>
+<symbol id='i-plus' viewBox='0 0 24 24'><path d='M12 5v14'/><path d='M5 12h14'/></symbol>
+<symbol id='i-x' viewBox='0 0 24 24'><path d='M6 6l12 12'/><path d='M18 6L6 18'/></symbol>
+<symbol id='i-image' viewBox='0 0 24 24'><rect x='4' y='5' width='16' height='14' rx='2'/><circle cx='9' cy='10' r='1.5'/><path d='M4 16l5-4 4 3 3-2 4 3'/></symbol>
+<symbol id='i-shield' viewBox='0 0 24 24'><path d='M12 3.5l7 2.8v5.2c0 4.4-3 7.4-7 9-4-1.6-7-4.6-7-9V6.3l7-2.8z'/><path d='M9 12l2 2 4-4'/></symbol>
+<symbol id='i-more' viewBox='0 0 24 24'><circle cx='6' cy='12' r='1'/><circle cx='12' cy='12' r='1'/><circle cx='18' cy='12' r='1'/></symbol>
+<symbol id='i-server' viewBox='0 0 24 24'><rect x='4' y='5' width='16' height='6' rx='2'/><rect x='4' y='13' width='16' height='6' rx='2'/><path d='M8 8h.01'/><path d='M8 16h.01'/></symbol>
+<symbol id='i-moon' viewBox='0 0 24 24'><path d='M19 14.5A7.5 7.5 0 0 1 9.5 5 7.5 7.5 0 1 0 19 14.5z'/></symbol>
+<symbol id='i-sun' viewBox='0 0 24 24'><circle cx='12' cy='12' r='3.5'/><path d='M12 3v2'/><path d='M12 19v2'/><path d='M3 12h2'/><path d='M19 12h2'/><path d='M5.6 5.6L7 7'/><path d='M17 17l1.4 1.4'/><path d='M18.4 5.6L17 7'/><path d='M7 17l-1.4 1.4'/></symbol>
+<symbol id='i-monitor' viewBox='0 0 24 24'><rect x='3' y='5' width='18' height='12' rx='2'/><path d='M9 21h6'/><path d='M12 17v4'/></symbol>
+<symbol id='i-key' viewBox='0 0 24 24'><circle cx='8' cy='12' r='4'/><path d='M12 12h8'/><path d='M17 12v3'/><path d='M20 12v2'/></symbol>
+<symbol id='i-eye' viewBox='0 0 24 24'><path d='M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6z'/><circle cx='12' cy='12' r='2.5'/></symbol>
+<symbol id='i-warning' viewBox='0 0 24 24'><path d='M12 4l9 16H3l9-16z'/><path d='M12 10v4'/><path d='M12 17h.01'/></symbol>
+<symbol id='i-clock' viewBox='0 0 24 24'><circle cx='12' cy='12' r='8'/><path d='M12 8v4.5l3 2'/></symbol>
+<symbol id='i-logout' viewBox='0 0 24 24'><path d='M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4'/><path d='M14 8l4 4-4 4'/><path d='M9 12h9'/></symbol>
+<symbol id='i-edit' viewBox='0 0 24 24'><path d='M5 19h4l10-10-4-4L5 15v4z'/><path d='M13.5 6.5l4 4'/></symbol>
+</svg>"#;
 
-/* ================= Bubble styles ================= */
-.app[data-bubble="neon"] .bubble {
-  border: 1px solid var(--accent);
-  box-shadow: 0 0 0 1px rgba(255,255,255,0.04), 0 0 18px -6px var(--accent);
+fn icon(name: &str) -> String {
+    format!("<svg class='i' aria-hidden='true'><use href='#i-{name}'></use></svg>")
 }
-.app[data-bubble="glass"] .bubble {
-  background: rgba(255,255,255,0.07) !important;
-  border: 1px solid rgba(255,255,255,0.16);
-  backdrop-filter: blur(10px) saturate(140%);
-}
-.app[data-bubble="glass"] .message-row.out .bubble {
-  background: linear-gradient(135deg, rgba(83,189,235,0.32), rgba(0,168,132,0.28)) !important;
-}
-
-/* ================= Font scale ================= */
-.app[data-font="compact"] { font-size: 12.5px; }
-.app[data-font="compact"] .bubble { padding: 6px 10px; }
-.app[data-font="large"] { font-size: 16px; }
-.app[data-font="large"] .bubble { padding: 10px 14px; }
-.app[data-font="large"] .chat-title { font-size: 17px; }
-
-/* ================= Animations ================= */
-.app.anim-on .chat-item { transition: background 0.18s ease, transform 0.18s ease; }
-.app.anim-on .chat-item:hover { transform: translateX(2px); }
-.app.anim-on .message-row { animation: msg-in 0.24s ease both; }
-.app.anim-on .auth-card { animation: card-in 0.28s ease both; }
-.app.anim-on .btn, .app.anim-on .icon-btn, .app.anim-on .seg, .app.anim-on .nav-item {
-  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease, border-color 0.18s ease;
-}
-.app.anim-on .btn:active, .app.anim-on .icon-btn:active, .app.anim-on .seg:active { transform: scale(0.97); }
-.app.anim-on .switch { transition: background 0.2s ease; }
-@keyframes msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-@keyframes card-in { from { opacity: 0; transform: translateY(10px) scale(0.995); } to { opacity: 1; transform: none; } }
-.app.no-anim *, .app.no-anim *::before, .app.no-anim *::after {
-  animation: none !important; transition: none !important;
-}
-
-/* ================= Push toast ================= */
-.push-toast-box {
-  position: fixed; top: 16px; right: 16px; z-index: 9999;
-  display: flex; flex-direction: column; gap: 10px; max-width: 360px;
-}
-.push-toast {
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--accent-2);
-  border-radius: 12px;
-  padding: 11px 14px;
-  box-shadow: 0 18px 40px -14px rgba(0,0,0,0.8);
-  animation: toast-in 0.28s cubic-bezier(0.2,0.9,0.3,1.2) both;
-}
-.push-toast-title { font-weight: 700; font-size: 13px; margin-bottom: 3px; }
-.push-toast-body { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@keyframes toast-in { from { opacity: 0; transform: translateX(24px) scale(0.96); } to { opacity: 1; transform: none; } }
-"#;
 
 fn human_ttl_locale(secs: u32, is_en: bool) -> String {
     if is_en {
@@ -7068,11 +6835,11 @@ fn human_ttl_locale(secs: u32, is_en: bool) -> String {
 fn chat_icon_for(title: &str) -> &'static str {
     let lower = title.to_lowercase();
     if lower.contains("избран") || lower.contains("saved") {
-        "★"
+        "star"
     } else if lower.contains("поддерж") || lower.contains("support") {
-        "✓"
+        "shield"
     } else {
-        "•"
+        "chat"
     }
 }
 
@@ -7303,12 +7070,12 @@ mod tests {
 
         gui.handle_command("cmd=step_account");
         let ob_html = gui.render_html();
-        assert!(ob_html.contains("① Account Vault"));
+        assert!(ob_html.contains("Account vault"));
         assert!(ob_html.contains("Register an account to access chats."));
 
         gui.handle_command("cmd=step_servers");
         let srv_html = gui.render_html();
-        assert!(srv_html.contains("② Servers & Relays"));
+        assert!(srv_html.contains("Servers & relays"));
         assert!(srv_html.contains("Network Lock (Kill Switch)"));
 
         // Verify mandatory authentication gate: unauthenticated user cannot enter chats or servers
@@ -7340,7 +7107,8 @@ mod tests {
         assert!(!gated_gui.state.is_authenticated);
 
         // Correct password signs in and opens ChatWorkspace
-        gated_gui.handle_command("cmd=signin_account&nick=shadow-fox-1024&pwd=AEGis%23StrongPass99!");
+        gated_gui
+            .handle_command("cmd=signin_account&nick=shadow-fox-1024&pwd=AEGis%23StrongPass99!");
         assert!(gated_gui.state.is_authenticated);
         assert_eq!(gated_gui.state.current_screen, Screen::ChatWorkspace);
     }
@@ -7789,7 +7557,7 @@ mod tests {
         gui.handle_command("cmd=step_account");
         assert_eq!(gui.state.current_screen, Screen::Onboarding);
         let step1_html = gui.render_html();
-        assert!(step1_html.contains("① Сейф Аккаунта"));
+        assert!(step1_html.contains("Сейф аккаунта"));
         assert!(!step1_html.contains("AEGis#StrongPass99!"));
         assert!(!step1_html.contains("nordic-falcon"));
 
@@ -7803,7 +7571,7 @@ mod tests {
         gui.handle_command("cmd=step_servers");
         assert_eq!(gui.state.current_screen, Screen::ServerLauncher);
         let step2_html = gui.render_html();
-        assert!(step2_html.contains("② Матрица Серверов и Релеев"));
+        assert!(step2_html.contains("Серверы и релеи"));
         assert!(!step2_html.contains("nordic-falcon"));
 
         // 4. Step 3 (ChatWorkspace) supports Safety Number, Key-Change Warning (which blocks sending until acknowledged), Queue Rotation, MLS Group <=20, and Explicit Backup
@@ -7862,10 +7630,8 @@ mod tests {
     #[test]
     fn t0018_http_form_actions_accept_only_local_get_and_urlencoded_post() {
         assert_eq!(
-            http_action_query(
-                "GET /action?cmd=gen_nick HTTP/1.1\r\nHost: 127.0.0.1:7878\r\n\r\n"
-            )
-            .as_deref(),
+            http_action_query("GET /action?cmd=gen_nick HTTP/1.1\r\nHost: 127.0.0.1:7878\r\n\r\n")
+                .as_deref(),
             Some("cmd=gen_nick")
         );
         assert_eq!(
@@ -7879,9 +7645,8 @@ mod tests {
             "POST /action HTTP/1.1\r\nHost: 127.0.0.1:7878\r\nContent-Type: text/plain\r\n\r\ncmd=panic"
         )
         .is_none());
-        assert!(http_action_query(
-            "GET /not-the-ui HTTP/1.1\r\nHost: 127.0.0.1:7878\r\n\r\n"
-        )
-        .is_none());
+        assert!(
+            http_action_query("GET /not-the-ui HTTP/1.1\r\nHost: 127.0.0.1:7878\r\n\r\n").is_none()
+        );
     }
 }
