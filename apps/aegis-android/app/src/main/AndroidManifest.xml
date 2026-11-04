@@ -2,30 +2,27 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
+        android:name=".app.AegisApp"
         android:allowBackup="false"
-        android:dataExtractionRules="@xml/no_backup_rules"
-        android:hasFragileUserData="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:icon="@drawable/ic_launcher_aegis"
         android:roundIcon="@drawable/ic_launcher_aegis"
         android:label="@string/app_name"
         android:theme="@style/Theme.Aegis"
-        android:supportsRtl="true"
-        android:usesCleartextTraffic="false">
+        android:supportsRtl="true">
 
         <activity
             android:name=".MainActivity"
-            android:enabled="true"
             android:exported="true"
-            android:excludeFromRecents="true"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -33,13 +30,12 @@
         </activity>
 
         <service
-            android:name=".service.AegisBackgroundService"
-            android:enabled="true"
+            android:name=".app.AegisService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Encrypted message transport service" />
+                android:value="Periodic check for new encrypted messages while the account is unlocked" />
         </service>
 
     </application>

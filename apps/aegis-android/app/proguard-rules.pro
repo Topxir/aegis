@@ -1,3 +1,4 @@
-# Aegis Messenger ProGuard / R8 Rules
--keep class org.aegis.messenger.** { *; }
+-keep class org.aegis.messenger.core.** { *; }
+-keep class org.bouncycastle.crypto.** { *; }
+-dontwarn org.bouncycastle.**
 -dontwarn kotlin.**

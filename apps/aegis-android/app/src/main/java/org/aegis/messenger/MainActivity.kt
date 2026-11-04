@@ -1,75 +1,52 @@
 package org.aegis.messenger
 
 import android.Manifest
-import android.content.Intent
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
-import android.view.inputmethod.EditorInfo
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import org.aegis.messenger.core.AegisRustBridge
-import org.aegis.messenger.notify.AegisNotifications
-import org.aegis.messenger.service.AegisBackgroundService
-import org.aegis.messenger.ui.AegisComposeApp
+import org.aegis.messenger.app.AegisApp
+import org.aegis.messenger.app.Boot
+import org.aegis.messenger.app.Session
+import org.aegis.messenger.ui.AegisTheme
+import org.aegis.messenger.ui.Root
 
 class MainActivity : ComponentActivity() {
+    private val session: Session get() = (application as AegisApp).session
 
-    private lateinit var rustBridge: AegisRustBridge
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(Boot.localized(newBase))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_SECURE
-        )
-
-        rustBridge = AegisRustBridge(applicationContext)
-        AegisNotifications.ensureChannels(this)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            runCatching {
-                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
-            }
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-
-        runCatching {
-            val serviceIntent = Intent(this, AegisBackgroundService::class.java).apply {
-                action = AegisBackgroundService.ACTION_START_TRANSPORT
-            }
-            startForegroundService(serviceIntent)
-        }
-
         setContent {
-            AegisComposeApp(
-                bridge = rustBridge,
-                onPanicWipeTriggered = {
-                    rustBridge.triggerEmergencyPanicWipe()
-                    runCatching {
-                        stopService(Intent(this, AegisBackgroundService::class.java))
-                    }
-                }
-            )
+            AegisTheme { Root(session) { recreate() } }
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        AegisNotifications.isAppForeground = true
+    override fun onStart() {
+        super.onStart()
+        session.onForeground()
+        session.pollSoon()
     }
 
-    override fun onPause() {
-        super.onPause()
-        AegisNotifications.isAppForeground = false
-        rustBridge.onAppBackgrounded()
+    override fun onStop() {
+        session.onBackground()
+        super.onStop()
     }
 
-    companion object {
-        fun secureKeyboardImeOptions(): Int {
-            return EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or EditorInfo.IME_ACTION_SEND
-        }
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        session.touch()
     }
 }

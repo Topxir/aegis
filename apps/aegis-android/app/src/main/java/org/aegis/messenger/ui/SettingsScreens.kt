@@ -1,0 +1,159 @@
+package org.aegis.messenger.ui
+
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import org.aegis.messenger.BuildConfig
+import org.aegis.messenger.R
+import org.aegis.messenger.app.Boot
+import org.aegis.messenger.app.Session
+import org.aegis.messenger.data.Settings
+import org.aegis.messenger.data.VaultData
+
+@Composable
+private fun lockLabel(min: Int): String = when (min) {
+    0 -> stringResource(R.string.lock_immediately)
+    -1 -> stringResource(R.string.lock_never)
+    60 -> stringResource(R.string.lock_hour)
+    else -> stringResource(R.string.lock_minutes, min)
+}
+
+@Composable
+fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: () -> Unit, onLanguage: () -> Unit) {
+    val ctx = LocalContext.current
+    val s = d.settings
+    var name by remember { mutableStateOf(s.displayName) }
+    var endpoint by remember { mutableStateOf(s.endpoint) }
+    var proxy by remember { mutableStateOf(s.proxy) }
+    var error by remember { mutableStateOf<Int?>(null) }
+    var saved by remember { mutableStateOf(false) }
+    var test by remember { mutableStateOf<Boolean?>(null) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var info by remember { mutableStateOf<Int?>(null) }
+
+    val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if (uri != null) session.exportVault(d.username, uri) { e -> info = if (e == null) R.string.info_exported else e }
+    }
+
+    fun save(next: Settings) {
+        session.saveSettings(next) { e -> error = e; saved = e == null }
+    }
+    fun current() = Settings(endpoint, proxy, name, s.idleLockMin, s.backgroundLockMin, s.pollSeconds, s.notifications)
+
+    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        TopBar(stringResource(R.string.settings), onBack = onBack)
+        Divider()
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            Section(stringResource(R.string.account)) {
+                Text("@" + d.username, style = MaterialTheme.typography.titleMedium, color = Ui.text)
+                if (!d.registered) Note(stringResource(R.string.not_registered), Ui.warning)
+                Field(name, { name = it; saved = false }, stringResource(R.string.field_display_name))
+            }
+            Divider()
+            Section(stringResource(R.string.server)) {
+                Field(endpoint, { endpoint = it; saved = false; test = null }, stringResource(R.string.field_server), keyboard = androidx.compose.ui.text.input.KeyboardType.Uri)
+                Note(stringResource(R.string.server_cloudflare_note))
+                Field(proxy, { proxy = it; saved = false; test = null }, stringResource(R.string.field_proxy), keyboard = androidx.compose.ui.text.input.KeyboardType.Uri)
+                Note(stringResource(R.string.proxy_note))
+                Secondary(stringResource(R.string.test_connection), enabled = !session.busy) {
+                    // The test uses the saved settings, so save first.
+                    session.saveSettings(current()) { e ->
+                        error = e
+                        if (e == null) session.testConnection { test = it }
+                    }
+                }
+                test?.let { Note(stringResource(if (it) R.string.test_ok else R.string.test_fail), if (it) Ui.accent else Ui.danger) }
+            }
+            Divider()
+            Section(stringResource(R.string.locking)) {
+                Text(stringResource(R.string.lock_idle), color = Ui.text)
+                Choices(listOf(1, 5, 15, 60).map { it to lockLabel(it) }, s.idleLockMin) { save(current().withLocks(it, s.backgroundLockMin)) }
+                Text(stringResource(R.string.lock_background), color = Ui.text, modifier = Modifier.padding(top = 12.dp))
+                Choices(listOf(0, 1, 5, 15, 60, -1).map { it to lockLabel(it) }, s.backgroundLockMin) { save(current().withLocks(s.idleLockMin, it)) }
+                Note(stringResource(R.string.lock_note))
+                Secondary(stringResource(R.string.lock_now)) { session.lock() }
+            }
+            Divider()
+            Section(stringResource(R.string.notifications)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(stringResource(R.string.notifications_enable), color = Ui.text, modifier = Modifier.weight(1f))
+                    Switch(
+                        s.notifications, { save(current().withNotify(it)) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = Ui.accent, checkedThumbColor = Ui.onAccent, uncheckedTrackColor = Ui.surface2, uncheckedThumbColor = Ui.muted, uncheckedBorderColor = Ui.border),
+                    )
+                }
+                Note(stringResource(R.string.notifications_note))
+            }
+            Divider()
+            Section(stringResource(R.string.language)) {
+                val cur = Boot.language(ctx)
+                Choices(
+                    listOf("" to stringResource(R.string.lang_system), "en" to "English", "ru" to "Русский"),
+                    cur,
+                ) { Boot.setLanguage(ctx, it); onLanguage() }
+            }
+            Divider()
+            Section(stringResource(R.string.data)) {
+                Secondary(stringResource(R.string.start_export)) { exporter.launch("aegis-" + d.username + ".vault") }
+                Note(stringResource(R.string.export_note))
+                Secondary(stringResource(R.string.delete_account), danger = true) { confirmDelete = true }
+                info?.let { Note(stringResource(it), Ui.accent) }
+            }
+            Divider()
+            error?.let { Note(stringResource(it), Ui.danger) }
+            if (saved) Note(stringResource(R.string.saved), Ui.accent)
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Primary(stringResource(R.string.save)) { save(current()) }
+                Secondary(stringResource(R.string.about)) { onAbout() }
+                Note(stringResource(R.string.version_line, BuildConfig.VERSION_NAME))
+            }
+        }
+    }
+    if (confirmDelete) Confirm(
+        stringResource(R.string.delete_account), stringResource(R.string.delete_account_body), stringResource(R.string.delete),
+        { confirmDelete = false; session.deleteAccount() }, { confirmDelete = false },
+    )
+}
+
+private fun Settings.withLocks(idle: Int, bg: Int) = Settings(endpoint, proxy, displayName, idle, bg, pollSeconds, notifications)
+private fun Settings.withNotify(on: Boolean) = Settings(endpoint, proxy, displayName, idleLockMin, backgroundLockMin, pollSeconds, on)
+
+@Composable
+fun AboutScreen(onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        TopBar(stringResource(R.string.about), onBack = onBack)
+        Divider()
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(stringResource(R.string.app_name) + " " + BuildConfig.VERSION_NAME, style = MaterialTheme.typography.titleLarge, color = Ui.text)
+            Text(stringResource(R.string.about_alpha), style = MaterialTheme.typography.titleMedium, color = Ui.warning)
+            Text(stringResource(R.string.about_intro), style = MaterialTheme.typography.bodyMedium, color = Ui.text)
+            Text(stringResource(R.string.about_limits_title), style = MaterialTheme.typography.labelMedium, color = Ui.muted)
+            listOf(
+                R.string.about_l1, R.string.about_l2, R.string.about_l3, R.string.about_l4, R.string.about_l5, R.string.about_l6,
+            ).forEach { Text("• " + stringResource(it), style = MaterialTheme.typography.bodyMedium, color = Ui.text) }
+            Text(stringResource(R.string.about_privacy), style = MaterialTheme.typography.bodyMedium, color = Ui.muted)
+        }
+    }
+}
