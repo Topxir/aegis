@@ -6,7 +6,16 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.remember
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -32,10 +41,14 @@ import org.aegis.messenger.app.Session
 @Composable
 fun Root(session: Session, onLanguage: () -> Unit) {
     val d = session.data
-    Box(Modifier.fillMaxSize().background(Ui.bg)) {
+    val anim = animationsOn()
+    val shift by if (anim) rememberInfiniteTransition(label = "drift").animateFloat(
+        0f, 1f, infiniteRepeatable(tween(20_000, easing = LinearEasing), RepeatMode.Reverse), label = "shift",
+    ) else remember { mutableStateOf(0f) }
+    Box(Modifier.fillMaxSize().background(Ui.bg).background(Ui.ground(if (d == null) shift else 0f))) {
         if (d == null) StartScreen(session) else Navigator(session, onLanguage)
         session.notice?.let { n ->
-            Box(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(12.dp).background(Ui.surface2).fillMaxWidth()) {
+            Box(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(12.dp).clip(RoundedCornerShape(14.dp)).background(Ui.surface2).border(1.dp, Ui.border, RoundedCornerShape(14.dp)).fillMaxWidth()) {
                 Text(stringResource(n), color = Ui.text, modifier = Modifier.padding(12.dp).align(Alignment.CenterStart))
                 TextButton({ session.notice = null }, Modifier.align(Alignment.CenterEnd)) { Text(stringResource(R.string.ok), color = Ui.accent) }
             }
@@ -45,6 +58,7 @@ fun Root(session: Session, onLanguage: () -> Unit) {
 
 @Composable
 private fun Navigator(session: Session, onLanguage: () -> Unit) {
+    val anim = animationsOn()
     var stack by rememberSaveable { mutableStateOf("list") }
     val routes = stack.split('|')
     val route = routes.last()
@@ -57,7 +71,7 @@ private fun Navigator(session: Session, onLanguage: () -> Unit) {
 
     AnimatedContent(
         targetState = route,
-        transitionSpec = { fadeIn(tween(Ui.ANIM_MS)) togetherWith fadeOut(tween(Ui.ANIM_MS)) },
+        transitionSpec = { val ms = if (anim) Ui.ANIM_MS else 0; fadeIn(tween(ms)) togetherWith fadeOut(tween(ms)) },
         label = "route",
     ) { r ->
         val d = session.data ?: return@AnimatedContent

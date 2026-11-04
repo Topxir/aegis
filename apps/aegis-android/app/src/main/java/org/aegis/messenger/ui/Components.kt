@@ -40,15 +40,22 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
+import org.aegis.messenger.R
 
 @Composable
 fun TopBar(title: String, subtitle: String? = null, onBack: (() -> Unit)? = null, actions: @Composable () -> Unit = {}) {
     Row(
-        Modifier.fillMaxWidth().statusBarsPadding().height(56.dp).padding(horizontal = 4.dp),
+        Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 56.dp).padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (onBack != null) {
-            IconButton(onClick = onBack) { Icon(AegisIcons.ArrowLeft, null, tint = Ui.text) }
+            IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) { Icon(AegisIcons.ArrowLeft, stringResource(R.string.back), tint = Ui.text) }
         } else {
             Spacer(Modifier.width(12.dp))
         }
@@ -62,13 +69,13 @@ fun TopBar(title: String, subtitle: String? = null, onBack: (() -> Unit)? = null
 
 @Composable
 fun BarIcon(icon: ImageVector, desc: String, onClick: () -> Unit) {
-    IconButton(onClick = onClick) { Icon(icon, desc, tint = Ui.text) }
+    IconButton(onClick = onClick, modifier = Modifier.size(48.dp)) { Icon(icon, desc, tint = Ui.text) }
 }
 
 @Composable
 fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-        Text(title, style = MaterialTheme.typography.labelMedium, color = Ui.muted)
+        Text(title.uppercase(), style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 1.5.sp), color = Ui.muted)
         Spacer(Modifier.height(8.dp))
         content()
     }
@@ -88,6 +95,7 @@ fun Field(
     singleLine: Boolean = true,
     keyboard: KeyboardType = KeyboardType.Text,
     enabled: Boolean = true,
+    mono: Boolean = false,
 ) {
     OutlinedTextField(
         value = value,
@@ -97,11 +105,17 @@ fun Field(
         enabled = enabled,
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(keyboardType = if (password) KeyboardType.Password else keyboard, autoCorrect = false),
+        shape = RoundedCornerShape(14.dp),
+        textStyle = if (mono) MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace) else MaterialTheme.typography.bodyLarge,
         colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Ui.accent,
+            focusedBorderColor = Ui.muted,
             unfocusedBorderColor = Ui.border,
-            focusedLabelColor = Ui.accent,
+            focusedContainerColor = Ui.surface,
+            unfocusedContainerColor = Ui.surface,
+            focusedLabelColor = Ui.text,
             unfocusedLabelColor = Ui.muted,
+            focusedTextColor = Ui.text,
+            unfocusedTextColor = Ui.text,
             cursorColor = Ui.accent,
         ),
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -110,15 +124,15 @@ fun Field(
 
 @Composable
 fun Primary(text: String, enabled: Boolean = true, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = Ui.accent, contentColor = Ui.onAccent,
-            disabledContainerColor = Ui.surface2, disabledContentColor = Ui.muted,
-        ),
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-    ) { Text(text) }
+    val shape = RoundedCornerShape(16.dp)
+    Box(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp).height(52.dp).clip(shape)
+            .background(if (enabled) Ui.lightGradient else SolidColor(Ui.surface2))
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, style = MaterialTheme.typography.labelLarge, color = if (enabled) Ui.onAccent else Ui.muted)
+    }
 }
 
 @Composable
@@ -128,13 +142,14 @@ fun Secondary(text: String, enabled: Boolean = true, danger: Boolean = false, mo
         enabled = enabled,
         border = BorderStroke(1.dp, Ui.border),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = if (danger) Ui.danger else Ui.text),
-        modifier = modifier.padding(vertical = 4.dp),
+        shape = RoundedCornerShape(14.dp),
+        modifier = modifier.padding(vertical = 4.dp).heightIn(min = 48.dp),
     ) { Text(text) }
 }
 
 @Composable
 fun Link(text: String, onClick: () -> Unit) {
-    TextButton(onClick = onClick) { Text(text, color = Ui.accent) }
+    TextButton(onClick = onClick, modifier = Modifier.heightIn(min = 48.dp)) { Text(text, color = Ui.accent) }
 }
 
 /** A single-select row of text options. */
@@ -146,9 +161,9 @@ fun <T> Choices(options: List<Pair<T, String>>, selected: T, onSelect: (T) -> Un
         options.forEach { (value, label) ->
             val on = value == selected
             Box(
-                Modifier.weight(1f).height(40.dp)
-                    .background(if (on) Ui.surface2 else Ui.bg)
-                    .clickable { onSelect(value) },
+                Modifier.weight(1f).height(48.dp)
+                    .background(if (on) Ui.surface2 else Color.Transparent)
+                    .clickable(role = Role.Tab) { onSelect(value) },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -165,10 +180,29 @@ fun <T> Choices(options: List<Pair<T, String>>, selected: T, onSelect: (T) -> Un
 }
 
 @Composable
-fun Avatar(name: String, size: Int = 44) {
-    val letter = name.trimStart('@').firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "?"
-    Box(Modifier.size(size.dp).clip(CircleShape).background(Ui.surface2), contentAlignment = Alignment.Center) {
-        Text(letter, style = MaterialTheme.typography.titleMedium, color = Ui.accent)
+fun Avatar(name: String, size: Int = 48) {
+    val initials = name.trimStart('@').filter { it.isLetterOrDigit() }.take(2).uppercase().ifEmpty { "?" }
+    Box(Modifier.size(size.dp).clip(CircleShape).background(Ui.avatarGradient).border(1.dp, Ui.border, CircleShape), contentAlignment = Alignment.Center) {
+        Text(initials, style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace), color = Ui.text)
+    }
+}
+
+/** Plain text tabs with an underline under the selected one. */
+@Composable
+fun <T> UnderlineTabs(options: List<Pair<T, String>>, selected: T, onSelect: (T) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+        options.forEach { (value, label) ->
+            val on = value == selected
+            Column(
+                Modifier.heightIn(min = 48.dp).clickable(role = Role.Tab) { onSelect(value) },
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(label, style = MaterialTheme.typography.labelLarge, color = if (on) Ui.text else Ui.muted, maxLines = 1)
+                Spacer(Modifier.height(6.dp))
+                Box(Modifier.height(1.5.dp).width(24.dp).background(if (on) Ui.text else Color.Transparent))
+            }
+        }
     }
 }
 

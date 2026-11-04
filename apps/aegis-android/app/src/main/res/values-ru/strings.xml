@@ -14,7 +14,6 @@
     <string name="you">вы</string>
     <string name="info">Сведения</string>
     <string name="send">Отправить</string>
-    <string name="start_tagline">Имя и пароль. Все данные остаются на этом устройстве.</string>
     <string name="start_unlock">Вход</string>
     <string name="start_create">Новый аккаунт</string>
     <string name="field_username">Имя пользователя</string>
@@ -133,4 +132,15 @@
     <string name="about_l5">Исчезающие сообщения зависят от того, выполняет ли их собеседник.</string>
     <string name="about_l6">Только текстовые сообщения. Звонков, файлов и изображений нет.</string>
     <string name="about_privacy">В приложении нет аналитики, рекламы и отправки отчётов об ошибках; оно общается только с настроенным вами сервером.</string>
+    <string name="back">Назад</string>
+    <string name="chats_title">Чаты</string>
+    <string name="keys_hint">Ключи только на этом телефоне.</string>
+    <string name="start_headline">Ник и пароль.
+Больше ничего.</string>
+    <string name="start_subline">Ни телефона, ни почты. Данные открываются только на этом устройстве.</string>
+    <string name="start_point_1">— сервер видит конверт, а не письмо</string>
+    <string name="start_point_2">— найти вас можно только по точному нику</string>
+    <string name="start_point_3">— код открыт</string>
+    <string name="start_import_tab">Импорт</string>
+    <string name="start_password_note">Пароль не восстанавливается. Сервер его никогда не получает.</string>
 </resources>

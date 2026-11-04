@@ -15,10 +15,16 @@ path = "src/main.rs"
 
 [dependencies]
 aegis-core = { path = "../aegis-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tao = "0.37.2"
 wry = "0.57.1"
+
+[dev-dependencies]
+aegis-server = { path = "../aegis-server" }
 
 [lints]
 workspace = true

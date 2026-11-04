@@ -5,7 +5,12 @@ import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import android.provider.Settings
+import androidx.compose.runtime.remember
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -14,19 +19,43 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.aegis.messenger.R
 
-/** Black background, neutral greys, one muted accent. */
+/** Dark only: near-black ground, soft grey-black gradients, light primary. */
 object Ui {
-    val bg = Color(0xFF000000)
-    val surface = Color(0xFF0E0E10)
+    val bg = Color(0xFF0A0A0B)
+    val surface = Color(0xFF111113)
     val surface2 = Color(0xFF17171A)
-    val border = Color(0xFF26262A)
-    val text = Color(0xFFEDEDEE)
-    val muted = Color(0xFF8D8D93)
-    val accent = Color(0xFF8FA6C2)
-    val onAccent = Color(0xFF05070A)
+    val border = Color(0xFF1F2024)
+    val bubbleBorder = Color(0xFF222327)
+    val text = Color(0xFFEDEDEF)
+    val muted = Color(0xFF8B8C92)
+    val accent = Color(0xFFE9E9EC)
+    val onAccent = Color(0xFF0E0E10)
     val danger = Color(0xFFD27B74)
     val warning = Color(0xFFC9A66B)
     const val ANIM_MS = 180
+    const val ENTER_MS = 300
+
+    val lightGradient = Brush.verticalGradient(listOf(Color(0xFFF1F1F3), Color(0xFFD6D6DB)))
+    val outBubble = Brush.linearGradient(listOf(Color(0xFFECECEF), Color(0xFFD9D9DE)))
+    val avatarGradient = Brush.linearGradient(listOf(Color(0xFF3A3B40), Color(0xFF1B1C1F)))
+
+    /** Soft radial glow anchored top-left; [shift] moves the centre a little (0..1). */
+    fun ground(shift: Float = 0f): Brush = Brush.radialGradient(
+        colors = listOf(Color(0xFF1E1F23), Color(0xFF0D0D0F), Color(0xFF0A0A0B)),
+        center = Offset(120f + 160f * shift, 60f + 90f * shift),
+        radius = 1500f,
+    )
+}
+
+/** False when the system "remove animations" setting is on. */
+@Composable
+fun animationsOn(): Boolean {
+    val ctx = LocalContext.current
+    return remember {
+        try {
+            Settings.Global.getFloat(ctx.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) != 0f
+        } catch (_: Exception) { true }
+    }
 }
 
 private val Onest = FontFamily(
@@ -39,6 +68,8 @@ private fun style(size: Int, line: Int, weight: FontWeight = FontWeight.Normal) 
 
 private val Type = Typography(
     headlineSmall = style(22, 28, FontWeight.Medium),
+    displaySmall = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Light, fontSize = 34.sp, lineHeight = 40.sp),
+    headlineMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Light, fontSize = 30.sp, lineHeight = 36.sp),
     titleLarge = style(19, 24, FontWeight.Medium),
     titleMedium = style(16, 22, FontWeight.Medium),
     bodyLarge = style(16, 22),

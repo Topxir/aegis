@@ -27,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.aegis.messenger.R
 import org.aegis.messenger.app.Session
 import org.aegis.messenger.net.Endpoint
@@ -34,7 +35,8 @@ import org.aegis.messenger.net.Endpoint
 /** Shown whenever no account is unlocked. Asks for username and password every time. */
 @Composable
 fun StartScreen(session: Session) {
-    var create by rememberSaveable { mutableStateOf(false) }
+    var tab by rememberSaveable { mutableStateOf(0) } // 0 unlock, 1 create, 2 import
+    val create = tab == 1
     var user by rememberSaveable { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
     var pass2 by remember { mutableStateOf("") }
@@ -72,15 +74,25 @@ fun StartScreen(session: Session) {
             .verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 32.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineSmall, color = Ui.text)
-        Text(stringResource(R.string.start_tagline), style = MaterialTheme.typography.bodyMedium, color = Ui.muted)
+        Text(
+            stringResource(R.string.app_name).uppercase(),
+            style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 4.sp), color = Ui.muted,
+        )
         Spacer(Modifier.height(24.dp))
-        Choices(
-            listOf(false to stringResource(R.string.start_unlock), true to stringResource(R.string.start_create)),
-            create,
-        ) { create = it; error = null; info = null }
+        Text(stringResource(R.string.start_headline), style = MaterialTheme.typography.displaySmall, color = Ui.text)
+        Spacer(Modifier.height(10.dp))
+        Text(stringResource(R.string.start_subline), style = MaterialTheme.typography.bodyMedium, color = Ui.muted)
         Spacer(Modifier.height(12.dp))
-        Field(user, { user = it }, stringResource(R.string.field_username), keyboard = androidx.compose.ui.text.input.KeyboardType.Ascii)
+        listOf(R.string.start_point_1, R.string.start_point_2, R.string.start_point_3).forEach {
+            Text(stringResource(it), style = MaterialTheme.typography.bodyMedium, color = Ui.muted, modifier = Modifier.padding(vertical = 2.dp))
+        }
+        Spacer(Modifier.height(20.dp))
+        UnderlineTabs(
+            listOf(0 to stringResource(R.string.start_unlock), 1 to stringResource(R.string.start_create), 2 to stringResource(R.string.start_import_tab)),
+            tab,
+        ) { tab = it; error = null; info = null }
+        Spacer(Modifier.height(8.dp))
+        Field(user, { user = it }, stringResource(R.string.field_username), keyboard = androidx.compose.ui.text.input.KeyboardType.Ascii, mono = true)
         Field(pass, { pass = it }, stringResource(R.string.field_password), password = true)
         if (create) {
             Field(pass2, { pass2 = it }, stringResource(R.string.field_password_repeat), password = true)
@@ -88,6 +100,7 @@ fun StartScreen(session: Session) {
             Field(server, { server = it }, stringResource(R.string.field_server), keyboard = androidx.compose.ui.text.input.KeyboardType.Uri)
             Note(stringResource(R.string.start_create_note))
         }
+        if (tab == 2) Note(stringResource(R.string.start_import_note))
         error?.let { Note(stringResource(it), Ui.danger) }
         info?.let { Note(stringResource(it), Ui.accent) }
         Spacer(Modifier.height(8.dp))
@@ -95,18 +108,13 @@ fun StartScreen(session: Session) {
             Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.Center) {
                 CircularProgressIndicator(color = Ui.accent, strokeWidth = 2.dp)
             }
+        } else if (tab == 2) {
+            Primary(stringResource(R.string.start_import), enabled = user.isNotBlank() && pass.isNotEmpty()) { importer.launch(arrayOf("*/*")) }
+            Secondary(stringResource(R.string.start_export), enabled = user.isNotBlank()) { exporter.launch("aegis-account.vault") }
         } else {
             Primary(stringResource(if (create) R.string.start_create_btn else R.string.start_unlock_btn), enabled = user.isNotBlank() && pass.isNotEmpty()) { submit() }
         }
-        Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Secondary(stringResource(R.string.start_import), enabled = !session.busy && user.isNotBlank() && pass.isNotEmpty(), modifier = Modifier.weight(1f)) {
-                importer.launch(arrayOf("*/*"))
-            }
-            Secondary(stringResource(R.string.start_export), enabled = !session.busy && user.isNotBlank(), modifier = Modifier.weight(1f)) {
-                exporter.launch("aegis-account.vault")
-            }
-        }
-        Note(stringResource(R.string.start_import_note))
+        Spacer(Modifier.height(8.dp))
+        Note(stringResource(R.string.start_password_note))
     }
 }

@@ -41,8 +41,12 @@ name = "aegis-ui-desktop"
 version = "0.1.0"
 dependencies = [
  "aegis-core",
+ "aegis-server",
+ "serde",
+ "serde_json",
  "tao",
  "wry",
+ "zeroize",
 ]
 
 [[package]]

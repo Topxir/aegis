@@ -14,7 +14,6 @@
     <string name="you">you</string>
     <string name="info">Details</string>
     <string name="send">Send</string>
-    <string name="start_tagline">Username and password. Everything stays on this device.</string>
     <string name="start_unlock">Unlock</string>
     <string name="start_create">Create account</string>
     <string name="field_username">Username</string>
@@ -133,4 +132,15 @@
     <string name="about_l5">Disappearing messages depend on the other side honouring them.</string>
     <string name="about_l6">Messages are text only. There are no calls, files or images.</string>
     <string name="about_privacy">The app has no analytics, advertising or crash reporting, and talks only to the server you configure.</string>
+    <string name="back">Back</string>
+    <string name="chats_title">Chats</string>
+    <string name="keys_hint">Keys stay only on this phone.</string>
+    <string name="start_headline">A username and a password.
+Nothing else.</string>
+    <string name="start_subline">No phone number, no email. Your data is unlocked on this device only.</string>
+    <string name="start_point_1">— the server sees the envelope, not the letter</string>
+    <string name="start_point_2">— you can only be found by your exact username</string>
+    <string name="start_point_3">— the code is open</string>
+    <string name="start_import_tab">Import</string>
+    <string name="start_password_note">The password cannot be recovered. The server never receives it.</string>
 </resources>

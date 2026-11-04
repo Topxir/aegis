@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.aegis.messenger.R
 import org.aegis.messenger.app.Session
 import org.aegis.messenger.data.VaultData
@@ -103,7 +104,7 @@ fun NewGroupScreen(session: Session, d: VaultData, onBack: () -> Unit, onOpen: (
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Checkbox(on, null, colors = CheckboxDefaults.colors(checkedColor = Ui.accent, uncheckedColor = Ui.muted, checkmarkColor = Ui.onAccent))
-                    Text("@" + c.username + if (c.title.isNotBlank()) "  " + c.title else "", color = Ui.text, modifier = Modifier.padding(start = 12.dp))
+                    Text("@" + c.username + if (c.title.isNotBlank()) "  " + c.title else "", color = Ui.text, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(start = 12.dp))
                 }
             }
             Note(stringResource(R.string.group_note))
@@ -136,7 +137,7 @@ fun ContactScreen(session: Session, d: VaultData, user: String, onBack: () -> Un
                 error?.let { Note(stringResource(it), Ui.danger) }
             }
             Section(stringResource(R.string.safety_title)) {
-                Text(safety ?: "", style = MaterialTheme.typography.bodyLarge, color = Ui.text)
+                Text(safety ?: "", style = MaterialTheme.typography.bodyLarge.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, letterSpacing = 1.sp), color = Ui.text)
                 Note(stringResource(R.string.safety_note))
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(stringResource(R.string.safety_verified), color = Ui.text)
@@ -172,7 +173,7 @@ fun GroupInfoScreen(session: Session, d: VaultData, id: String, onBack: () -> Un
         Column(Modifier.verticalScroll(rememberScrollState())) {
             Section(stringResource(R.string.members)) {
                 g.members.forEach { m ->
-                    Text(if (m == d.username) "@$m  (" + stringResource(R.string.you) + ")" else "@$m", color = Ui.text, modifier = Modifier.padding(vertical = 4.dp))
+                    Text(if (m == d.username) "@$m  (" + stringResource(R.string.you) + ")" else "@$m", color = Ui.text, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(vertical = 4.dp))
                 }
                 Note(stringResource(R.string.group_trust_note))
             }

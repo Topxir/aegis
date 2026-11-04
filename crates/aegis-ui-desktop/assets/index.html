@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aegis</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div id="auth" class="auth" hidden></div>
+<div id="shell" class="shell" hidden>
+  <aside class="side">
+    <div id="sidetop" class="sidetop"></div>
+    <div id="sideme" class="sideme"></div>
+    <div class="filterwrap">
+      <svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+      <input id="filter" class="filter" type="search" autocomplete="off" spellcheck="false">
+    </div>
+    <nav id="list" class="list"></nav>
+    <div id="sidefoot" class="sidefoot"></div>
+  </aside>
+  <main class="main">
+    <header id="head" class="head"></header>
+    <div id="toast" class="toast"></div>
+    <div id="msgs" class="msgs" hidden></div>
+    <div id="page" class="page" hidden></div>
+    <div id="composer" class="composer" hidden>
+      <div class="cbox">
+        <textarea id="input" rows="1" maxlength="1200" autocomplete="off"></textarea>
+        <button id="send" type="button" class="sendbtn" data-act="send_current"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+      </div>
+      <p id="hint" class="hint"></p>
+    </div>
+  </main>
+</div>
+<div id="overlay" class="overlay" hidden></div>
+</body>
+</html>
