@@ -474,7 +474,7 @@ fn send_body_must_be_lowercase_hex_of_bucket_size() {
     assert_eq!(try_body(good.to_uppercase().into_bytes()), 400, "uppercase");
     assert_eq!(try_body(format!("{good}0").into_bytes()), 400, "odd length");
     assert_eq!(try_body(format!("{good}00").into_bytes()), 400, "one byte too long");
-    assert_eq!(try_body(good[..good.len() - 2].as_bytes().to_vec()), 400, "one byte short");
+    assert_eq!(try_body(good.as_bytes()[..good.len() - 2].to_vec()), 400, "one byte short");
     assert_eq!(try_body(good.replacen('a', "g", 1).into_bytes()), 400, "non hex");
     assert_eq!(try_body(format!(" {}", &good[1..]).into_bytes()), 400, "space");
     assert_eq!(try_body(format!("{good}\n").into_bytes()), 400, "newline");

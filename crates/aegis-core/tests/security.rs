@@ -768,7 +768,7 @@ fn seen_ids_bounded_with_fifo_eviction_and_persistence() {
     let mut z = SeenIds::new(0);
     assert!(z.insert("x"));
     assert!(!z.insert("x"));
-    assert!(z.is_empty() == false);
+    assert!(!z.is_empty());
 }
 
 #[test]
