@@ -98,6 +98,9 @@ impl Registration {
 
     /// Strict form parser: all seven fields exactly once, no extras.
     pub fn from_form(body: &str) -> Result<Self> {
+        if body.split('&').any(str::is_empty) {
+            return Err(Error::InvalidText);
+        }
         let pairs = parse_pairs(body)?;
         let mut vals: [Option<String>; 7] = Default::default();
         const KEYS: [&str; 7] = ["u", "title", "x", "ed", "ts", "sig", "pow"];

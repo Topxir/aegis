@@ -220,7 +220,7 @@ impl ServerState {
             }
             _ => {}
         }
-        self.replay.insert(hash, now + self.config.replay_secs);
+        self.replay.insert(hash, self.replay_expiry(reg.ts, now));
         self.dir.insert(
             reg.u,
             DirEntry { title: reg.title, x: reg.x, ed: reg.ed },
@@ -286,7 +286,7 @@ impl ServerState {
             }
             _ => {}
         }
-        self.replay.insert(hash, now + self.config.replay_secs);
+        self.replay.insert(hash, self.replay_expiry(ts, now));
         let seq = self.next_seq;
         self.next_seq += 1;
         self.queues
@@ -344,6 +344,11 @@ impl ServerState {
         if self.queues.get(qid).map_or(0, VecDeque::len) != before {
             self.dirty = true;
         }
+    }
+
+    /// A spent proof of work stays remembered until its `ts` can no longer pass the window check.
+    fn replay_expiry(&self, ts: u64, now: u64) -> u64 {
+        (now + self.config.replay_secs).max(ts.saturating_add(pow::MAX_SKEW_SECS + 1))
     }
 
     /// Drops expired frames, empty queues and expired replay entries.

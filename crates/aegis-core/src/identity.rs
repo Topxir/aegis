@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 
 /// Lowercases and validates a username (`^[a-z0-9_]{3,24}$`).
 pub fn normalize_username(u: &str) -> Result<String> {
-    let l = u.to_lowercase();
+    let l = u.to_ascii_lowercase();
     if is_valid_username(&l) {
         Ok(l)
     } else {
