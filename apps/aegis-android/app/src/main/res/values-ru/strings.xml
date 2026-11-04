@@ -122,8 +122,7 @@
     <string name="delete_account_body">Файл хранилища на этом устройстве будет удалён. Без экспортированной копии аккаунт и все чаты будут потеряны. Имя остаётся занятым на сервере.</string>
     <string name="version_line">Версия %1$s</string>
     <string name="about">О приложении</string>
-    <string name="about_alpha">Альфа-версия без аудита</string>
-    <string name="about_intro">Aegis это экспериментальный мессенджер со сквозным шифрованием и личными сообщениями по имени. Независимого аудита не проводилось. Не полагайтесь на него там, где от этого зависит ваша безопасность.</string>
+    <string name="about_intro">Aegis это экспериментальный мессенджер со сквозным шифрованием. Протокол и исходный код открыты.</string>
     <string name="about_limits_title">ИЗВЕСТНЫЕ ОГРАНИЧЕНИЯ</string>
     <string name="about_l1">Нет прямой секретности: при утечке долговременного ключа можно прочитать ранее перехваченные сообщения.</string>
     <string name="about_l2">Сервер и сетевые посредники (например, Cloudflare) видят ваш IP-адрес, время отправки и получения и примерный размер сообщений.</string>
@@ -135,12 +134,14 @@
     <string name="back">Назад</string>
     <string name="chats_title">Чаты</string>
     <string name="keys_hint">Ключи только на этом телефоне.</string>
-    <string name="start_headline">Ник и пароль.
-Больше ничего.</string>
-    <string name="start_subline">Ни телефона, ни почты. Данные открываются только на этом устройстве.</string>
-    <string name="start_point_1">— сервер видит конверт, а не письмо</string>
-    <string name="start_point_2">— найти вас можно только по точному нику</string>
-    <string name="start_point_3">— код открыт</string>
+    <string name="start_headline">У каждого есть право на личное пространство.</string>
+    <string name="start_subline">Без номера телефона, почты и настоящего имени. Достаточно ника и пароля.</string>
     <string name="start_import_tab">Импорт</string>
     <string name="start_password_note">Пароль не восстанавливается. Сервер его никогда не получает.</string>
+    <string name="start_eyebrow">ПРИВАТНО ПО УМОЛЧАНИЮ</string>
+    <string name="start_footer">Ваши границы. Ваши ключи.</string>
+    <string name="start_chip_1">сквозное шифрование</string>
+    <string name="start_chip_2">без телефона и почты</string>
+    <string name="start_chip_3">открытый код, AGPL</string>
+    <string name="about_font_license">Шрифт Geist — SIL Open Font License 1.1</string>
 </resources>

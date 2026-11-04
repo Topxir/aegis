@@ -1,5 +1,11 @@
 package org.aegis.messenger.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -105,8 +111,8 @@ fun Field(
         enabled = enabled,
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(keyboardType = if (password) KeyboardType.Password else keyboard, autoCorrect = false),
-        shape = RoundedCornerShape(14.dp),
-        textStyle = if (mono) MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace) else MaterialTheme.typography.bodyLarge,
+        shape = RoundedCornerShape(12.dp),
+        textStyle = if (mono) MaterialTheme.typography.bodyLarge.copy(fontFamily = GeistMono) else MaterialTheme.typography.bodyLarge,
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = Ui.muted,
             unfocusedBorderColor = Ui.border,
@@ -124,11 +130,14 @@ fun Field(
 
 @Composable
 fun Primary(text: String, enabled: Boolean = true, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(16.dp)
+    val shape = RoundedCornerShape(14.dp)
+    val src = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val pressed by src.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed && enabled) 0.985f else 1f, tween(120), label = "press")
     Box(
-        Modifier.fillMaxWidth().padding(vertical = 4.dp).height(52.dp).clip(shape)
+        Modifier.fillMaxWidth().padding(vertical = 4.dp).height(52.dp).graphicsLayer { scaleX = scale; scaleY = scale }.clip(shape)
             .background(if (enabled) Ui.lightGradient else SolidColor(Ui.surface2))
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+            .clickable(interactionSource = src, indication = null, enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Text(text, style = MaterialTheme.typography.labelLarge, color = if (enabled) Ui.onAccent else Ui.muted)
@@ -183,7 +192,7 @@ fun <T> Choices(options: List<Pair<T, String>>, selected: T, onSelect: (T) -> Un
 fun Avatar(name: String, size: Int = 48) {
     val initials = name.trimStart('@').filter { it.isLetterOrDigit() }.take(2).uppercase().ifEmpty { "?" }
     Box(Modifier.size(size.dp).clip(CircleShape).background(Ui.avatarGradient).border(1.dp, Ui.border, CircleShape), contentAlignment = Alignment.Center) {
-        Text(initials, style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace), color = Ui.text)
+        Text(initials, style = MaterialTheme.typography.titleMedium.copy(fontFamily = GeistMono), color = Ui.text)
     }
 }
 

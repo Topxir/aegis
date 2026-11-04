@@ -149,7 +149,7 @@ private fun ChatRow(r: Row_, onClick: () -> Unit) {
                     Icon(AegisIcons.Users, null, tint = Ui.muted, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.size(6.dp))
                 }
-                Text(r.title, style = MaterialTheme.typography.titleMedium.copy(fontFamily = if (r.isGroup || r.title.startsWith("@")) FontFamily.Monospace else FontFamily.Default), color = Ui.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                Text(r.title, style = MaterialTheme.typography.titleMedium.copy(fontFamily = if (r.isGroup || r.title.startsWith("@")) GeistMono else Geist), color = Ui.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             }
             Text(
                 r.last?.body?.lineSequence()?.firstOrNull() ?: "",
@@ -157,7 +157,7 @@ private fun ChatRow(r: Row_, onClick: () -> Unit) {
             )
         }
         Column(horizontalAlignment = Alignment.End) {
-            r.last?.let { Text(formatTime(it.tsMs), style = MaterialTheme.typography.bodySmall, color = Ui.muted) }
+            r.last?.let { Text(formatTime(it.tsMs), style = MaterialTheme.typography.bodySmall.copy(fontFamily = GeistMono), color = Ui.muted) }
             if (r.unread > 0) {
                 Spacer(Modifier.size(4.dp))
                 Box(Modifier.clip(CircleShape).background(Ui.accent).defaultMinSize(minWidth = 20.dp).padding(horizontal = 7.dp, vertical = 1.dp), contentAlignment = Alignment.Center) {
@@ -268,7 +268,7 @@ private fun Bubble(m: Message, showSender: Boolean, animate: Boolean, seen: Muta
                 .clickable(enabled = m.status == Status.FAILED, onClick = onFailedClick)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            if (showSender) Text(m.senderName.ifBlank { "@" + m.sender }, style = MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace), color = Ui.muted)
+            if (showSender) Text(m.senderName.ifBlank { "@" + m.sender }, style = MaterialTheme.typography.labelMedium.copy(fontFamily = GeistMono), color = Ui.muted)
             Text(m.body, style = MaterialTheme.typography.bodyLarge, color = fg)
             Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                 if (m.ttlS > 0) {
@@ -280,7 +280,7 @@ private fun Bubble(m: Message, showSender: Boolean, animate: Boolean, seen: Muta
                     Status.FAILED -> stringResource(R.string.status_failed) + "  "
                     else -> ""
                 }
-                Text(status + formatTime(m.tsMs), style = MaterialTheme.typography.bodySmall, color = if (m.status == Status.FAILED) (if (out) Color(0xFF9A2F27) else Ui.danger) else sub)
+                Text(status + formatTime(m.tsMs), style = MaterialTheme.typography.bodySmall.copy(fontFamily = GeistMono), color = if (m.status == Status.FAILED) (if (out) Color(0xFF9A2F27) else Ui.danger) else sub)
             }
         }
     }

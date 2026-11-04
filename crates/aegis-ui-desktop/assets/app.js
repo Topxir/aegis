@@ -242,5 +242,5 @@
   document.addEventListener('dragover', function (e) { e.preventDefault(); });
   document.addEventListener('drop', function (e) { e.preventDefault(); });
 
-  send('ready', { lang: navigator.language || 'en' });
+  send('ready', { lang: 'en' });
 })();

@@ -147,13 +147,13 @@ fun AboutScreen(onBack: () -> Unit) {
         Divider()
         Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(stringResource(R.string.app_name) + " " + BuildConfig.VERSION_NAME, style = MaterialTheme.typography.titleLarge, color = Ui.text)
-            Text(stringResource(R.string.about_alpha), style = MaterialTheme.typography.titleMedium, color = Ui.warning)
             Text(stringResource(R.string.about_intro), style = MaterialTheme.typography.bodyMedium, color = Ui.text)
             Text(stringResource(R.string.about_limits_title), style = MaterialTheme.typography.labelMedium, color = Ui.muted)
             listOf(
                 R.string.about_l1, R.string.about_l2, R.string.about_l3, R.string.about_l4, R.string.about_l5, R.string.about_l6,
             ).forEach { Text("• " + stringResource(it), style = MaterialTheme.typography.bodyMedium, color = Ui.text) }
             Text(stringResource(R.string.about_privacy), style = MaterialTheme.typography.bodyMedium, color = Ui.muted)
+            Text(stringResource(R.string.about_font_license), style = MaterialTheme.typography.bodySmall, color = Ui.muted)
         }
     }
 }

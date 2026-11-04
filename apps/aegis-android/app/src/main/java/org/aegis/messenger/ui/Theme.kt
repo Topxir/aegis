@@ -21,13 +21,13 @@ import org.aegis.messenger.R
 
 /** Dark only: near-black ground, soft grey-black gradients, light primary. */
 object Ui {
-    val bg = Color(0xFF0A0A0B)
+    val bg = Color(0xFF08080A)
     val surface = Color(0xFF111113)
     val surface2 = Color(0xFF17171A)
-    val border = Color(0xFF1F2024)
+    val border = Color(0xFF25262B)
     val bubbleBorder = Color(0xFF222327)
     val text = Color(0xFFEDEDEF)
-    val muted = Color(0xFF8B8C92)
+    val muted = Color(0xFF9A9BA1)
     val accent = Color(0xFFE9E9EC)
     val onAccent = Color(0xFF0E0E10)
     val danger = Color(0xFFD27B74)
@@ -35,7 +35,7 @@ object Ui {
     const val ANIM_MS = 180
     const val ENTER_MS = 300
 
-    val lightGradient = Brush.verticalGradient(listOf(Color(0xFFF1F1F3), Color(0xFFD6D6DB)))
+    val lightGradient = Brush.verticalGradient(listOf(Color(0xFFF6F6F7), Color(0xFFD9D9DE)))
     val outBubble = Brush.linearGradient(listOf(Color(0xFFECECEF), Color(0xFFD9D9DE)))
     val avatarGradient = Brush.linearGradient(listOf(Color(0xFF3A3B40), Color(0xFF1B1C1F)))
 
@@ -58,18 +58,25 @@ fun animationsOn(): Boolean {
     }
 }
 
-private val Onest = FontFamily(
-    Font(R.font.onest_regular, FontWeight.Normal),
-    Font(R.font.onest_medium, FontWeight.Medium),
+val Geist = FontFamily(
+    Font(R.font.geist_light, FontWeight.Light),
+    Font(R.font.geist_regular, FontWeight.Normal),
+    Font(R.font.geist_medium, FontWeight.Medium),
+    Font(R.font.geist_semibold, FontWeight.SemiBold),
+)
+
+val GeistMono = FontFamily(
+    Font(R.font.geist_mono_regular, FontWeight.Normal),
+    Font(R.font.geist_mono_medium, FontWeight.Medium),
 )
 
 private fun style(size: Int, line: Int, weight: FontWeight = FontWeight.Normal) =
-    TextStyle(fontFamily = Onest, fontWeight = weight, fontSize = size.sp, lineHeight = line.sp)
+    TextStyle(fontFamily = Geist, fontWeight = weight, fontSize = size.sp, lineHeight = line.sp)
 
 private val Type = Typography(
     headlineSmall = style(22, 28, FontWeight.Medium),
-    displaySmall = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Light, fontSize = 34.sp, lineHeight = 40.sp),
-    headlineMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Light, fontSize = 30.sp, lineHeight = 36.sp),
+    displaySmall = TextStyle(fontFamily = Geist, fontWeight = FontWeight.Light, fontSize = 34.sp, lineHeight = 40.sp),
+    headlineMedium = TextStyle(fontFamily = Geist, fontWeight = FontWeight.Light, fontSize = 30.sp, lineHeight = 36.sp),
     titleLarge = style(19, 24, FontWeight.Medium),
     titleMedium = style(16, 22, FontWeight.Medium),
     bodyLarge = style(16, 22),

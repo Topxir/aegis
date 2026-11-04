@@ -132,25 +132,22 @@ pub fn auth(app: &App) -> String {
         (AuthTab::Import, "import", "auth.tab_import"),
     ];
     let mut h = String::new();
-    h.push_str(r#"<div class="auth-bg" aria-hidden="true"><span class="orb o1"></span><span class="orb o2"></span></div><div class="auth-wrap"><section class="hero">"#);
+    h.push_str(r#"<div class="auth-bg" aria-hidden="true"><span class="orb o1"></span><span class="orb o2"></span><span class="grid"></span></div><div class="auth-wrap"><section class="hero">"#);
     h.push_str(&format!(
         r#"<div class="brandrow rise r0">{}<span class="brand">AEGIS</span></div>"#,
         icon("shield")
     ));
-    let headline = tr(l, "auth.headline")
-        .split('\n')
-        .map(esc)
-        .collect::<Vec<_>>()
-        .join("<br>");
     h.push_str(&format!(
-        r#"<h1 class="rise r1">{headline}</h1><p class="sub rise r2">{}</p><ul class="pts mono rise r3">"#,
+        r#"<p class="eyebrow mono rise r1">{}</p><h1 class="rise r1">{}</h1><p class="sub rise r2">{}</p><ul class="chips mono rise r3">"#,
+        esc(tr(l, "auth.eyebrow")),
+        esc(tr(l, "auth.headline")),
         esc(tr(l, "auth.tagline"))
     ));
-    for k in ["auth.pt1", "auth.pt2", "auth.pt3"] {
+    for k in ["auth.chip1", "auth.chip2", "auth.chip3"] {
         h.push_str(&format!("<li>{}</li>", esc(tr(l, k))));
     }
     h.push_str(
-        r#"</ul></section><section class="auth-card rise r2"><div class="tabs" role="tablist">"#,
+        r#"</ul></section><div class="card-wrap rise r2"><span class="halo" aria-hidden="true"></span><section class="auth-card"><div class="tabs" role="tablist">"#,
     );
     for (t, id, key) in tabs {
         let sel = t == app.tab;
@@ -226,8 +223,8 @@ pub fn auth(app: &App) -> String {
         esc(tr(l, "auth.pwnote"))
     ));
     h.push_str(&format!(
-        r#"</section><div class="auth-foot rise r4"><span class="muted">{}</span>{}</div></div>"#,
-        esc(tr(l, "auth.alpha")),
+        r#"</section></div><div class="auth-foot rise r4"><span class="muted">{}</span>{}</div></div>"#,
+        esc(tr(l, "auth.foot")),
         lang_select(l)
     ));
     h
@@ -842,10 +839,11 @@ fn page_settings(app: &App, s: &Session) -> String {
         esc(tr(l, "set.delete"))
     ));
     h.push_str(&format!(
-        r#"<section class="card"><h2>{}</h2><p class="note">{}</p><p class="note">{}</p></section></div>"#,
+        r#"<section class="card"><h2>{}</h2><p class="note">{}</p><p class="note">{}</p><p class="note">{}</p></section></div>"#,
         esc(tr(l, "set.about")),
         esc(tr(l, "set.about_text")),
-        esc(tr(l, "main.e2ee"))
+        esc(tr(l, "main.e2ee")),
+        esc(tr(l, "set.about_font"))
     ));
     h
 }
