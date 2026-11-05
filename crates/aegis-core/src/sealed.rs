@@ -52,6 +52,8 @@ pub struct SealedRequest {
     /// Path with the query string, as in an HTTP request target.
     pub target: String,
     pub body: Vec<u8>,
+    /// Client clock at sealing time, when the request carries one.
+    pub ts: Option<u64>,
 }
 
 type Key = Zeroizing<[u8; 32]>;
@@ -66,7 +68,7 @@ fn keys(shared: &[u8; 32], e_pk: &[u8; 32], srv_pk: &[u8; 32]) -> Result<(Key, K
 
 /// Seals a request with a fresh ephemeral key. Returns the outer body and the response key.
 pub fn seal_request(srv_pk: &[u8; 32], method: &str, target: &str, body: &[u8]) -> Result<(Vec<u8>, Key)> {
-    seal_request_with(&crate::random_bytes::<32>()?, srv_pk, method, target, body)
+    seal_request_at(&*crate::random_key()?, srv_pk, method, target, body, Some(crate::now_secs()))
 }
 
 /// Deterministic variant of [`seal_request`] with an injected ephemeral secret.
@@ -77,6 +79,19 @@ pub fn seal_request_with(
     target: &str,
     body: &[u8],
 ) -> Result<(Vec<u8>, Key)> {
+    seal_request_at(e_sk, srv_pk, method, target, body, None)
+}
+
+/// Like [`seal_request_with`], with an optional timestamp after the method (`GET 1700000000`).
+/// The server rejects a timestamp more than 600 s away from its own clock.
+pub fn seal_request_at(
+    e_sk: &[u8; 32],
+    srv_pk: &[u8; 32],
+    method: &str,
+    target: &str,
+    body: &[u8],
+    ts: Option<u64>,
+) -> Result<(Vec<u8>, Key)> {
     if method.contains('\n') || target.contains('\n') {
         return Err(Error::InvalidText);
     }
@@ -85,6 +100,9 @@ pub fn seal_request_with(
     let (k_req, k_resp) = keys(&shared, &e_pk, srv_pk)?;
     let mut inner = Zeroizing::new(Vec::with_capacity(method.len() + target.len() + body.len() + 2));
     inner.extend_from_slice(method.as_bytes());
+    if let Some(ts) = ts {
+        inner.extend_from_slice(format!(" {ts}").as_bytes());
+    }
     inner.push(b'\n');
     inner.extend_from_slice(target.as_bytes());
     inner.push(b'\n');
@@ -112,8 +130,15 @@ pub fn open_request(srv_sk: &[u8; 32], outer: &[u8]) -> Result<(SealedRequest, K
         return Err(Error::Length);
     };
     let method = String::from_utf8(m.to_vec()).map_err(|_| Error::InvalidText)?;
+    let (method, ts) = match method.split_once(' ') {
+        Some((m, t)) if t.bytes().all(|c| c.is_ascii_digit()) && !t.is_empty() && t.len() <= 19 => {
+            (m.to_owned(), Some(t.parse().map_err(|_| Error::InvalidText)?))
+        }
+        Some(_) => return Err(Error::InvalidText),
+        None => (method, None),
+    };
     let target = String::from_utf8(t.to_vec()).map_err(|_| Error::InvalidText)?;
-    Ok((SealedRequest { method, target, body: body.to_vec() }, k_resp))
+    Ok((SealedRequest { method, target, body: body.to_vec(), ts }, k_resp))
 }
 
 /// Seals `BE16(status) || body` under the response key with a fresh random nonce.

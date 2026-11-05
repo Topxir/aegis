@@ -45,14 +45,18 @@ object Sealed {
     }
 
     fun sealRequest(srvPk: ByteArray, method: String, target: String, body: ByteArray): Request =
-        sealRequestWith(Crypto.randomBytes(32), srvPk, method, target, body)
+        sealRequestAt(Crypto.randomBytes(32), srvPk, method, target, body, System.currentTimeMillis() / 1000)
 
-    fun sealRequestWith(eSk: ByteArray, srvPk: ByteArray, method: String, target: String, body: ByteArray): Request {
+    fun sealRequestWith(eSk: ByteArray, srvPk: ByteArray, method: String, target: String, body: ByteArray): Request =
+        sealRequestAt(eSk, srvPk, method, target, body, null)
+
+    /** Like [sealRequestWith], with an optional timestamp after the method (`GET 1700000000`). */
+    fun sealRequestAt(eSk: ByteArray, srvPk: ByteArray, method: String, target: String, body: ByteArray, ts: Long?): Request {
         if (method.contains('\n') || target.contains('\n')) throw AegisException.InvalidText()
         val ePk = Crypto.x25519Public(eSk)
         val shared = Crypto.dh(eSk, srvPk)
         val (kReq, kResp) = keys(shared, ePk, srvPk)
-        val inner = Bytes.concat(Text.utf8(method), byteArrayOf(10), Text.utf8(target), byteArrayOf(10), body)
+        val inner = Bytes.concat(Text.utf8(if (ts != null) "$method $ts" else method), byteArrayOf(10), Text.utf8(target), byteArrayOf(10), body)
         val ct = Crypto.aeadSeal(kReq, ByteArray(12), Bytes.concat(AAD_REQ, ePk), pad(inner))
         return Request(Bytes.concat(ePk, ct), kResp)
     }
@@ -109,7 +113,8 @@ class SealedTransport(private val inner: Transport, private val pins: KeyPins) :
 
     private fun serverKey(ep: Endpoint, refresh: Boolean): ByteArray {
         val origin = ep.origin
-        val pinned = pins.get(origin)
+        val builtIn = if (origin == Endpoint.DEFAULT) Endpoint.DEFAULT_SERVER_X_PK else null
+        val pinned = builtIn ?: pins.get(origin)
         if (!refresh) {
             cached?.let { if (it.first == origin) return it.second }
             if (pinned != null) { cached = origin to pinned; return pinned }
@@ -117,6 +122,7 @@ class SealedTransport(private val inner: Transport, private val pins: KeyPins) :
         val k = fetchKey(ep)
         if (pinned != null && !Bytes.eq(pinned, k)) throw AegisException.ServerKeyChanged()
         if (pinned == null) pins.put(origin, k)
+        if (builtIn != null && !Bytes.eq(builtIn, k)) throw AegisException.ServerKeyChanged()
         cached = origin to k
         return k
     }

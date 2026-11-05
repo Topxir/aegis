@@ -76,6 +76,9 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
         if (r.code != 200) throw AegisException.Http(r.code)
     }
 
+    /** Random starting point for the proof search, so a repeated request never repeats its proof. */
+    private fun powStart(): ULong = (java.security.SecureRandom().nextInt().toLong() and 0xFFFFFFFFL).toULong()
+
     /** The bits asked for by a 429 answer, within the allowed range, or null. */
     private fun bitsWanted(r: Response): Int? {
         if (r.code != 429) return null
@@ -97,7 +100,7 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
         var tries = 0
         do {
             val ts = System.currentTimeMillis() / 1000
-            val pow = Pow.mine(q, ts, Pow.bodyHashHex(body), bits)
+            val pow = Pow.mine(q, ts, Pow.bodyHashHex(body), bits, powStart())
             r = transport.request(ep, "POST", "/api/v2/queue/send?q=$q&ts=$ts&pow=$pow", body, PLAIN)
             val more = if (tries == 0) bitsWanted(r) else null
             if (more == null) break
@@ -119,7 +122,7 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
     /** Fetches and consumes a prekey bundle. Null means the contact has none (they need to update). */
     fun prekeysTake(u: String): X3dh.Bundle? {
         val ts = System.currentTimeMillis() / 1000
-        val pow = Pow.mine(Prekeys.takeScope(u), ts, Prekeys.takeBodyHash(u, ts), POW_BITS)
+        val pow = Pow.mine(Prekeys.takeScope(u), ts, Prekeys.takeBodyHash(u, ts), POW_BITS, powStart())
         val r = transport.request(ep, "POST", "/api/v2/prekeys/take", Text.utf8(Prekeys.takeForm(u, ts, pow)), FORM)
         if (r.code == 404) return null
         if (r.code != 200) throw AegisException.Http(r.code)
@@ -136,7 +139,7 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
 
     private fun pinPost(path: String, slotHex: String, hashInput: String, fields: String): Response {
         val ts = System.currentTimeMillis() / 1000
-        val pow = Pow.mine(Pin.powScope(slotHex), ts, Pow.bodyHashHex(Text.utf8(hashInput)), POW_BITS)
+        val pow = Pow.mine(Pin.powScope(slotHex), ts, Pow.bodyHashHex(Text.utf8(hashInput)), POW_BITS, powStart())
         return transport.request(ep, "POST", path, Text.utf8("$fields&ts=$ts&pow=$pow"), FORM)
     }
 
@@ -205,7 +208,7 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
     fun blobPut(id: ByteArray, chunk: ByteArray) {
         val hex = Hex.encode(id)
         val ts = System.currentTimeMillis() / 1000
-        val pow = Pow.mine("blob:$hex", ts, Pow.bodyHashHex(chunk), POW_BITS)
+        val pow = Pow.mine("blob:$hex", ts, Pow.bodyHashHex(chunk), POW_BITS, powStart())
         val r = transport.request(ep, "POST", "/api/v2/blob/put?id=$hex&ts=$ts&pow=$pow", chunk, "application/octet-stream")
         if (r.code != 200) throw AegisException.Http(r.code)
     }

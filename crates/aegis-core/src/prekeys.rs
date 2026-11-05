@@ -148,7 +148,12 @@ pub struct PrekeyTake {
 impl PrekeyTake {
     /// Mines the proof of work for `u` at time `ts`.
     pub fn mine(u: &str, ts: u64, bits: u32) -> Self {
-        let pow = pow::mine(&take_scope(u), ts, &take_body_hash(u, ts), bits);
+        Self::mine_from(u, ts, bits, 0)
+    }
+
+    /// Like `mine`, searching upward from `start`.
+    pub fn mine_from(u: &str, ts: u64, bits: u32, start: u64) -> Self {
+        let pow = pow::mine_from(&take_scope(u), ts, &take_body_hash(u, ts), bits, start);
         Self { u: u.to_owned(), ts, pow }
     }
 

@@ -19,7 +19,7 @@ pub const SESSION_IDLE_SECS: u64 = 180 * 24 * 3600;
 pub const SUPERSEDED_KEEP_SECS: u64 = 30 * 24 * 3600;
 pub const RECOVERY_AFTER_FAILURES: u32 = 3;
 pub const RECOVERY_MIN_GAP_SECS: u64 = 24 * 3600;
-const SEEN_FRAME_CAP: usize = 256;
+const SEEN_FRAME_CAP: usize = 1024;
 const MAX_SESSIONS_PER_CONTACT: usize = 8;
 const MAX_OPKS_HELD: usize = 200;
 const START_LEN: usize = 1 + 96;
@@ -115,6 +115,9 @@ impl SessionStore {
     /// Registers a pinned contact. Different keys for a known name are an error: remove the
     /// contact first (that drops its sessions) once the user has confirmed the key change.
     pub fn add_contact(&mut self, u: &str, ed: [u8; 32], x: [u8; 32]) -> Result<()> {
+        if u.len() > usize::from(u8::MAX) {
+            return Err(Error::Session("name too long"));
+        }
         if let Some(c) = self.contacts.iter().find(|c| c.u == u) {
             return if c.ed == ed && c.x == x { Ok(()) } else { Err(Error::Session("contact keys changed")) };
         }
@@ -176,8 +179,8 @@ impl SessionStore {
 
     /// Starts a session as initiator from a bundle taken from the server.
     pub fn start_session(&mut self, me: &Identity, contact: &str, bundle: &Bundle, now: u64) -> Result<()> {
-        let ek = crate::random_bytes::<32>()?;
-        let dhs = crate::random_bytes::<32>()?;
+        let ek = crate::random_key()?;
+        let dhs = crate::random_key()?;
         self.start_session_with(&ek, &dhs, me, contact, bundle, now)
     }
 
@@ -213,7 +216,7 @@ impl SessionStore {
 
     /// Wraps `env` in a type 0x03 frame (unpadded; the caller pads as in section 4).
     pub fn encrypt(&mut self, me: &Identity, contact: &str, env: &Envelope, now: u64) -> Result<Encrypted> {
-        self.encrypt_with(&crate::random_bytes::<32>()?, me, contact, env, now)
+        self.encrypt_with(&*crate::random_key()?, me, contact, env, now)
     }
 
     pub fn encrypt_with(
@@ -246,7 +249,7 @@ impl SessionStore {
 
     /// Opens a type 0x03 frame addressed to `me`.
     pub fn decrypt(&mut self, me: &Identity, frame: &[u8], now: u64) -> Result<Received> {
-        self.decrypt_with(&crate::random_bytes::<32>()?, me, frame, now)
+        self.decrypt_with(&*crate::random_key()?, me, frame, now)
     }
 
     /// `new_dhs_sk` is the ratchet key used if the frame triggers a DH step.
@@ -287,6 +290,9 @@ impl SessionStore {
         };
         let c = &mut self.contacts[ci];
         let Some(plain) = plain else {
+            if start.is_none() && c.sessions.iter().any(|s| s.ratchet.is_replay(msg)) {
+                return Ok(Received::default());
+            }
             return Ok(c.failed(now));
         };
         if created.is_some() {
@@ -515,6 +521,10 @@ impl Session {
         self.received_any = true;
         self.start = None;
         self.last_active = now;
+        // A superseded session the peer still uses stays until it has been idle for the keep time.
+        if self.superseded_at.is_some() {
+            self.superseded_at = Some(now);
+        }
         Some(plain)
     }
 }

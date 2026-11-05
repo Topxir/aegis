@@ -7,9 +7,12 @@
 //! Files next to the vault, none of them readable without the PIN or the password except
 //! `.pinmeta`, which has to be readable before unlocking because the server has to be reached:
 //! it holds the endpoint, the proxy address and the pinned server key, and nothing else (no
-//! username, no times).
+//! username, no times). The PIN verifier goes to whatever server that file names, so the file is
+//! sealed to the operating system user (see `oseal`) and a copy that was edited, or made for
+//! another vault, is refused before anything is sent.
 
 use super::*;
+use super::oseal;
 use aegis_core::net::PinOpen;
 use aegis_core::pin::{is_valid_pin, DuressRecord, PinFile, PinSetup};
 use aegis_core::hex;
@@ -64,14 +67,31 @@ pub(super) fn sync_meta(vault: &Path, st: &Settings) {
     let Some(meta) = PinMeta::from_settings(st) else {
         return;
     };
-    let Ok(bytes) = serde_json::to_vec(&meta) else {
+    let Ok(json) = serde_json::to_vec(&meta) else {
         return;
     };
     let file = side(vault, "pinmeta");
-    if std::fs::read(&file).is_ok_and(|old| old == bytes) {
+    let ctx = meta_context(vault);
+    if std::fs::read(&file).is_ok_and(|old| oseal::open(&old, &ctx).is_some_and(|j| j == json)) {
         return;
     }
-    let _ = write_atomic(&file, &bytes);
+    if let Some(bytes) = oseal::seal(&json, &ctx) {
+        let _ = write_atomic(&file, &bytes);
+    }
+}
+
+fn meta_context(vault: &Path) -> Vec<u8> {
+    vault
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned().into_bytes())
+        .unwrap_or_default()
+}
+
+/// The authentic `.pinmeta` of a vault, or `None` when it is missing, edited or not ours.
+fn read_meta(vault: &Path) -> Option<PinMeta> {
+    let blob = std::fs::read(side(vault, "pinmeta")).ok()?;
+    let json = oseal::open(&blob, &meta_context(vault))?;
+    serde_json::from_slice(&json).ok()
 }
 
 fn remove_quiet(p: &Path) {
@@ -179,8 +199,12 @@ impl Engine {
         if let Some(st) = st {
             sync_meta(&path, &st);
         }
+        if let Some(s) = self.app().session.as_mut() {
+            s.data.pin_verifier = hex::encode(&setup.verifier);
+            s.dirty = true;
+        }
         self.refresh_pin();
-        Ok(())
+        self.flush()
     }
 
     /// Checks `pin` against the server without opening anything. Counts as an attempt.
@@ -223,6 +247,10 @@ impl Engine {
             .pin_delete(&file.slot, &key.verifier()?)
             .map_err(throttled)?;
         remove_pin_files(&path);
+        if let Some(s) = self.app().session.as_mut() {
+            s.data.pin_verifier.clear();
+            s.dirty = true;
+        }
         self.refresh_pin();
         Ok(())
     }
@@ -259,9 +287,7 @@ impl Engine {
             }
         }
         let file = Self::read_pin_file(path)?;
-        let meta = std::fs::read(side(path, "pinmeta"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<PinMeta>(&b).ok())
+        let meta = read_meta(path)
             .and_then(|m| m.settings(self.app().pre_lang))
             .ok_or(Failure::new("err.pin_gone"))?;
         let client = self.client_for(&meta)?;
@@ -308,7 +334,68 @@ impl Engine {
         }
         // Looks like a wrong attempt: the last count the server gave, else a fresh slot's.
         let left = self.app().pin_left.unwrap_or(4);
+        self.write_ghost(path, left);
         Err(self.wrong_left(left))
+    }
+
+    /// Leaves a stand-in for the wiped account: a counter and a vault-shaped blob nobody can
+    /// open. With it the Unlock screen looks the same after a restart and further tries behave
+    /// as they would on a real account (`ghost_unlock`).
+    fn write_ghost(&self, vault: &Path, left: u32) {
+        let Ok(pw) = aegis_core::random_bytes::<16>() else {
+            return;
+        };
+        let Ok(blob) = vault_encrypt(&hex::encode(&pw), self.cfg.vault_params, b"{}") else {
+            return;
+        };
+        let mut bytes = vec![u8::try_from(left.min(255)).unwrap_or(0)];
+        bytes.extend(blob);
+        let _ = write_atomic(&side(vault, "ghost"), &bytes);
+    }
+
+    /// An attempt on an account that was wiped by the duress PIN. A PIN counts down like a
+    /// wrong PIN on the server would, then "PIN gone"; anything else is answered like a wrong
+    /// password, by trying it against the stand-in vault.
+    pub(super) fn ghost_unlock(&self, path: &Path, secret: &str) -> Option<Failure> {
+        let bytes = std::fs::read(side(path, "ghost")).ok()?;
+        let (&left, blob) = bytes.split_first()?;
+        if is_valid_pin(secret) && left > 0 {
+            let left = u32::from(left) - 1;
+            let mut out = vec![u8::try_from(left).unwrap_or(0)];
+            out.extend_from_slice(blob);
+            let _ = write_atomic(&side(path, "ghost"), &out);
+            return Some(if left > 0 {
+                self.wrong_left(left)
+            } else {
+                Failure::new("err.pin_gone")
+            });
+        }
+        Some(
+            vault_decrypt(secret, blob)
+                .err()
+                .map_or_else(|| Failure::new("err.vault_format"), Failure::from),
+        )
+    }
+
+    /// Frees the server slot of the open account's PIN, if it has one and the verifier is
+    /// known. Best effort: a slot that cannot be reached expires on the server by itself.
+    pub(super) fn pin_free_slot(&self) {
+        let Ok((client, path, _)) = self.pin_context() else {
+            return;
+        };
+        let verifier: Option<[u8; 32]> = self
+            .app()
+            .session
+            .as_ref()
+            .and_then(|s| hex::decode_array(&s.data.pin_verifier).ok());
+        if let (Ok(file), Some(v)) = (Self::read_pin_file(&path), verifier) {
+            let _ = client.pin_delete(&file.slot, &v);
+        }
+    }
+
+    /// True when `path` is a vault that the duress PIN wiped.
+    pub(super) fn is_ghost(path: &Path) -> bool {
+        !path.exists() && side(path, "ghost").exists()
     }
 }
 

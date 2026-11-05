@@ -88,7 +88,7 @@ fn header(dh_pk: &[u8; 32], pn: u32, n: u32) -> [u8; HEADER_LEN] {
 impl Ratchet {
     /// Initiator state: `DHr` is the responder's signed prekey.
     pub fn init_initiator(sk: &[u8; 32], ad: &[u8; 128], b_spk: &[u8; 32]) -> Result<Self> {
-        Self::init_initiator_with(&crate::random_bytes::<32>()?, sk, ad, b_spk)
+        Self::init_initiator_with(&*crate::random_key()?, sk, ad, b_spk)
     }
 
     pub fn init_initiator_with(
@@ -159,7 +159,7 @@ impl Ratchet {
 
     /// Decrypts on a copy and replaces `self` only if the AEAD check passes.
     pub fn decrypt(&mut self, msg: &[u8], now: u64) -> Result<Zeroizing<Vec<u8>>> {
-        self.decrypt_with(&crate::random_bytes::<32>()?, msg, now)
+        self.decrypt_with(&*crate::random_key()?, msg, now)
     }
 
     /// `new_dhs_sk` is used only if this message triggers a DH ratchet step.
@@ -168,6 +168,17 @@ impl Ratchet {
         let plain = copy.decrypt_inner(new_dhs_sk, msg, now)?;
         *self = copy;
         Ok(plain)
+    }
+
+    /// True if `msg` belongs to the current receiving chain at a counter whose key is already spent.
+    pub(crate) fn is_replay(&self, msg: &[u8]) -> bool {
+        let (Some(h), Some(dhr)) = (msg.get(..HEADER_LEN), self.dhr) else {
+            return false;
+        };
+        let (Ok(dh_pk), Ok(n)) = (arr::<32>(&h[..32]), arr::<4>(&h[36..]).map(u32::from_be_bytes)) else {
+            return false;
+        };
+        dh_pk == dhr && n < self.nr && !self.skipped.iter().any(|s| s.dh == dh_pk && s.n == n)
     }
 
     /// Deletes skipped keys older than 30 days.
@@ -335,8 +346,12 @@ impl Writer {
         }
     }
     pub fn str(&mut self, s: &str) {
-        self.u8(u8::try_from(s.len()).unwrap_or(u8::MAX));
-        self.raw(s.as_bytes());
+        let mut n = s.len().min(usize::from(u8::MAX));
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
+        self.u8(u8::try_from(n).unwrap_or(u8::MAX));
+        self.raw(&s.as_bytes()[..n]);
     }
     pub fn finish(self) -> Zeroizing<Vec<u8>> {
         self.0

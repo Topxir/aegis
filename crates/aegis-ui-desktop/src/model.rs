@@ -6,6 +6,13 @@ use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
 pub const DEFAULT_ENDPOINT: &str = "https://freeoasis.space";
+/// The sealed-transport key of the default server, compiled in. The default endpoint accepts
+/// this key only; a different one shows the key-changed screen. Any other endpoint is pinned on
+/// first use. Set to `None`, every endpoint is pinned on first use.
+pub const DEFAULT_SERVER_X_PK: Option<[u8; 32]> = Some([
+    0x8e, 0x5b, 0x9b, 0x5c, 0x70, 0x9e, 0xc8, 0x93, 0xf1, 0x66, 0x24, 0xd0, 0x0d, 0x41, 0x0d, 0xc6,
+    0x97, 0x88, 0x7d, 0x4d, 0xee, 0x43, 0x4d, 0x5b, 0xcf, 0x5f, 0x70, 0x5a, 0x35, 0x06, 0x28, 0x60,
+]);
 pub const MAX_MESSAGES_PER_CHAT: usize = 1000;
 pub const SEEN_CAP: usize = 4096;
 pub const SCHEMA: u32 = 1;
@@ -128,6 +135,14 @@ fn zero_key() -> Zeroizing<[u8; 32]> {
 impl Settings {
     /// The transport key we trust for the current endpoint, if one was pinned.
     pub fn pinned_key(&self) -> Option<[u8; 32]> {
+        self.pinned_key_in(DEFAULT_SERVER_X_PK)
+    }
+
+    /// `pinned_key` with the compiled key of the default server given explicitly.
+    pub(crate) fn pinned_key_in(&self, compiled: Option<[u8; 32]>) -> Option<[u8; 32]> {
+        if compiled.is_some() && self.endpoint.trim_end_matches('/') == DEFAULT_ENDPOINT {
+            return compiled;
+        }
         if self.server_key_for == self.endpoint {
             self.server_key
         } else {
@@ -408,6 +423,10 @@ pub struct Data {
     pub deferred: Vec<Deferred>,
     #[serde(default)]
     pub skeys: BTreeMap<String, SkeyState>,
+    /// Hex verifier of the PIN slot on the server, kept so that deleting the account can free
+    /// the slot without asking for the PIN. Empty when no PIN is set (or it predates this).
+    #[serde(default)]
+    pub pin_verifier: String,
 }
 
 impl core::fmt::Debug for Data {

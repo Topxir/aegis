@@ -7,14 +7,13 @@ use std::collections::VecDeque;
 pub const MIN_GAP_MS: u64 = 2000;
 pub const SIZE_HISTORY: usize = 16;
 pub const DEFAULT_SIZE: u32 = 1024;
-pub const MAX_RESP_LEN: u32 = 65_536;
+pub const MAX_RESP_LEN: u32 = 1_048_592;
 
-/// Largest `resp_len` the server answers for a nop whose body is `req_len` bytes:
-/// four times the request's bucket, at most [`MAX_RESP_LEN`]. Stops the server being used to
-/// amplify small requests.
-pub fn max_resp_len(req_len: usize) -> u32 {
-    let bucket = crate::sealed::bucket_for(req_len).unwrap_or(crate::sealed::BUCKETS[6]);
-    u32::try_from(bucket.saturating_mul(4)).unwrap_or(MAX_RESP_LEN).min(MAX_RESP_LEN)
+/// Largest `resp_len` the server answers for a nop whose body is `req_len` bytes. Real
+/// responses reach the same size whatever the request (a blob chunk answers a body-less GET), so
+/// the limit does not depend on `req_len`; `nop` is no cheaper to abuse than `blob/get`.
+pub fn max_resp_len(_req_len: usize) -> u32 {
+    MAX_RESP_LEN
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,13 +40,23 @@ pub fn mean_gap_ms(platform: Platform, mode: Mode) -> Option<u64> {
     }
 }
 
+/// Largest dummy request body: the server's body limit for everything but blob uploads.
+pub const MAX_NOP_BODY: u32 = 64 * 1024;
+
 /// Random source injected into the scheduler.
 pub trait CoverRng {
     /// Uniform in the open interval (0, 1).
     fn unit(&mut self) -> f64;
     /// Uniform in `0..n` (`n > 0`).
     fn below(&mut self, n: u64) -> u64;
+    /// True if the source could not deliver real randomness since the last call. The scheduler
+    /// then switches cover off for that tick rather than send predictable sizes and gaps.
+    fn failed(&mut self) -> bool {
+        false
+    }
 }
+
+static OS_RNG_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Operating system randomness.
 #[derive(Debug, Default, Clone, Copy)]
@@ -55,7 +64,10 @@ pub struct OsCoverRng;
 
 impl OsCoverRng {
     fn next(&mut self) -> u64 {
-        crate::random_bytes::<8>().map(u64::from_le_bytes).unwrap_or(0x9E37_79B9_7F4A_7C15)
+        crate::random_bytes::<8>().map(u64::from_le_bytes).unwrap_or_else(|_| {
+            OS_RNG_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+            0
+        })
     }
 }
 
@@ -65,6 +77,9 @@ impl CoverRng for OsCoverRng {
     }
     fn below(&mut self, n: u64) -> u64 {
         self.next() % n.max(1)
+    }
+    fn failed(&mut self) -> bool {
+        OS_RNG_FAILED.swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -189,12 +204,16 @@ impl Scheduler {
         } else if poll_due {
             Slot::Poll
         } else {
-            let req_len = self.sample(&self.reqs, rng).max(4);
+            let req_len = self.sample(&self.reqs, rng).clamp(4, MAX_NOP_BODY);
             let resp_len = self.sample(&self.resps, rng).min(max_resp_len(req_len as usize));
             Slot::Dummy { req_len, resp_len }
         };
-        let base = self.displaced_ms.take().unwrap_or(now_ms);
         let gap = if queue_len > 1 { MIN_GAP_MS } else { self.gap_ms(rng) };
+        if rng.failed() {
+            return Tick::Off;
+        }
+        // A burst runs at the minimum gap from now; the displaced slot is only used once it ends.
+        let base = if queue_len > 1 { now_ms } else { self.displaced_ms.take().unwrap_or(now_ms) };
         self.next_ms = base.saturating_add(gap).max(now_ms.saturating_add(MIN_GAP_MS));
         self.last_ms = Some(now_ms);
         Tick::Slot(slot)
@@ -254,7 +273,7 @@ fn push(q: &mut VecDeque<u32>, len: usize) {
 /// Body of `POST /api/v2/nop`: `BE32(resp_len) || random bytes`, `req_len` bytes in total.
 pub fn nop_body(req_len: u32, resp_len: u32) -> Result<Vec<u8>> {
     use rand_core::{OsRng, RngCore};
-    let total = (req_len as usize).max(4);
+    let total = (req_len as usize).clamp(4, MAX_NOP_BODY as usize);
     let mut body = vec![0u8; total];
     body[..4].copy_from_slice(&resp_len.min(max_resp_len(total)).to_be_bytes());
     OsRng.try_fill_bytes(&mut body[4..]).map_err(|_| Error::Rng)?;
@@ -417,9 +436,9 @@ mod tests {
         }
         s.record_response(900_000);
         let seen: Vec<u32> = (0..200).map(|_| dummy(&mut s, &mut rng).1).collect();
-        assert!(seen.contains(&4096), "capped at four times the request bucket");
+        assert!(seen.contains(&900_000), "a small request may ask for a large response");
         assert!(seen.contains(&70));
-        assert!(seen.iter().all(|r| *r == 70 || *r == 4096));
+        assert!(seen.iter().all(|r| *r == 70 || *r == 900_000));
     }
 
     #[test]
@@ -439,11 +458,11 @@ mod tests {
     fn nop_body_shape() {
         let b = nop_body(1024, 70_000).unwrap();
         assert_eq!(b.len(), 1024);
-        assert_eq!(u32::from_be_bytes([b[0], b[1], b[2], b[3]]), 16_384);
-        let b = nop_body(16_384, 70_000).unwrap();
+        assert_eq!(u32::from_be_bytes([b[0], b[1], b[2], b[3]]), 70_000);
+        let b = nop_body(1024, 2_000_000).unwrap();
         assert_eq!(u32::from_be_bytes([b[0], b[1], b[2], b[3]]), MAX_RESP_LEN);
-        assert_eq!(max_resp_len(10), 4096);
-        assert_eq!(max_resp_len(5000), 65_536);
+        assert_eq!(max_resp_len(10), MAX_RESP_LEN);
+        assert_eq!(nop_body(1 << 20, 5).unwrap().len(), MAX_NOP_BODY as usize);
         assert_eq!(nop_body(0, 5).unwrap().len(), 4);
         assert_ne!(nop_body(64, 1).unwrap()[4..], nop_body(64, 1).unwrap()[4..]);
     }

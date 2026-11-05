@@ -1,6 +1,5 @@
 package org.aegis.messenger.core
 
-import org.aegis.messenger.net.Sealed
 import kotlin.math.ln
 
 /** Cover traffic scheduler (spec section 26). Pure logic: the caller owns the clock, the timer and the network. */
@@ -12,12 +11,25 @@ interface CoverRng {
 
     /** Uniform in 0 until n (n > 0). */
     fun below(n: Long): Long
+
+    /** True if the source could not deliver real randomness since the last call; cover then pauses for that tick. */
+    fun failed(): Boolean = false
 }
 
 class OsCoverRng : CoverRng {
     private val r = java.security.SecureRandom()
-    override fun unit(): Double = unitFrom(r.nextLong())
-    override fun below(n: Long): Long = java.lang.Long.remainderUnsigned(r.nextLong(), maxOf(n, 1))
+    private var broken = false
+
+    private fun next(): Long = try {
+        r.nextLong()
+    } catch (e: RuntimeException) {
+        broken = true
+        0L
+    }
+
+    override fun unit(): Double = unitFrom(next())
+    override fun below(n: Long): Long = java.lang.Long.remainderUnsigned(next(), maxOf(n, 1))
+    override fun failed(): Boolean = broken.also { broken = false }
 }
 
 /** Seeded generator (SplitMix64) for tests. */
@@ -52,7 +64,10 @@ object Cover {
     const val MIN_GAP_MS = 2000L
     const val SIZE_HISTORY = 16
     const val DEFAULT_SIZE = 1024
-    const val MAX_RESP_LEN = 65536
+    const val MAX_RESP_LEN = 1_048_592
+
+    /** Largest dummy request body: the server's body limit for everything but blob uploads. */
+    const val MAX_NOP_BODY = 64 * 1024
 
     /** Mean gap on Android in milliseconds; null when off. */
     fun meanGapMs(mode: CoverMode): Long? = when (mode) {
@@ -61,15 +76,16 @@ object Cover {
         CoverMode.High -> 12_000L
     }
 
-    /** Largest resp_len the server answers for a nop with a body of reqLen bytes. */
-    fun maxRespLen(reqLen: Int): Int {
-        val bucket = try { Sealed.bucketFor(reqLen) } catch (e: AegisException) { Sealed.BUCKETS[6] }
-        return minOf(bucket.toLong() * 4, MAX_RESP_LEN.toLong()).toInt()
-    }
+    /**
+     * Largest resp_len the server answers for a nop. Real responses reach the same size whatever
+     * the request (a blob chunk answers a body-less GET), so it does not depend on reqLen.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun maxRespLen(reqLen: Int): Int = MAX_RESP_LEN
 
     /** Body of POST /api/v2/nop: BE32(resp_len) followed by random bytes, reqLen bytes in total. */
     fun nopBody(reqLen: Int, respLen: Int): ByteArray {
-        val total = maxOf(reqLen, 4)
+        val total = reqLen.coerceIn(4, MAX_NOP_BODY)
         val body = Crypto.randomBytes(total)
         Bytes.putBe32(body, 0, minOf(respLen, maxRespLen(total)).toLong())
         return body
@@ -117,13 +133,15 @@ class CoverScheduler(mode: CoverMode, nowMs: Long, rng: CoverRng) {
         } else if (pollDue) {
             CoverSlot.Poll
         } else {
-            val req = maxOf(sample(reqs, rng), 4)
+            val req = sample(reqs, rng).coerceIn(4, Cover.MAX_NOP_BODY)
             val resp = minOf(sample(resps, rng), Cover.maxRespLen(req))
             CoverSlot.Dummy(req, resp)
         }
-        val base = displacedMs ?: nowMs
-        displacedMs = null
         val gap = if (queueLen > 1) Cover.MIN_GAP_MS else gapMs(rng)
+        if (rng.failed()) return CoverTick.Off
+        // A burst runs at the minimum gap from now; the displaced slot is only used once it ends.
+        val base = if (queueLen > 1) nowMs else displacedMs ?: nowMs
+        if (queueLen <= 1) displacedMs = null
         nextMs = maxOf(base + gap, nowMs + Cover.MIN_GAP_MS)
         lastMs = nowMs
         return CoverTick.Slot(slot)

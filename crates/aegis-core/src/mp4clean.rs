@@ -146,6 +146,20 @@ fn zero_times_and_duration(buf: &[u8], b: &BoxRef, plan: &mut Plan) -> Result<(u
     }
 }
 
+/// Replaces the `mdhd` language with `und`, so the sender's locale does not travel with the file.
+fn set_undetermined_language(buf: &[u8], b: &BoxRef, plan: &mut Plan) -> Result<()> {
+    let at = match buf.get(b.payload()) {
+        Some(0) => b.payload() + 20,
+        Some(1) => b.payload() + 32,
+        _ => return Err(bad("header version")),
+    };
+    if at + 2 > b.end {
+        return Err(bad("truncated"));
+    }
+    plan.set.push((at, UND_LANGUAGE.to_vec()));
+    Ok(())
+}
+
 /// Zeroes the times of a `tkhd` and returns (width, height) in 16.16.
 fn tkhd(buf: &[u8], b: &BoxRef, plan: &mut Plan) -> Result<(u32, u32)> {
     let p = b.payload();
@@ -321,6 +335,9 @@ fn trak_handler(buf: &[u8], trak: &BoxRef) -> Result<Option<[u8; 4]>> {
 /// Offsets inside a sample entry payload (bytes after the 8-byte box header).
 const VISUAL_FIXED: usize = 78;
 const VISUAL_COMPRESSOR: (usize, usize) = (42, 74);
+/// Version, revision, vendor and quality of a visual sample entry.
+const VISUAL_INFO: (usize, usize) = (8, 24);
+const UND_LANGUAGE: [u8; 2] = [0x55, 0xC4];
 const AUDIO_VENDOR: (usize, usize) = (12, 16);
 
 /// Offset of the first child box of a sample entry.
@@ -389,6 +406,7 @@ fn scrub_track_text(buf: &[u8], mdia_kids: &[BoxRef], minf: &[BoxRef], hd: [u8; 
         entry_children_at(buf, &e, hd)?;
         let p = e.payload();
         if &hd == b"vide" {
+            plan.zero_len(p + VISUAL_INFO.0, VISUAL_INFO.1 - VISUAL_INFO.0)?;
             plan.zero_len(p + VISUAL_COMPRESSOR.0, VISUAL_COMPRESSOR.1 - VISUAL_COMPRESSOR.0)?;
         } else {
             plan.zero_len(p + AUDIO_VENDOR.0, AUDIO_VENDOR.1 - AUDIO_VENDOR.0)?;
@@ -437,6 +455,7 @@ fn process_track(
     let (w, h) = tkhd(buf, &tk, plan)?;
     let mdhd = one(&mdia_kids, b"mdhd")?.ok_or(bad("mdhd missing"))?;
     zero_times_and_duration(buf, &mdhd, plan)?;
+    set_undetermined_language(buf, &mdhd, plan)?;
     let stbl = stbl.ok_or(bad("stbl missing"))?;
     sample_ranges(buf, &stbl, budget, kept)?;
     scrub_track_text(buf, &mdia_kids, &minf, hd, plan)?;
@@ -485,6 +504,9 @@ fn child_kind(buf: &[u8], kind: Kind, k: &BoxRef) -> Result<Option<Kind>> {
         (Kind::Stbl, b"stsd") => Some(Kind::Stsd),
         (Kind::Stbl, _) if STBL_LEAVES.contains(&t) => Some(Kind::Leaf),
         (Kind::Stsd, _) => Some(Kind::Entry),
+        (Kind::Entry, b"colr") => {
+            matches!(buf.get(k.payload()..k.payload() + 4), Some(b"nclx" | b"nclc")).then_some(Kind::Leaf)
+        }
         (Kind::Entry, _) if ENTRY_KEEP.contains(&t) => Some(Kind::Leaf),
         _ => None,
     })
@@ -534,7 +556,7 @@ pub fn sanitize_video(input: &[u8]) -> Result<SanitizedVideo> {
     for b in &top {
         match &b.typ {
             b"ftyp" => {
-                if b.payload_len() < 8 || ftyp {
+                if b.payload_len() < 8 || ftyp || b.start != 0 {
                     return Err(bad("ftyp"));
                 }
                 ftyp_plan(input, b, &mut plan)?;

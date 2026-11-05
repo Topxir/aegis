@@ -111,7 +111,7 @@ pub fn parse_u64(s: &str) -> Result<u64> {
     s.parse().map_err(|_| Error::InvalidText)
 }
 
-fn is_hidden_format_char(c: char) -> bool {
+pub(crate) fn is_hidden_format_char(c: char) -> bool {
     matches!(c,
         '\u{200B}'..='\u{200F}'
         | '\u{202A}'..='\u{202E}'

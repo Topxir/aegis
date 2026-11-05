@@ -7,7 +7,8 @@ use zeroize::Zeroizing;
 
 pub const SPK_ROTATE_SECS: u64 = 7 * 24 * 3600;
 pub const SPK_KEEP_SECS: u64 = 14 * 24 * 3600;
-pub const SPK_MAX_AGE_SECS: u64 = 30 * 24 * 3600;
+/// A bundle older than this is refused: the signed prekey secret is deleted by then.
+pub const SPK_MAX_AGE_SECS: u64 = SPK_ROTATE_SECS + SPK_KEEP_SECS;
 pub const OPK_REFILL_TO: usize = 50;
 pub const OPK_LOW: usize = 10;
 const FUTURE_SKEW_SECS: u64 = 600;

@@ -20,10 +20,11 @@ import org.aegis.messenger.net.SocksTransport
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
-fun clientFor(endpoint: String, proxy: String): Client {
+fun clientFor(endpoint: String, proxy: String, gate: ((org.aegis.messenger.net.Transport) -> org.aegis.messenger.net.Transport)? = null): Client {
     val ep = Endpoint.parse(endpoint)
     val inner = if (proxy.isBlank()) DirectTransport() else SocksTransport(ProxyAddr.parse(proxy))
-    return Client(ep, KeyAlarmTransport(org.aegis.messenger.net.SealedTransport(inner, AppPins.pins)))
+    val t = KeyAlarmTransport(org.aegis.messenger.net.SealedTransport(inner, AppPins.pins))
+    return Client(ep, gate?.invoke(t) ?: t)
 }
 
 /**

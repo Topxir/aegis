@@ -144,8 +144,7 @@ impl Engine {
                 res = Err(Error::BadResponse);
                 break;
             };
-            self.slot(chunk.len());
-            if let Err(e) = client.blob_put(cid, chunk) {
+            if let Err(e) = self.net_blob_put(&client, cid, chunk) {
                 res = Err(e);
                 break;
             }
@@ -247,7 +246,7 @@ impl Engine {
         let desc = AttachmentDescriptor::parse(body).map_err(|_| Fetch::Drop)?;
         let mut chunks = Vec::with_capacity(desc.ids.len());
         for id in &desc.ids {
-            match client.blob_get(id) {
+            match self.net_blob_get(client, id) {
                 Err(_) => return Err(Fetch::Retry),
                 Ok(None) => return Err(Fetch::Drop),
                 Ok(Some(c)) => chunks.push(c),
@@ -411,7 +410,7 @@ impl Engine {
             };
             let mut rejected = 0usize;
             'pages: for _ in 0..POLL_PAGES {
-                let page = match client.poll(&queue, cursor) {
+                let page = match self.net_poll(client, &queue, cursor) {
                     Ok(p) => p,
                     Err(_) => {
                         *reached = false;

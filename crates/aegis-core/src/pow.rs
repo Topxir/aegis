@@ -45,8 +45,13 @@ pub fn verify(scope: &str, ts: u64, body_hash: &str, pow: u64, bits: u32) -> boo
 
 /// Smallest `pow` that satisfies `bits`, searching upward from zero.
 pub fn mine(scope: &str, ts: u64, body_hash: &str, bits: u32) -> u64 {
+    mine_from(scope, ts, body_hash, bits, 0)
+}
+
+/// Like `mine`, searching upward from `start` so identical requests get distinct proofs.
+pub fn mine_from(scope: &str, ts: u64, body_hash: &str, bits: u32, start: u64) -> u64 {
     let base = prefix(scope, ts, body_hash);
-    let mut n = 0u64;
+    let mut n = start;
     loop {
         let mut h = base.clone();
         h.update(n.to_string().as_bytes());

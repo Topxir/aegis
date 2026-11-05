@@ -75,8 +75,7 @@ object Text {
     }
 
     /** Bidi controls and zero-width characters that let a name or caption read as another one. */
-    fun isSpoofing(cp: Int): Boolean =
-        cp in 0x200B..0x200F || cp in 0x202A..0x202E || cp in 0x2060..0x2064 || cp in 0x2066..0x2069 || cp == 0xFEFF
+    fun isSpoofing(cp: Int): Boolean = isHiddenFormatChar(cp)
 
     private fun isHiddenFormatChar(it: Int): Boolean =
         it in 0x200B..0x200F || it in 0x202A..0x202E || it in 0x2060..0x2064 ||

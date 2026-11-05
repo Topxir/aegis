@@ -35,6 +35,7 @@ pub mod vectors;
 pub mod x3dh;
 
 pub use error::{Error, Result};
+pub use net::{pinned_key_for, DEFAULT_SERVER_URL, DEFAULT_SERVER_X_PK};
 
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
@@ -68,6 +69,14 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// A fresh 32-byte secret that is wiped on drop.
+pub fn random_key() -> Result<zeroize::Zeroizing<[u8; 32]>> {
+    use rand_core::{OsRng, RngCore};
+    let mut b = zeroize::Zeroizing::new([0u8; 32]);
+    OsRng.try_fill_bytes(&mut *b).map_err(|_| Error::Rng)?;
+    Ok(b)
 }
 
 /// Fills a fixed array from the OS CSPRNG.

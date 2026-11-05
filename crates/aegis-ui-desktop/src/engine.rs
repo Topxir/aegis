@@ -34,6 +34,7 @@ use zeroize::Zeroizing;
 
 pub mod cover;
 mod extra;
+mod oseal;
 mod pin;
 
 const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
@@ -164,7 +165,6 @@ impl App {
 const PREKEY_EVERY: Duration = Duration::from_secs(30 * 60);
 
 enum Resolved {
-    Known,
     Held,
     Dropped,
     Stop,
@@ -268,6 +268,8 @@ pub struct Engine {
     cfg: Config,
     app: Mutex<App>,
     save_lock: Mutex<()>,
+    /// Held for the length of a poll cycle; a second cycle is skipped instead of overlapping.
+    poll_lock: Mutex<()>,
     on_change: Box<dyn Fn() + Send + Sync>,
     /// Mirror of `App::key_alert` that can be read while the app lock is held.
     key_alert: AtomicBool,
@@ -344,6 +346,7 @@ impl Engine {
             cfg,
             app: Mutex::new(App::new()),
             save_lock: Mutex::new(()),
+            poll_lock: Mutex::new(()),
             on_change: Box::new(on_change),
             key_alert: AtomicBool::new(false),
             kick: Mutex::new(None),
@@ -377,7 +380,12 @@ impl Engine {
     /// True when the data directory already holds at least one vault file.
     pub fn has_vaults(&self) -> bool {
         std::fs::read_dir(&self.cfg.data_dir).is_ok_and(|mut d| {
-            d.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".vault")))
+            d.any(|e| {
+                e.is_ok_and(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.ends_with(".vault") || n.ends_with(".vault.ghost")
+                })
+            })
         })
     }
 
@@ -524,6 +532,8 @@ impl Engine {
     }
 
     fn install(&self, s: Session) {
+        // A stand-in left by the duress PIN is not needed once the account exists again.
+        let _ = std::fs::remove_file(pin::side(&self.vault_path(&s.data.username), "ghost"));
         {
             let mut app = self.app();
             app.session = Some(s);
@@ -688,6 +698,11 @@ impl Engine {
     pub fn unlock(&self, username: &str, password: &str) -> Result<(), Failure> {
         let u = normalize_username(username)?;
         let path = self.vault_path(&u);
+        if Self::is_ghost(&path) {
+            if let Some(f) = self.ghost_unlock(&path, password) {
+                return Err(f);
+            }
+        }
         if aegis_core::pin::is_valid_pin(password) && pin::side(&path, "pin").exists() {
             return self.pin_unlock(&u, &path, password);
         }
@@ -739,6 +754,14 @@ impl Engine {
     }
 
     pub fn delete_account(&self, confirm: &str) -> Result<(), Failure> {
+        {
+            let app = self.app();
+            let s = app.session.as_ref().ok_or(Failure::new("err.locked"))?;
+            if s.data.username != confirm.trim() {
+                return Err(Failure::new("err.confirm_name"));
+            }
+        }
+        self.pin_free_slot();
         let _g = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut app = self.app();
         let Some(s) = app.session.as_ref() else {
@@ -749,6 +772,7 @@ impl Engine {
         }
         let path = self.vault_path(&s.data.username);
         let _ = std::fs::remove_dir_all(media::media_dir(&path));
+        pin::remove_pin_files(&path);
         app.session = None;
         app.epoch += 1;
         app.route = Route::Welcome;
@@ -785,7 +809,7 @@ impl Engine {
             )
         };
         if !exists {
-            let entry = client.lookup(&u)?.ok_or(Failure::new("err.not_found"))?;
+            let entry = self.net_lookup(&client, &u)?.ok_or(Failure::new("err.not_found"))?;
             self.live(epoch, |s| s.add_contact(&entry, now_ms()));
             self.send_profile_to(&client, &u);
         }
@@ -1049,7 +1073,7 @@ impl Engine {
             None => return (Flow::Stop, false),
             Some(None) => return (Flow::Next, false),
             Some(Some(true)) => None,
-            Some(Some(false)) => match client.lookup(&env.sender) {
+            Some(Some(false)) => match self.net_lookup(client, &env.sender) {
                 Err(_) => return (Flow::Retry, false),
                 Ok(None) => return (Flow::Next, false),
                 Ok(Some(e)) => Some(e),
@@ -1094,7 +1118,7 @@ impl Engine {
                     if round == 1 {
                         return Err(Failure::new("err.needs_update"));
                     }
-                    let Some(b) = client.prekeys_take(&d.to)? else {
+                    let Some(b) = self.net_prekeys_take(client, &d.to)? else {
                         return Err(Failure::new("err.needs_update"));
                     };
                     match self.live(epoch, |s| s.begin_session(&d.to, &b, now_s())) {
@@ -1150,9 +1174,7 @@ impl Engine {
             let r = match (r, draft, &saved) {
                 (Ok(_), true, Err(f)) => Err(f.clone()),
                 (Ok(o), _, _) => {
-                    self.slot(o.padded.len());
-                    client
-                        .send(&o.queue, &o.padded)
+                    self.net_send(client, &o.queue, &o.padded)
                         .map(|_| ())
                         .map_err(Failure::from)
                 }
@@ -1262,11 +1284,7 @@ impl Engine {
             if !may_lookup {
                 return (Flow::Next, hit);
             }
-            return match self.resolve_sender(epoch, client, x, frame) {
-                Resolved::Known => {
-                    let (f, h) = self.handle_session_frame(epoch, client, frame, false);
-                    (f, h || hit)
-                }
+            return match self.resolve_sender(epoch, x, frame) {
                 Resolved::Held => (Flow::Next, true),
                 Resolved::Dropped => (Flow::Next, hit),
                 Resolved::Stop => (Flow::Stop, hit),
@@ -1279,40 +1297,16 @@ impl Engine {
         (Flow::Next, hit)
     }
 
-    /// Finds out who wrote with an unknown key. The directory is asked about people we share
-    /// a group or channel with, and only a username whose published key is exactly this one
-    /// is accepted. Anything else waits as a request for the user to decide.
-    fn resolve_sender(&self, epoch: u64, client: &Client, x: [u8; 32], frame: &[u8]) -> Resolved {
-        let Some(cands) = self.live(epoch, |s| {
-            if s.is_blocked(&x) {
-                None
-            } else {
-                Some(s.sender_candidates(8))
-            }
-        }) else {
-            return Resolved::Stop;
-        };
-        let Some(cands) = cands else {
-            return Resolved::Dropped;
-        };
-        for u in cands {
-            if let Ok(Some(e)) = client.lookup(&u) {
-                if e.u == u && e.x == x {
-                    let added = self.live(epoch, |s| {
-                        if s.data.contacts.contains_key(&u) {
-                            false
-                        } else {
-                            s.add_contact(&e, now_ms());
-                            true
-                        }
-                    });
-                    return match added {
-                        None => Resolved::Stop,
-                        Some(true) => Resolved::Known,
-                        Some(false) => Resolved::Dropped,
-                    };
-                }
-            }
+    /// A frame from a key that is not a contact. Nothing goes to the network: asking the
+    /// directory about the people we share groups or channels with would show the server who
+    /// they are. The frame waits as a request; matching happens when the user names the sender
+    /// and accepts (`accept_request`), and the directory is asked about that one name only.
+    fn resolve_sender(&self, epoch: u64, x: [u8; 32], frame: &[u8]) -> Resolved {
+        let blocked = self.live(epoch, |s| s.is_blocked(&x));
+        match blocked {
+            None => return Resolved::Stop,
+            Some(true) => return Resolved::Dropped,
+            Some(false) => {}
         }
         match self.live(epoch, |s| s.add_pending(x, frame, now_ms())) {
             None => Resolved::Stop,
@@ -1500,7 +1494,7 @@ impl Engine {
             let s = app.session.as_ref().ok_or(Failure::new("err.locked"))?;
             (app.epoch, self.client_for(&s.data.settings)?)
         };
-        let e = client.lookup(&u)?.ok_or(Failure::new("err.not_found"))?;
+        let e = self.net_lookup(&client, &u)?.ok_or(Failure::new("err.not_found"))?;
         if e.u != u || e.x != x {
             return Err(Failure::new("err.request_mismatch"));
         }
@@ -1569,7 +1563,7 @@ impl Engine {
         let entry = if known {
             None
         } else {
-            match client.lookup(&env.sender) {
+            match self.net_lookup(client, &env.sender) {
                 Err(_) => return (Flow::Retry, false),
                 Ok(None) => return (Flow::Next, false),
                 Ok(Some(e)) => Some(e),
@@ -1607,6 +1601,9 @@ impl Engine {
         if self.key_alert.load(Ordering::SeqCst) {
             return 0;
         }
+        let Ok(_cycle) = self.poll_lock.try_lock() else {
+            return 0;
+        };
         if self.key_check_due() {
             self.verify_server_key();
         }
@@ -1634,7 +1631,7 @@ impl Engine {
         }
 
         'inbox: for _ in 0..POLL_PAGES {
-            let page = match client.poll(&inbox, cursor) {
+            let page = match self.net_poll(&client, &inbox, cursor) {
                 Ok(p) => p,
                 Err(_) => {
                     reached = false;
@@ -1667,7 +1664,7 @@ impl Engine {
                 continue;
             };
             'group: for _ in 0..POLL_PAGES {
-                let page = match client.poll(&q, gcursor) {
+                let page = match self.net_poll(&client, &q, gcursor) {
                     Ok(p) => p,
                     Err(_) => {
                         reached = false;
@@ -1952,6 +1949,7 @@ mod tests {
     #[test]
     fn pinned_key_belongs_to_its_endpoint() {
         let mut st = Settings::new(Lang::En);
+        st.endpoint = "https://c.example".into();
         assert!(st.pinned_key().is_none());
         st.server_key = Some([3; 32]);
         st.server_key_for = "https://a.example".into();
@@ -1959,6 +1957,25 @@ mod tests {
         assert_eq!(st.pinned_key(), Some([3; 32]));
         st.endpoint = "https://b.example".into();
         assert!(st.pinned_key().is_none());
+    }
+
+    #[test]
+    fn the_default_endpoint_uses_the_compiled_key_and_ignores_a_stored_one() {
+        let mut st = Settings::new(Lang::En);
+        st.server_key = Some([3; 32]);
+        st.server_key_for.clone_from(&st.endpoint);
+        // No compiled key: the stored one counts.
+        assert_eq!(st.pinned_key_in(None), Some([3; 32]));
+        // A compiled key wins, whatever was stored, with or without a trailing slash.
+        assert_eq!(st.pinned_key_in(Some([9; 32])), Some([9; 32]));
+        st.server_key = None;
+        assert_eq!(st.pinned_key_in(Some([9; 32])), Some([9; 32]));
+        st.endpoint = format!("{}/", crate::model::DEFAULT_ENDPOINT);
+        assert_eq!(st.pinned_key_in(Some([9; 32])), Some([9; 32]));
+        // Other endpoints are not affected.
+        st.endpoint = "https://other.example".into();
+        assert!(st.pinned_key_in(Some([9; 32])).is_none());
+        assert!(crate::model::DEFAULT_SERVER_X_PK.is_some());
     }
 
     #[test]

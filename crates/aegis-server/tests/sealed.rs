@@ -484,12 +484,10 @@ fn nop_through_sealed_transport() {
 #[test]
 fn nop_rejections() {
     let r = start();
-    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(65_537, 0)).0, 400);
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(u32::MAX, 0)).0, 400);
-    // The answer may be at most four times the request's bucket.
-    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(4096, 0)).0, 200);
-    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(4097, 0)).0, 400);
-    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(65_536, 1000)).0, 400);
+    // The answer may be as large as the largest real response, whatever the request size.
+    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(aegis_core::cover::MAX_RESP_LEN, 0)).0, 200);
+    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(aegis_core::cover::MAX_RESP_LEN + 1, 0)).0, 400);
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", b"").0, 400);
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &[0, 0, 1]).0, 400);
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(10, 64 * 1024)).0, 413);

@@ -136,6 +136,15 @@ pub fn run(cfg: Config) -> Result<(), String> {
 
     let (kick_tx, kick_rx) = channel::<()>();
     engine.set_kick(kick_tx);
+    let worker_engine = Arc::clone(&engine);
+    std::thread::spawn(move || {
+        while let Some(go) = worker_engine.gate.wait_poll(Duration::from_secs(1)) {
+            if go {
+                worker_engine.poll_once();
+                worker_engine.gate.poll_done();
+            }
+        }
+    });
     let poll_engine = Arc::clone(&engine);
     let poll_ctl = ctl.clone();
     std::thread::spawn(move || {
@@ -147,7 +156,10 @@ pub fn run(cfg: Config) -> Result<(), String> {
             let kicked = match kick_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(()) => true,
                 Err(RecvTimeoutError::Timeout) => false,
-                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    poll_engine.gate.close();
+                    break;
+                }
             };
             if poll_engine.idle_expired() {
                 poll_ctl.lock();
@@ -157,7 +169,8 @@ pub fn run(cfg: Config) -> Result<(), String> {
             poll_engine.gate.set_on(active.is_some_and(|l| l > 0));
             let queued = poll_engine.gate.queued();
             let sizes = poll_engine.gate.take_sizes();
-            match cover.step(ms(), active.is_some(), active.unwrap_or(0), queued, &sizes) {
+            let resps = poll_engine.gate.take_resps();
+            match cover.step(ms(), active.is_some(), active.unwrap_or(0), queued, &sizes, &resps) {
                 cover::Step::Plain => {
                     if kicked {
                         next = Instant::now();
@@ -172,7 +185,11 @@ pub fn run(cfg: Config) -> Result<(), String> {
                 cover::Step::Wait => poll_engine.sweep(),
                 cover::Step::Real => poll_engine.gate.grant(),
                 cover::Step::Poll => {
-                    poll_engine.poll_once();
+                    // The cycle runs on its own thread so that its later requests can wait for
+                    // slots that this loop hands out.
+                    if !poll_engine.gate.start_poll() {
+                        poll_engine.send_dummy(64, 1024);
+                    }
                     next = Instant::now() + Duration::from_millis(5000 + jitter_ms());
                 }
                 cover::Step::Dummy { req_len, resp_len } => poll_engine.send_dummy(req_len, resp_len),

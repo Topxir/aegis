@@ -139,6 +139,10 @@ impl Expiring {
         self.map.contains_key(k)
     }
 
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
     fn insert(&mut self, k: [u8; 32], exp: u64) {
         if let Some(old) = self.map.insert(k, exp) {
             self.order.remove(&(old, k));
@@ -152,14 +156,6 @@ impl Expiring {
                 break;
             }
             self.order.pop_first();
-            self.map.remove(&k);
-        }
-    }
-
-    /// Drops the entries closest to expiry until at most `cap` remain.
-    fn trim(&mut self, cap: usize) {
-        while self.map.len() > cap {
-            let Some((_, k)) = self.order.pop_first() else { break };
             self.map.remove(&k);
         }
     }
@@ -334,15 +330,17 @@ impl ServerState {
         if self.pow_spent(hash, now) {
             return err(403, "proof of work already used");
         }
-        if is_reserved_name(&reg.u) && self.config.owner_ed_pk != Some(reg.ed) {
-            return err(403, "reserved username");
-        }
         match self.dir.get(&reg.u) {
             Some(e) if e.ed != reg.ed => return err(409, "username is bound to another key"),
+            // A name already bound to this key keeps working even if a later rule reserves it.
+            Some(_) => {}
+            None if is_reserved_name(&reg.u) && self.config.owner_ed_pk != Some(reg.ed) => {
+                return err(403, "reserved username");
+            }
             None if self.dir.len() >= self.config.max_directory_entries => {
                 return err(503, "directory full");
             }
-            _ => {}
+            None => {}
         }
         self.replay.insert(hash, self.replay_expiry(reg.ts, now));
         self.dir.insert(
@@ -395,6 +393,9 @@ impl ServerState {
         let body_hash = pow::body_hash_hex(body);
         self.purge_queue(&qid, now);
         let len = self.queues.get(&qid).map_or(0, VecDeque::len);
+        if len >= self.config.max_frames_per_queue {
+            return err(429, "queue full");
+        }
         let base = self.config.pow_bits;
         let need = base + fill_extra_bits(len, self.config.max_frames_per_queue);
         if !pow::verify(&qhex, ts, &body_hash, nonce, need) {
@@ -490,15 +491,24 @@ impl ServerState {
         }
     }
 
-    /// Records the ephemeral key of a sealed request. False when it was already seen.
-    pub fn sealed_first_use(&mut self, e_pk: [u8; 32], now: u64) -> bool {
-        self.sealed_seen.expire(now);
-        if self.sealed_seen.contains_key(&e_pk) {
+    /// Records the ephemeral key of a sealed request. False when it was already seen, when the
+    /// timestamp is outside the window, or when the set is full.
+    pub fn sealed_admit(&mut self, e_pk: [u8; 32], ts: Option<u64>, now: u64) -> bool {
+        if ts.is_some_and(|t| !pow::ts_in_window(t, now)) {
             return false;
         }
-        self.sealed_seen.insert(e_pk, now + self.config.replay_secs);
-        self.sealed_seen.trim(SEALED_SEEN_CAP);
+        self.sealed_seen.expire(now);
+        if self.sealed_seen.contains_key(&e_pk) || self.sealed_seen.len() >= SEALED_SEEN_CAP {
+            return false;
+        }
+        let exp = ts.map_or(now + self.config.replay_secs, |t| self.replay_expiry(t, now));
+        self.sealed_seen.insert(e_pk, exp);
         true
+    }
+
+    /// [`Self::sealed_admit`] for a request without a timestamp.
+    pub fn sealed_first_use(&mut self, e_pk: [u8; 32], now: u64) -> bool {
+        self.sealed_admit(e_pk, None, now)
     }
 
     /// A spent proof of work stays remembered until its `ts` can no longer pass the window check.
@@ -1025,15 +1035,19 @@ fn name_skeleton(u: &str) -> String {
             '4' => 'a',
             '5' | '$' => 's',
             '7' => 't',
-            '8' => 'b',
+            '6' | '8' => 'b',
+            '9' => 'g',
+            '2' => 'z',
             c => c.to_ascii_lowercase(),
         })
-        .collect()
+        .collect::<String>()
+        .replace("rn", "m")
+        .replace("vv", "w")
 }
 
 fn is_reserved_name(u: &str) -> bool {
     let sk = name_skeleton(u);
-    RESERVED_NAMES.iter().any(|r| name_skeleton(r) == sk)
+    RESERVED_NAMES.iter().any(|r| sk.contains(&name_skeleton(r)))
 }
 
 fn nop(body: &[u8]) -> Response {

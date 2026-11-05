@@ -5,13 +5,17 @@
 //! Real requests from the worker (a message send, a blob upload) wait in the `Gate` for a
 //! `Slot::Real`; the first one waiting takes the next slot early. If no slot comes within
 //! `GATE_WAIT` the request goes out anyway, so sending never hangs. Dummy request sizes follow
-//! the last 16 real request bodies; response sizes are not recorded (the default 1024 is used),
-//! and a Poll slot is a burst of requests where a Dummy slot is one. Nothing runs while the app
-//! is locked or minimized.
+//! the last 16 real request bodies and response sizes the last 16 real responses. Every network
+//! request of the app, not just sends, waits for a slot of its own, so a slot is exactly one
+//! request whether it is real, a poll or a dummy: a poll cycle that has to look at the inbox,
+//! the groups and the channels, or a message that needs a directory lookup or a blob, is spread
+//! over several slots (at the queue's minimum gap once more than one request waits). Nothing
+//! runs while the app is locked or minimized.
 
 use super::*;
 use aegis_core::cover::{Mode, OsCoverRng, Platform, Scheduler, Slot, Tick};
 use std::sync::Condvar;
+use std::thread::ThreadId;
 
 /// How long a real request waits for its slot before it goes out regardless.
 const GATE_WAIT: Duration = Duration::from_secs(12);
@@ -22,6 +26,14 @@ struct GateState {
     queued: usize,
     grants: usize,
     sizes: Vec<usize>,
+    resps: Vec<usize>,
+    /// A poll cycle was started by a `Slot::Poll`; its first request needs no slot of its own.
+    poll_go: bool,
+    /// A poll cycle is running.
+    poll_busy: bool,
+    /// The poll worker the slot belongs to, until its first request has gone.
+    token: Option<ThreadId>,
+    closed: bool,
 }
 
 /// Lets real requests wait for their slot. The network thread grants one per `Slot::Real`.
@@ -55,7 +67,7 @@ impl Gate {
         let mut g = self.lock();
         if g.queued > g.grants {
             g.grants += 1;
-            self.cv.notify_one();
+            self.cv.notify_all();
         }
     }
 
@@ -63,10 +75,66 @@ impl Gate {
         std::mem::take(&mut self.lock().sizes)
     }
 
-    /// Blocks until this request's slot, or until the wait runs out. `len` is the body size.
+    pub fn take_resps(&self) -> Vec<usize> {
+        std::mem::take(&mut self.lock().resps)
+    }
+
+    /// Notes the body size of a real response.
+    pub fn note_resp(&self, len: usize) {
+        self.lock().resps.push(len);
+    }
+
+    /// A `Slot::Poll` came: wakes the poll worker, whose first request uses this slot. False
+    /// when the previous cycle is still running; the slot then goes to a dummy.
+    pub fn start_poll(&self) -> bool {
+        let mut g = self.lock();
+        if g.poll_busy {
+            return false;
+        }
+        g.poll_go = true;
+        self.cv.notify_all();
+        true
+    }
+
+    /// The poll cycle ended.
+    pub fn poll_done(&self) {
+        let mut g = self.lock();
+        g.poll_busy = false;
+        g.token = None;
+    }
+
+    /// For the poll worker: waits for `start_poll`. `None` when the gate was closed.
+    pub fn wait_poll(&self, wait: Duration) -> Option<bool> {
+        let mut g = self.lock();
+        if !g.poll_go && !g.closed {
+            g = self.cv.wait_timeout(g, wait).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        if g.closed {
+            return None;
+        }
+        let go = std::mem::take(&mut g.poll_go);
+        g.poll_busy = go;
+        g.token = go.then(|| std::thread::current().id());
+        Some(go)
+    }
+
+    /// Ends the poll worker.
+    pub fn close(&self) {
+        self.lock().closed = true;
+        self.cv.notify_all();
+    }
+
+    /// Blocks until this request's slot, or until the wait runs out. `len` is the body size
+    /// (0 for a request without one, which is not recorded).
     pub fn pass(&self, len: usize, wait: Duration) {
         let mut g = self.lock();
-        g.sizes.push(len);
+        if len > 0 {
+            g.sizes.push(len);
+        }
+        if g.token == Some(std::thread::current().id()) {
+            g.token = None;
+            return;
+        }
         if !g.on {
             return;
         }
@@ -128,17 +196,26 @@ impl Driver {
     }
 
     /// `active`: unlocked and visible. `level`: 0 off, 1 standard, 2 high.
-    pub fn step(&mut self, now_ms: u64, active: bool, level: u8, queued: usize, sizes: &[usize]) -> Step {
-        self.step_with(now_ms, active, level, queued, sizes, &mut OsCoverRng)
-    }
-
-    pub fn step_with(
+    pub fn step(
         &mut self,
         now_ms: u64,
         active: bool,
         level: u8,
         queued: usize,
         sizes: &[usize],
+        resps: &[usize],
+    ) -> Step {
+        self.step_with(now_ms, active, level, queued, (sizes, resps), &mut OsCoverRng)
+    }
+
+    /// `seen`: the request and response body sizes of the real traffic since the last step.
+    pub fn step_with(
+        &mut self,
+        now_ms: u64,
+        active: bool,
+        level: u8,
+        queued: usize,
+        seen: (&[usize], &[usize]),
         rng: &mut dyn aegis_core::cover::CoverRng,
     ) -> Step {
         if !active || level == 0 {
@@ -153,8 +230,11 @@ impl Driver {
             Some(_) => {}
         }
         if let Some(sc) = self.sched.as_mut() {
-            for n in sizes {
+            for n in seen.0 {
                 sc.record_request(*n);
+            }
+            for n in seen.1 {
+                sc.record_response(*n);
             }
             if queued > self.seen_queued {
                 sc.early_slot(now_ms);
@@ -204,6 +284,71 @@ impl Engine {
         self.gate.pass(len, GATE_WAIT);
     }
 
+    /// Notes the size of a real response for the dummies' sizes.
+    pub(super) fn got(&self, len: usize) {
+        self.gate.note_resp(len);
+    }
+
+    /// The network calls of the app. Each waits for its slot first and reports the size of the
+    /// response afterwards (an estimate from what came back; the client does not expose the
+    /// wire size), so that the dummies' sizes follow the real ones.
+    pub(super) fn net_poll(&self, c: &Client, q: &[u8; 32], after: u64) -> Result<aegis_core::net::Poll, Error> {
+        self.slot(0);
+        let r = c.poll(q, after);
+        if let Ok(p) = &r {
+            // {"frames":[{"seq":N,"d":"hex"},...],"next":N,"has_more":false}
+            self.got(60 + p.frames.iter().map(|(_, d)| 2 * d.len() + 24).sum::<usize>());
+        }
+        r
+    }
+
+    pub(super) fn net_lookup(&self, c: &Client, u: &str) -> Result<Option<DirEntry>, Error> {
+        self.slot(0);
+        let r = c.lookup(u);
+        if let Ok(Some(e)) = &r {
+            // {"u":..,"title":..,"x":64 hex,"ed":64 hex}
+            self.got(60 + 2 * 64 + e.u.len() + e.title.len());
+        }
+        r
+    }
+
+    pub(super) fn net_blob_get(&self, c: &Client, id: &[u8; 32]) -> Result<Option<Vec<u8>>, Error> {
+        self.slot(0);
+        let r = c.blob_get(id);
+        if let Ok(Some(b)) = &r {
+            self.got(b.len());
+        }
+        r
+    }
+
+    pub(super) fn net_prekeys_take(&self, c: &Client, u: &str) -> Result<Option<aegis_core::x3dh::Bundle>, Error> {
+        self.slot(0);
+        let r = c.prekeys_take(u);
+        if r.is_ok() {
+            self.got(400);
+        }
+        r
+    }
+
+    /// Posts a padded frame. The request body is the hex of the frame.
+    pub(super) fn net_send(&self, c: &Client, q: &[u8; 32], padded: &[u8]) -> Result<u64, Error> {
+        self.slot(2 * padded.len());
+        let r = c.send(q, padded);
+        if let Ok(seq) = &r {
+            self.got(format!("{{\"seq\":{seq}}}").len());
+        }
+        r
+    }
+
+    pub(super) fn net_blob_put(&self, c: &Client, id: &[u8; 32], data: &[u8]) -> Result<(), Error> {
+        self.slot(data.len());
+        let r = c.blob_put(id, data);
+        if r.is_ok() {
+            self.got(2);
+        }
+        r
+    }
+
     /// Sends one dummy request. Errors are ignored: it is only cover.
     pub fn send_dummy(&self, req_len: u32, resp_len: u32) {
         let client = {
@@ -230,7 +375,7 @@ mod tests {
         let (mut polls, mut dummies) = (0, 0);
         let mut t = from;
         while t < to {
-            match d.step_with(t, active, level, 0, &[], rng) {
+            match d.step_with(t, active, level, 0, (&[], &[]), rng) {
                 Step::Poll => polls += 1,
                 Step::Dummy { .. } => dummies += 1,
                 _ => {}
@@ -244,8 +389,8 @@ mod tests {
     fn off_and_paused_stay_plain() {
         let mut d = Driver::new();
         let mut rng = SeededRng(1);
-        assert_eq!(d.step_with(0, true, 0, 0, &[], &mut rng), Step::Plain);
-        assert_eq!(d.step_with(0, false, 1, 0, &[], &mut rng), Step::Plain);
+        assert_eq!(d.step_with(0, true, 0, 0, (&[], &[]), &mut rng), Step::Plain);
+        assert_eq!(d.step_with(0, false, 1, 0, (&[], &[]), &mut rng), Step::Plain);
         assert_eq!(run(&mut d, &mut rng, false, 2, 0, 600_000), (0, 0));
         assert_eq!(run(&mut d, &mut rng, true, 0, 0, 600_000), (0, 0));
     }
@@ -270,7 +415,7 @@ mod tests {
         let mut rng = SeededRng(3);
         let mut t = 0;
         while t < 1_800_000 {
-            if let Step::Dummy { req_len, resp_len } = d.step_with(t, true, 1, 0, &[], &mut rng) {
+            if let Step::Dummy { req_len, resp_len } = d.step_with(t, true, 1, 0, (&[], &[]), &mut rng) {
                 assert!(req_len >= 4);
                 assert!(resp_len <= aegis_core::cover::max_resp_len(req_len as usize));
             }
@@ -283,21 +428,21 @@ mod tests {
         let mut d = Driver::new();
         let mut rng = SeededRng(5);
         run(&mut d, &mut rng, true, 1, 0, 120_000);
-        assert_eq!(d.step_with(130_000, false, 1, 0, &[], &mut rng), Step::Plain);
+        assert_eq!(d.step_with(130_000, false, 1, 0, (&[], &[]), &mut rng), Step::Plain);
         // First step after resuming never fires at once: the next slot is a full gap away.
-        assert_eq!(d.step_with(10_000_000, true, 1, 0, &[], &mut rng), Step::Wait);
+        assert_eq!(d.step_with(10_000_000, true, 1, 0, (&[], &[]), &mut rng), Step::Wait);
     }
 
     #[test]
     fn queued_requests_get_real_slots_at_the_minimum_gap() {
         let mut d = Driver::new();
         let mut rng = SeededRng(9);
-        d.step_with(0, true, 1, 0, &[], &mut rng);
+        d.step_with(0, true, 1, 0, (&[], &[]), &mut rng);
         let mut t = 0;
         let mut reals = Vec::new();
         let mut left = 3usize;
         while t < 60_000 && left > 0 {
-            if d.step_with(t, true, 1, left, &[], &mut rng) == Step::Real {
+            if d.step_with(t, true, 1, left, (&[], &[]), &mut rng) == Step::Real {
                 reals.push(t);
                 left -= 1;
             }
@@ -312,10 +457,10 @@ mod tests {
     fn dummy_sizes_follow_recorded_requests() {
         let mut d = Driver::new();
         let mut rng = SeededRng(2);
-        d.step_with(0, true, 1, 0, &[4000; 16], &mut rng);
+        d.step_with(0, true, 1, 0, (&[4000; 16], &[]), &mut rng);
         let mut t = 0;
         while t < 600_000 {
-            if let Step::Dummy { req_len, .. } = d.step_with(t, true, 1, 0, &[], &mut rng) {
+            if let Step::Dummy { req_len, .. } = d.step_with(t, true, 1, 0, (&[], &[]), &mut rng) {
                 assert_eq!(req_len, 4000);
             }
             t += 500;
@@ -349,5 +494,54 @@ mod tests {
         g.grant();
         h.join().unwrap();
         assert_eq!(g.take_sizes(), vec![10]);
+    }
+
+    #[test]
+    fn dummy_response_sizes_follow_recorded_responses() {
+        let mut d = Driver::new();
+        let mut rng = SeededRng(4);
+        d.step_with(0, true, 1, 0, (&[], &[300; 16]), &mut rng);
+        let mut t = 0;
+        let mut n = 0;
+        while t < 600_000 {
+            if let Step::Dummy { resp_len, .. } = d.step_with(t, true, 1, 0, (&[], &[]), &mut rng) {
+                assert_eq!(resp_len, 300);
+                n += 1;
+            }
+            t += 500;
+        }
+        assert!(n > 0);
+    }
+
+    #[test]
+    fn a_send_records_its_wire_body_and_a_get_records_none() {
+        let e = Engine::new(crate::config::Config::production(std::env::temp_dir()), || {});
+        let c = Client::new("http://127.0.0.1:9", None).unwrap().with_server_key([1; 32]);
+        let _ = e.net_send(&c, &[0; 32], &[0u8; 512]);
+        let _ = e.net_lookup(&c, "bob");
+        let _ = e.net_poll(&c, &[0; 32], 0);
+        // The body is the hex of the frame: twice its length. Requests without a body add nothing.
+        assert_eq!(e.gate.take_sizes(), vec![1024]);
+    }
+
+    #[test]
+    fn a_poll_slot_pays_for_the_first_request_of_its_cycle_only() {
+        let g = std::sync::Arc::new(Gate::default());
+        g.set_on(true);
+        let g2 = std::sync::Arc::clone(&g);
+        let h = std::thread::spawn(move || {
+            assert_eq!(g2.wait_poll(Duration::from_secs(5)), Some(true));
+            g2.pass(0, Duration::from_secs(30));
+            g2.pass(0, Duration::from_secs(30));
+            g2.poll_done();
+        });
+        assert!(g.start_poll());
+        // The second request waits for a slot of its own.
+        while g.queued() == 0 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        g.grant();
+        h.join().unwrap();
+        assert!(g.start_poll(), "a finished cycle can be followed by another");
     }
 }

@@ -3,6 +3,7 @@ package org.aegis.messenger.core
 import org.aegis.messenger.net.Sealed
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import java.io.File
 
@@ -26,6 +27,16 @@ class SealedVectorTest {
         val o = Sealed.openResponse(r.kResp, resp)
         assertEquals((m["response_status"] as Long).toInt(), o.code)
         assertArrayEquals(inner, o.body)
+    }
+
+    @Test
+    fun requestCarriesTheClockAfterTheMethod() {
+        val srv = Crypto.x25519Public(ByteArray(32) { 9 })
+        val r = Sealed.sealRequestAt(ByteArray(32) { 5 }, srv, "GET", "/api/v2/key", ByteArray(0), 1700000000L)
+        val plain = Sealed.sealRequestAt(ByteArray(32) { 5 }, srv, "GET", "/api/v2/key", ByteArray(0), null)
+        assertEquals(plain.outer.size, r.outer.size)
+        assertFalse(Hex.encode(plain.outer) == Hex.encode(r.outer))
+        assertEquals(Hex.encode(Sealed.sealRequestWith(ByteArray(32) { 5 }, srv, "GET", "/api/v2/key", ByteArray(0)).outer), Hex.encode(plain.outer))
     }
 
     @Test

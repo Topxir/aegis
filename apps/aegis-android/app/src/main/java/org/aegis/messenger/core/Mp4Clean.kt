@@ -113,6 +113,19 @@ object Mp4Clean {
         }
     }
 
+    /** Replaces the mdhd language with `und`, so the sender's locale does not travel with the file. */
+    private fun setUndeterminedLanguage(buf: ByteArray, b: Box, plan: Plan) {
+        val p = b.payload
+        if (p >= buf.size) throw bad("truncated")
+        val at = when (buf[p].toInt()) {
+            0 -> p + 20
+            1 -> p + 32
+            else -> throw bad("header version")
+        }
+        if (at + 2 > b.end) throw bad("truncated")
+        plan.set.add(at to byteArrayOf(0x55, 0xC4.toByte()))
+    }
+
     private fun tkhd(buf: ByteArray, b: Box, plan: Plan): LongArray {
         val p = b.payload
         if (p >= buf.size) throw bad("truncated")
@@ -230,6 +243,8 @@ object Mp4Clean {
     private const val VISUAL_FIXED = 78
     private const val VIS_COMP_FROM = 42
     private const val VIS_COMP_TO = 74
+    private const val VIS_INFO_FROM = 8
+    private const val VIS_INFO_TO = 24
     private const val AUD_VENDOR_FROM = 12
     private const val AUD_VENDOR_TO = 16
 
@@ -282,8 +297,10 @@ object Mp4Clean {
         for (e in ents) {
             entryChildrenAt(buf, e, hd)
             val p = e.payload
-            if (hd == "vide") plan.zeroLen(p + VIS_COMP_FROM, VIS_COMP_TO - VIS_COMP_FROM)
-            else plan.zeroLen(p + AUD_VENDOR_FROM, AUD_VENDOR_TO - AUD_VENDOR_FROM)
+            if (hd == "vide") {
+                plan.zeroLen(p + VIS_INFO_FROM, VIS_INFO_TO - VIS_INFO_FROM)
+                plan.zeroLen(p + VIS_COMP_FROM, VIS_COMP_TO - VIS_COMP_FROM)
+            } else plan.zeroLen(p + AUD_VENDOR_FROM, AUD_VENDOR_TO - AUD_VENDOR_FROM)
         }
     }
 
@@ -308,6 +325,7 @@ object Mp4Clean {
         val dims = tkhd(buf, tk ?: throw bad("tkhd missing"), plan)
         val mdhd = one(mdiaKids, "mdhd") ?: throw bad("mdhd missing")
         zeroTimesAndDuration(buf, mdhd, plan)
+        setUndeterminedLanguage(buf, mdhd, plan)
         sampleRanges(buf, stbl ?: throw bad("stbl missing"), budget, kept)
         scrubTrackText(buf, mdiaKids, minf, hdlr, plan)
         return if (hdlr == "vide") dims else longArrayOf(-1, -1)
@@ -316,7 +334,7 @@ object Mp4Clean {
     private enum class K { Moov, Trak, Edts, Mdia, Minf, Dinf, Stbl, Stsd, Entry, Leaf }
 
     private val ENTRY_KEEP = setOf(
-        "avcC", "hvcC", "av1C", "vpcC", "vvcC", "esds", "colr", "pasp", "clap", "btrt", "dac3", "dec3", "dOps", "dfLa",
+        "avcC", "hvcC", "av1C", "vpcC", "vvcC", "esds", "pasp", "clap", "btrt", "dac3", "dec3", "dOps", "dfLa",
     )
     private val STBL_LEAVES = setOf("stts", "ctts", "stss", "stsc", "stsz", "stco", "co64", "cslg")
 
@@ -336,7 +354,14 @@ object Mp4Clean {
             K.Dinf -> if (t == "dref") K.Leaf else null
             K.Stbl -> if (t == "stsd") K.Stsd else if (t in STBL_LEAVES) K.Leaf else null
             K.Stsd -> K.Entry
-            K.Entry -> if (t in ENTRY_KEEP) K.Leaf else null
+            K.Entry -> when {
+                t == "colr" -> {
+                    val c = if (k.payload + 4 <= buf.size) type4(buf, k.payload) else null
+                    if (c == "nclx" || c == "nclc") K.Leaf else null
+                }
+                t in ENTRY_KEEP -> K.Leaf
+                else -> null
+            }
             K.Leaf -> null
         }
     }
@@ -382,7 +407,7 @@ object Mp4Clean {
         for (b in top) {
             when (b.typ) {
                 "ftyp" -> {
-                    if (b.payloadLen < 8 || ftyp) throw bad("ftyp")
+                    if (b.payloadLen < 8 || ftyp || b.start != 0) throw bad("ftyp")
                     ftypPlan(input, b, plan)
                     ftyp = true
                 }

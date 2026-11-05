@@ -28,7 +28,7 @@ class SessionStore {
         const val SUPERSEDED_KEEP_SECS = 30L * 24 * 3600
         const val RECOVERY_AFTER_FAILURES = 3
         const val RECOVERY_MIN_GAP_SECS = 24L * 3600
-        private const val SEEN_FRAME_CAP = 256
+        private const val SEEN_FRAME_CAP = 1024
         private const val MAX_SESSIONS_PER_CONTACT = 8
         private const val MAX_OPKS_HELD = 200
         private const val START_LEN = 1 + 96
@@ -95,6 +95,8 @@ class SessionStore {
             receivedAny = true
             start = null
             lastActive = now
+            // A superseded session the peer still uses stays until it has been idle for the keep time.
+            if (supersededAt != null) supersededAt = now
             return plain
         }
     }
@@ -163,6 +165,7 @@ class SessionStore {
 
     /** Registers a pinned contact. Different keys for a known name are an error. */
     fun addContact(u: String, ed: ByteArray, x: ByteArray) {
+        if (Text.utf8(u).size > 255) throw AegisException.Session("name too long")
         val c = contacts.firstOrNull { it.u == u }
         if (c != null) {
             if (Bytes.eq(c.ed, ed) && Bytes.eq(c.x, x)) return
@@ -280,7 +283,10 @@ class SessionStore {
             plain = contacts[ci].sessions.firstNotNullOfOrNull { it.tryDecrypt(newDhsSk, msg, now) }
         }
         val c = contacts[ci]
-        if (plain == null) return c.failed(now)
+        if (plain == null) {
+            if (start == null && c.sessions.any { it.ratchet.isReplay(msg) }) return Received()
+            return c.failed(now)
+        }
         if (created) c.needStart = false
         c.failCount = 0
         val env = Envelope.decode(plain)

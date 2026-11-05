@@ -16,6 +16,9 @@ class Endpoint private constructor(val https: Boolean, val host: String, val por
 
     companion object {
         const val DEFAULT = "https://freeoasis.space"
+
+        /** Transport key of the default server, compiled in: the default endpoint is never pinned from the network. */
+        val DEFAULT_SERVER_X_PK: ByteArray? = ByteArray(32) { ("8e5b9b5c709ec893f16624d00d410dc697887d4dee434d5bcf5f705a35062860".substring(it * 2, it * 2 + 2)).toInt(16).toByte() }
         private val HOST = Regex("^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")
         private val PLAIN_HOSTS = setOf("127.0.0.1", "localhost")
 

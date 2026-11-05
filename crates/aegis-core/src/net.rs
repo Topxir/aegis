@@ -17,6 +17,23 @@ pub const MAX_BLOB: usize = (1 << 20) + 16;
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_POLL_FRAMES: usize = 100;
 
+/// The server clients use until the user picks another one.
+pub const DEFAULT_SERVER_URL: &str = "https://freeoasis.space";
+
+/// X25519 public key of the default server, compiled into the clients so the first contact is
+/// already pinned. If it were `None`, even the default server would be pinned on first use.
+pub const DEFAULT_SERVER_X_PK: Option<[u8; 32]> = Some([
+    0x8e, 0x5b, 0x9b, 0x5c, 0x70, 0x9e, 0xc8, 0x93, 0xf1, 0x66, 0x24, 0xd0, 0x0d, 0x41, 0x0d, 0xc6,
+    0x97, 0x88, 0x7d, 0x4d, 0xee, 0x43, 0x4d, 0x5b, 0xcf, 0x5f, 0x70, 0x5a, 0x35, 0x06, 0x28, 0x60,
+]);
+
+/// The compiled-in server key for `endpoint`, if it is the default server. Any other server
+/// (or an unparsable endpoint) gets `None` and is pinned on first use.
+pub fn pinned_key_for(endpoint: &str) -> Option<[u8; 32]> {
+    let key = DEFAULT_SERVER_X_PK?;
+    (Endpoint::parse(endpoint).ok()? == Endpoint::parse(DEFAULT_SERVER_URL).ok()?).then_some(key)
+}
+
 /// Parsed `https://host[:port]` or (restricted) `http://host[:port]` endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
@@ -104,6 +121,9 @@ pub struct Client {
 /// Most work a client agrees to do when a queue asks for more.
 const MAX_SEND_BITS: u32 = 28;
 
+/// How far ahead of the wall clock `unique_ts` may run, well inside the server's window.
+const MAX_TS_LEAD: u64 = 30;
+
 static LAST_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A timestamp strictly greater than any returned before, so two identical requests in the
@@ -113,12 +133,17 @@ fn unique_ts() -> u64 {
     let now = now_secs();
     let mut last = LAST_TS.load(Ordering::SeqCst);
     loop {
-        let next = now.max(last.saturating_add(1));
+        let next = if last < now.saturating_add(MAX_TS_LEAD) { now.max(last + 1) } else { now };
         match LAST_TS.compare_exchange(last, next, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => return next,
             Err(l) => last = l,
         }
     }
+}
+
+/// Random starting point for the proof search, so a repeated request never repeats its proof.
+fn pow_start() -> u64 {
+    crate::random_bytes::<4>().map_or(0, |b| u64::from(u32::from_be_bytes(b)))
 }
 
 /// Result of `pin/open`.
@@ -265,7 +290,7 @@ impl Client {
         // A filling queue asks for more work (429 with the bits it wants); retry once.
         for _ in 0..2 {
             let ts = unique_ts();
-            let n = pow::mine(&qhex, ts, &pow::body_hash_hex(body.as_bytes()), bits);
+            let n = pow::mine_from(&qhex, ts, &pow::body_hash_hex(body.as_bytes()), bits, pow_start());
             let mut path = format!("/api/v2/queue/send?q={qhex}&ts={ts}&pow={n}");
             if let Some(sk) = owner_sk {
                 let sig = crate::official::sign_post_auth(sk, q, ts, padded);
@@ -338,7 +363,7 @@ impl Client {
         if !is_valid_username(u) {
             return Err(Error::InvalidUsername);
         }
-        let take = PrekeyTake::mine(u, unique_ts(), self.pow_bits);
+        let take = PrekeyTake::mine_from(u, unique_ts(), self.pow_bits, pow_start());
         let (code, body) = self.request("POST", "/api/v2/prekeys/take", "application/x-www-form-urlencoded", take.to_form().as_bytes())?;
         match code {
             404 => Ok(None),
@@ -366,7 +391,7 @@ impl Client {
             None => pin::open_hash_input(&slot_h, &v_h),
         };
         let ts = unique_ts();
-        let n = pow::mine(&pin::pow_scope(&slot_h), ts, &pow::body_hash_hex(input.as_bytes()), self.pow_bits);
+        let n = pow::mine_from(&pin::pow_scope(&slot_h), ts, &pow::body_hash_hex(input.as_bytes()), self.pow_bits, pow_start());
         let mut form = format!("slot={slot_h}&v={v_h}");
         if let Some(s_h) = &s_h {
             form.push_str(&format!("&s={s_h}"));
@@ -417,7 +442,7 @@ impl Client {
         let idhex = hex::encode(id);
         let ts = now_secs();
         let scope = format!("blob:{idhex}");
-        let n = pow::mine(&scope, ts, &pow::body_hash_hex(data), self.pow_bits);
+        let n = pow::mine_from(&scope, ts, &pow::body_hash_hex(data), self.pow_bits, pow_start());
         let path = format!("/api/v2/blob/put?id={idhex}&ts={ts}&pow={n}");
         let (code, _) =
             self.request_capped("POST", &path, "application/octet-stream", data, MAX_RESPONSE)?;
@@ -701,17 +726,18 @@ fn decode_chunked(raw: &[u8], cap: usize) -> Option<Result<Vec<u8>>> {
                 None
             };
         }
-        if out.len() + size > cap {
+        if out.len().checked_add(size).is_none_or(|n| n > cap) {
             return Some(Err(Error::BadResponse));
         }
-        if raw.len() < i + size + 2 {
+        let end = i + size;
+        if raw.len() < end + 2 {
             return None;
         }
-        out.extend_from_slice(&raw[i..i + size]);
-        if &raw[i + size..i + size + 2] != b"\r\n" {
+        out.extend_from_slice(&raw[i..end]);
+        if &raw[end..end + 2] != b"\r\n" {
             return Some(Err(Error::BadResponse));
         }
-        i += size + 2;
+        i = end + 2;
     }
 }
 

@@ -35,8 +35,9 @@ Strings are UTF-8. `||` is concatenation. `hex` is lowercase.
 `u`, `title` (display name, ≤ 64 chars, may be empty), `x` (hex x_pk), `ed` (hex ed_pk),
 `ts` (unix seconds), `sig` (hex Ed25519 signature), `pow` (decimal u64, section 4).
 Reserved names: `owner`, `aegis`, `admin`, `support`, `official`, and any name that reads the
-same after dropping `_` and folding `0 1 l 3 4 5 7 8` to `o i i e a s t b` (for example `adm1n`,
-`0wner`), get `403`. The only exception is the configured owner key: the server reads the owner
+same after dropping `_` and folding `0 1 l 3 4 5 6 7 8 9 2` to `o i i e a s b t b g z`, `rn` to `m` and
+`vv` to `w`, or whose folded form contains a reserved name (for example `adm1n`, `0wner`,
+`aegis_support`, `adrnin`), get `403`. The only exception is the configured owner key: the server reads the owner
 `ed_pk` (64 hex digits) from the environment variable `AEGIS_OWNER_ED_PK`, else from the file
 `owner-ed-pk` in the data directory, and lets only that key register reserved names. Without a
 configured key nobody can register them. Each field
@@ -300,7 +301,8 @@ Descriptor: new envelope types `dmf` (frame `0x01`), `gmf` (frame `0x02`, group 
 Bounds, checked by sender and receiver: width and height at most 16384; duration_ms at most
 86400000; caption at most 1024 characters with no control characters (so no `\n`), no bidi
 controls (U+202A to U+202E, U+2066 to U+2069) and no zero-width characters (U+200B to U+200F,
-U+2060 to U+2064, U+FEFF). A descriptor outside these bounds is dropped like any malformed envelope.
+U+2060 to U+2064, U+FEFF) or other hidden format character (U+00AD, U+061C, U+180E, U+2028, U+2029,
+U+206A to U+206F, U+FFF9 to U+FFFB, U+E0000 to U+E007F). A descriptor outside these bounds is dropped like any malformed envelope.
 
 Exactly 10 lines. `n` must match `ceil((padded size)/1 MiB)` for the padded size implied by `size`.
 Clients that do not know a type drop the frame like any malformed envelope.
@@ -372,8 +374,10 @@ Videos (input ISO BMFF: MP4/MOV, at most 31 MiB):
   `isom iso2 iso4 iso5 iso6 mp41 mp42 avc1 qt   M4V  M4A  hvc1` (a brand not on the list becomes
   the major brand; an unlisted major brand becomes `isom`).
 - In kept tracks: the `hdlr` bytes after the handler type (reserved words and name) are zeroed;
-  in each sample entry the visual `compressorname` (32 bytes at payload offset 42) or the audio
-  vendor field (4 bytes at offset 12) is zeroed; every `dref` entry becomes a self-contained
+  in each sample entry the visual `compressorname` (32 bytes at payload offset 42) and the visual
+  version, revision, vendor and quality fields (payload bytes 8..24), or the audio vendor field
+  (4 bytes at offset 12), are zeroed; a `colr` box is kept only if its colour type is `nclx` or
+  `nclc` (an ICC profile can name the device and is dropped); every `dref` entry becomes a self-contained
   `url ` entry (flags 1, rest of the payload zero); a `dref` entry of another type rejects the
   video. `stsd` and `dref` entry counts must match the boxes.
 - Only tracks whose `hdlr` type is `vide` or `soun` are kept. Any other track (timed metadata
@@ -381,7 +385,9 @@ Videos (input ISO BMFF: MP4/MOV, at most 31 MiB):
 - Sample bytes: the sample ranges of every track are computed from `stsc`, `stsz`,
   `stco`/`co64`; if those tables are inconsistent or point outside the file, the video is
   rejected. Inside every `mdat`, all bytes that no kept sample covers are zeroed.
-- Creation and modification times in `mvhd`, `tkhd` and `mdhd` are set to 0.
+- Creation and modification times in `mvhd`, `tkhd` and `mdhd` are set to 0, and the `mdhd`
+  language is set to `und`.
+- `ftyp` must be the first box of the file (offset 0); otherwise the video is rejected.
 - Exactly one `moov`, one `ftyp` and one `mvhd`; at most one `tkhd`, `mdia`, `hdlr`, `mdhd`,
   `minf`, `stbl` per parent. Every kept or dropped track must have `stsc`, `stsz` and `stco` or
   `co64` (`stz2` is rejected).
@@ -510,7 +516,7 @@ to each contact when the profile changes and on first message to a new contact. 
 
 Parsing is strict: exactly four lines, no control characters (Unicode category Cc) in any
 field, no bidi controls (U+202A to U+202E, U+2066 to U+2069) and no zero-width characters
-(U+200B to U+200F, U+2060 to U+2064, U+FEFF) in name or about, name ≤ 64 and about ≤ 140 characters (code points), and a particle value outside the
+(U+200B to U+200F, U+2060 to U+2064, U+FEFF) or other hidden format character (the list of the attachment caption rule) in name or about, name ≤ 64 and about ≤ 140 characters (code points), and a particle value outside the
 list makes the whole card invalid (it is dropped, not shown as `none`). A `prof` is accepted only from a pinned
 contact (same sender checks as `dm`) and only if its `ts_ms` is newer than the stored one.
 
@@ -525,7 +531,10 @@ no queue ids, usernames, blob ids or request types. Clients use it by default.
 The server has a long-term X25519 key pair (`srv_sk`, `srv_pk`), generated on first start and
 kept in the data directory. `GET /api/v2/key` → `{"x":"<hex srv_pk>"}`. The client pins
 `srv_pk`: compiled in for the default server, first-use pinning for other servers; a changed
-key stops the client with an error instead of falling back.
+key stops the client with an error instead of falling back. The compiled-in key is
+`net::DEFAULT_SERVER_X_PK` for `net::DEFAULT_SERVER_URL`, looked up with `net::pinned_key_for`
+(`None` for any other endpoint); the key is `8e5b9b5c709ec893f16624d00d410dc697887d4dee434d5bcf5f705a35062860`. A client with a compiled-in key must compare it before it accepts any key
+fetched from the server.
 
 ```
 e      = fresh X25519 key pair per request
@@ -546,9 +555,7 @@ the inner request may not be `/api/v2/s` (sealed `400`). `pad` is `BE32(len) || 
 smallest bucket in `[1024, 4096, 16384, 65536, 262144, 1048576, 1114112]`.
 Each `e` is used once, so the fixed request nonce is safe; the response nonce is random because
 `k_resp` is a function of `e_pk` alone and a replayed outer request would otherwise reuse the
-keystream. The server also remembers every `e_pk` it has accepted for the replay window (20 minutes,
-in memory, at most 262144 entries, oldest dropped first) and answers a repeat with an empty `400`
-before running the inner request. The inner request carries no cookies or identifying headers. Responses to `POST
+keystream. The method line may carry the client clock: `method SP ts` with `ts` in decimal Unix seconds (for example `GET 1700000000`); clients always send it. The server answers an empty `400` when `ts` is more than 600 s away from its own clock, and keeps the `e_pk` until at least `ts + 601`, so a recorded request can never run twice. The server remembers every `e_pk` it has accepted for the replay window (20 minutes, in memory, at most 262144 entries) and answers a repeat with an empty `400` before running the inner request. When the set is full new sealed requests get an empty `400` until entries expire; nothing is dropped early. A request without `ts` (the older form) is still accepted and only gets the 20-minute guard. The inner request carries no cookies or identifying headers. Responses to `POST
 /api/v2/nop` (section 26) are padded like any other response of the same body length.
 
 The key is stored in `server-x25519.key` (32 raw bytes, created atomically with owner-only
@@ -581,7 +588,11 @@ timing and the fact that Aegis is used. To hide the IP as well, use Tor (section
   It cannot remove copies already exported or messages held by other people. The duress PIN has
   no server slot. It is kept locally as `"AGD1" || salt(16) || slot(32) || verifier(32)` with
   the same Argon2id and verifier derivation as section 20; the lock screen checks it first and
-  must refuse a duress PIN equal to the real one at setup.
+  must refuse a duress PIN equal to the real one at setup. The record can be tested offline against
+every PIN by whoever holds the device files, so an attacker who has them can learn the duress PIN and
+avoid it. This is accepted: the real PIN stays behind the server slot (five tries online), so the
+record only costs the user the wipe, and the record has to be checkable on a locked device without
+the network. The cost per guess is the same Argon2id as the vault's.
 - Auto-lock after a chosen idle time drops all key material from memory.
 
 ## 26. Cover traffic
@@ -606,10 +617,12 @@ average rate stays the same. When the queue holds more than one request, slots r
 Dummy request: inner `POST /api/v2/nop` with body `BE32(resp_len) || random bytes`. The body
 length is drawn from the sizes of the last 16 real requests (1024 bytes if none), so the
 sealed request lands in the same bucket mix. `resp_len` is drawn the same way from the last
-16 real response sizes, capped at min(65536, 4 x the sealed bucket of the request body)
-(`cover::max_resp_len`; the server answers `400` above that, so a small request cannot
-amplify). The server checks only the length field and answers
-`200` with `resp_len` zero bytes, so the sealed response has the same size as a real one. The
+16 real response sizes, capped at 1048592 bytes, the largest real response (a blob chunk),
+whatever the size of the request (`cover::max_resp_len`; the server answers `400` above that). A
+body-less `GET` for a blob or a large poll page has the smallest request bucket and the largest
+response bucket, so a dummy must be able to ask for the same. A dummy request body is at most 64 KiB.
+The server checks only the length field and answers `200` with `resp_len` filler bytes, so the
+sealed response has the same size as a real one. The
 server keeps no state, writes no log line and applies the usual rate limit.
 
 Settings → Connection → Cover traffic: Off, Standard (above, default), High (mean 8 s on
@@ -672,7 +685,7 @@ Prekey records live in the server state file next to the directory.
 ### 27.2 Handshake
 
 Initiator `A`, responder `B`. `A` fetches B's prekeys, checks `spk_sig` against B's pinned
-`ed_pk` and that `spk_ts` is within the last 30 days, and refuses otherwise.
+`ed_pk` and that `spk_ts` is within the last 21 days (`SPK_ROTATE_SECS + SPK_KEEP_SECS`, as long as the secret is kept), and refuses otherwise.
 
 ```
 EK   = fresh X25519 key pair
@@ -735,7 +748,7 @@ All frames are padded as in section 4. The envelope rules of section 5 still app
   `EK_pk` is handled on the existing session for it and never resets that session. This stops
   replayed starts.
 - A start with a new `EK_pk` from a pinned contact creates a new session. That session becomes
-  the one used for sending. Older sessions are kept for receiving for 30 days, then deleted.
+  the one used for sending. Older sessions are kept for receiving until 30 days after they last decrypted a message (or were superseded, if never), then deleted.
 - If both sides start at the same time, both sessions are kept for receiving. For sending, both
   use the one whose `EK_pk` is bytewise smaller.
 - Recovery: after 3 frames from a pinned contact whose sealed sender verifies but whose ratchet

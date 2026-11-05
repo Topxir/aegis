@@ -45,6 +45,19 @@ class ClientTest {
     }
 
     @Test
+    fun queueFullIsAPlain429WithoutRetry() {
+        val (c, f) = client(json(429, "queue full"))
+        try { c.send(ByteArray(16), ByteArray(10)); error("expected failure") } catch (e: org.aegis.messenger.core.AegisException.Http) { assertEquals(429, e.code) }
+        assertEquals(1, f.seen.size)
+    }
+
+    @Test
+    fun writeFailureIs503() {
+        val (c, _) = client(json(503, ""))
+        try { c.prekeysPut("u=a"); error("expected failure") } catch (e: org.aegis.messenger.core.AegisException.Http) { assertEquals(503, e.code) }
+    }
+
+    @Test
     fun sendIgnoresBitsOutOfRangeAndNeverLoops() {
         val (c, f) = client(json(429, """{"bits":29}"""))
         try { c.send(ByteArray(16), ByteArray(10)); error("expected failure") } catch (e: org.aegis.messenger.core.AegisException.Http) { assertEquals(429, e.code) }
@@ -135,7 +148,7 @@ class ClientTest {
         assertEquals(300L, org.aegis.messenger.core.Bytes.be32(r.body!!, 0))
         val tiny = org.aegis.messenger.core.Cover.nopBody(1, 10)
         assertEquals(4, tiny.size)
-        val capped = org.aegis.messenger.core.Cover.nopBody(256, 1_000_000)
+        val capped = org.aegis.messenger.core.Cover.nopBody(256, 2_000_000)
         assertEquals(256, capped.size)
         assertEquals(org.aegis.messenger.core.Cover.maxRespLen(256).toLong(), org.aegis.messenger.core.Bytes.be32(capped, 0))
         assertFalse(capped.isEmpty())

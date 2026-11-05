@@ -112,6 +112,15 @@ class Ratchet private constructor(
         skipped.removeAll { now >= it.ts + SKIPPED_TTL_SECS }
     }
 
+    /** True if msg belongs to the current receiving chain at a counter whose key is already spent. */
+    fun isReplay(msg: ByteArray): Boolean {
+        val cur = dhr ?: return false
+        if (msg.size < HEADER_LEN) return false
+        val dhPk = msg.copyOfRange(0, 32)
+        val n = Bytes.be32(msg, 36)
+        return Bytes.eq(dhPk, cur) && n < nr && skipped.none { it.n == n && Bytes.eq(it.dh, dhPk) }
+    }
+
     private fun decryptInner(newDhsSk: ByteArray, msg: ByteArray, now: Long): ByteArray {
         if (msg.size < HEADER_LEN + 16) throw AegisException.Length()
         expire(now)

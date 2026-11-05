@@ -36,7 +36,7 @@ pub struct Opened {
 /// forever (no forward secrecy). Chats must use the session API (frame type 0x03); keep this
 /// only for `ginv` and for reading old frames.
 pub fn seal_dm(sender_x_sk: &[u8; 32], recipient_x_pk: &[u8; 32], env: &Envelope) -> Result<Vec<u8>> {
-    seal_dm_with(&crate::random_bytes::<32>()?, sender_x_sk, recipient_x_pk, env)
+    seal_dm_with(&*crate::random_key()?, sender_x_sk, recipient_x_pk, env)
 }
 
 /// Deterministic variant of [`seal_dm`] with an injected ephemeral secret.

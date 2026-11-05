@@ -179,6 +179,26 @@ class Mp4CleanTest {
     }
 
     @Test
+    fun languageUndeterminedAndFtypFirst() {
+        val f = Mp4Fixture.build()
+        val v = Mp4Clean.sanitize(f.bytes)
+        var at = indexOf(v.bytes, "mdhd".toByteArray())
+        var seen = 0
+        while (at >= 0) {
+            val p = at + 4
+            val lang = p + if (v.bytes[p].toInt() == 0) 20 else 32
+            assertEquals(0x55, v.bytes[lang].toInt() and 0xFF)
+            assertEquals(0xC4, v.bytes[lang + 1].toInt() and 0xFF)
+            seen++
+            at = indexOf(v.bytes, "mdhd".toByteArray(), at + 4)
+        }
+        assertTrue(seen >= 1)
+        rejects(FREE8 + f.bytes)
+    }
+
+    private val FREE8 = byteArrayOf(0, 0, 0, 8) + "free".toByteArray()
+
+    @Test
     fun mdatToEndVariant() {
         val f = Mp4Fixture.build()
         val b = f.bytes.copyOf()

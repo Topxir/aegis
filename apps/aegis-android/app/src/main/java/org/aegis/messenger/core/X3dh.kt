@@ -4,7 +4,7 @@ package org.aegis.messenger.core
 object X3dh {
     const val SPK_ROTATE_SECS = 7L * 24 * 3600
     const val SPK_KEEP_SECS = 14L * 24 * 3600
-    const val SPK_MAX_AGE_SECS = 30L * 24 * 3600
+    const val SPK_MAX_AGE_SECS = SPK_ROTATE_SECS + SPK_KEEP_SECS
     const val OPK_REFILL_TO = 50
     const val OPK_LOW = 10
     private const val FUTURE_SKEW_SECS = 600L

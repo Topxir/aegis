@@ -5,7 +5,7 @@ use aegis_core::text::parse_pairs;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -125,14 +125,15 @@ fn ascii(b: Vec<u8>) -> Result<String, HttpError> {
 
 /// Reads one request. Only `Content-Length` bodies are accepted.
 pub fn read_request<R: BufRead>(r: &mut R, deadline: Instant) -> Result<Request, HttpError> {
-    read_request_with(r, deadline, &mut || {})
+    read_request_with(r, deadline, &mut |_| {})
 }
 
-/// Like [`read_request`]; `headers_done` runs once the request line and headers are in.
+/// Like [`read_request`]; `progress` gets `Some(n)` while a body is incoming (`n` bytes so far) and `None`
+/// once the request is complete or has no body, after the headers are in.
 fn read_request_with<R: BufRead>(
     r: &mut R,
     deadline: Instant,
-    headers_done: &mut dyn FnMut(),
+    progress: &mut dyn FnMut(Option<usize>),
 ) -> Result<Request, HttpError> {
     let mut budget = MAX_HEADER_BYTES;
     let first = ascii(read_line(r, &mut budget, deadline)?)?;
@@ -178,7 +179,7 @@ fn read_request_with<R: BufRead>(
             _ => {}
         }
     }
-    headers_done();
+    progress((length.unwrap_or(0) > 0).then_some(0));
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     // The limit is decided by the request line alone, before any body byte is read.
     let body_start = Instant::now();
@@ -210,11 +211,15 @@ fn read_request_with<R: BufRead>(
         let want = chunk.len().min(length - body.len());
         match r.read(&mut chunk[..want]) {
             Ok(0) => return Err(HttpError::Io),
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Ok(n) => {
+                body.extend_from_slice(&chunk[..n]);
+                progress(Some(body.len()));
+            }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => return Err(io_err(&e)),
         }
     }
+    progress(None);
     let query = parse_pairs(query).map_err(|_| HttpError::Malformed)?;
     Ok(Request {
         method: method.to_owned(),
@@ -273,8 +278,9 @@ fn dispatch(state: &Mutex<ServerState>, req: &Request, now: u64) -> BlobReply {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .handle(req, now);
-    if req.path.starts_with("/api/v2/pin/") || req.path.starts_with("/api/v2/prekeys/") {
-        let _ = persist_now(state);
+    let durable = req.path.starts_with("/api/v2/pin/") || req.path.starts_with("/api/v2/prekeys/");
+    if durable && persist_now(state).is_err() {
+        return json_err(503, "storage unavailable");
     }
     BlobReply::Json(resp)
 }
@@ -299,7 +305,7 @@ fn handle_sealed(state: &Mutex<ServerState>, outer: &Request) -> BlobReply {
     let fresh = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .sealed_first_use(e_pk, aegis_core::now_secs());
+        .sealed_admit(e_pk, inner.ts, aegis_core::now_secs());
     if !fresh {
         return empty_400();
     }
@@ -340,7 +346,7 @@ fn run_inner(state: &Mutex<ServerState>, inner: &sealed::SealedRequest) -> (u16,
     }
 }
 
-fn handle_connection(stream: TcpStream, state: &Mutex<ServerState>, ready: &AtomicBool) {
+fn handle_connection(stream: TcpStream, state: &Mutex<ServerState>, phase: &AtomicU64) {
     if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
     {
@@ -351,7 +357,9 @@ fn handle_connection(stream: TcpStream, state: &Mutex<ServerState>, ready: &Atom
     };
     let mut reader = BufReader::new(read_half);
     let deadline = Instant::now() + HEADER_DEADLINE;
-    let reply = match read_request_with(&mut reader, deadline, &mut || ready.store(true, Ordering::SeqCst)) {
+    let reply = match read_request_with(&mut reader, deadline, &mut |p| {
+        phase.store(p.map_or(PHASE_IDLE, |n| n as u64), Ordering::SeqCst);
+    }) {
         Ok(req) if req.method == "POST" && req.path == SEALED_PATH => handle_sealed(state, &req),
         Ok(req) => dispatch(state, &req, aegis_core::now_secs()),
         Err(HttpError::Io) => return,
@@ -383,8 +391,13 @@ struct Conn {
     id: u64,
     started: Instant,
     stream: TcpStream,
-    ready: Arc<AtomicBool>,
+    phase: Arc<AtomicU64>,
 }
+
+/// `Conn::phase` while the headers are still incoming.
+const PHASE_HEADERS: u64 = u64::MAX;
+/// `Conn::phase` once the request is complete (or has no body); otherwise the body bytes received.
+const PHASE_IDLE: u64 = u64::MAX - 1;
 
 type Registry = Arc<Mutex<Vec<Conn>>>;
 
@@ -404,13 +417,20 @@ impl Drop for Slot {
     }
 }
 
-/// Closes the oldest connection that has not finished its headers. False when there is none.
-fn evict_unready(registry: &Registry) -> bool {
+/// Closes the connection that has made the least progress: the oldest one still sending headers,
+/// else the one that has received the fewest body bytes. False when every connection is working
+/// on a complete request.
+fn evict_stalled(registry: &Registry) -> bool {
     let reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let victim = reg
         .iter()
-        .filter(|c| !c.ready.load(Ordering::SeqCst))
-        .min_by_key(|c| c.started);
+        .filter_map(|c| match c.phase.load(Ordering::SeqCst) {
+            PHASE_IDLE => None,
+            PHASE_HEADERS => Some((0u8, 0u64, c)),
+            n => Some((1, n, c)),
+        })
+        .min_by_key(|&(rank, bytes, c)| (rank, bytes, c.started))
+        .map(|(_, _, c)| c);
     match victim {
         Some(c) => {
             let _ = c.stream.shutdown(Shutdown::Both);
@@ -421,8 +441,9 @@ fn evict_unready(registry: &Registry) -> bool {
 }
 
 /// Accepts connections until `stop` is set. One thread per connection, capped. When the cap is
-/// reached the oldest connection that has not yet sent its headers is cut, so idle sockets
-/// cannot lock others out; there are no per-IP limits (Tor exits are shared).
+/// reached the connection that has made the least progress is cut (headers first, then the
+/// fewest body bytes), so idle or trickling sockets cannot lock others out; there are no per-IP
+/// limits (Tor exits are shared).
 pub fn serve(
     listener: &TcpListener,
     state: &Arc<Mutex<ServerState>>,
@@ -439,14 +460,14 @@ pub fn serve(
                     continue;
                 }
                 if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS
-                    && (!evict_unready(&registry)
+                    && (!evict_stalled(&registry)
                         || active.load(Ordering::SeqCst) >= MAX_CONNECTIONS + MAX_CONNECTIONS / 4)
                 {
                     continue;
                 }
                 active.fetch_add(1, Ordering::SeqCst);
                 next_id += 1;
-                let ready = Arc::new(AtomicBool::new(false));
+                let phase = Arc::new(AtomicU64::new(PHASE_HEADERS));
                 let Ok(clone) = stream.try_clone() else {
                     active.fetch_sub(1, Ordering::SeqCst);
                     continue;
@@ -454,14 +475,14 @@ pub fn serve(
                 registry
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(Conn { id: next_id, started: Instant::now(), stream: clone, ready: Arc::clone(&ready) });
+                    .push(Conn { id: next_id, started: Instant::now(), stream: clone, phase: Arc::clone(&phase) });
                 let slot = Slot { active: Arc::clone(&active), registry: Arc::clone(&registry), id: next_id };
                 let st = Arc::clone(state);
                 let spawned = std::thread::Builder::new()
                     .stack_size(256 * 1024)
                     .spawn(move || {
                         let _slot = slot;
-                        handle_connection(stream, &st, &ready);
+                        handle_connection(stream, &st, &phase);
                     });
                 drop(spawned);
             }

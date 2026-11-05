@@ -72,7 +72,7 @@ impl core::fmt::Debug for SendChain {
 
 impl SendChain {
     pub fn new(now: u64) -> Result<Self> {
-        Ok(Self::new_with(crate::random_bytes()?, crate::random_bytes()?, now))
+        Ok(Self { chain_id: crate::random_bytes()?, n: 0, ck: crate::random_key()?, created_at: now })
     }
 
     pub fn new_with(chain_id: [u8; 16], ck: [u8; 32], now: u64) -> Self {
@@ -266,12 +266,15 @@ impl RecvSet {
         ck: &[u8; 32],
         now: u64,
     ) -> Result<()> {
+        if sender.len() > usize::from(u8::MAX) {
+            return Err(Error::Session("name too long"));
+        }
         if self.scope == Scope::Channel && self.owner_ed != Some(sender_ed) {
             return Err(Error::SenderMismatch);
         }
-        if let Some(c) = self.chains.iter().find(|c| c.chain_id == chain_id) {
-            // A repeated distribution never rewinds a chain or moves it to another sender.
-            return if c.sender_ed == sender_ed && c.sender == sender { Ok(()) } else { Err(Error::SenderMismatch) };
+        if let Some(c) = self.chains.iter().find(|c| c.chain_id == chain_id && c.sender_ed == sender_ed) {
+            // A repeated distribution never rewinds a chain or renames its sender.
+            return if c.sender == sender { Ok(()) } else { Err(Error::SenderMismatch) };
         }
         if self.chains.len() >= MAX_CHAINS {
             return Err(Error::Session("too many chains"));
@@ -311,15 +314,22 @@ impl RecvSet {
         let h = aead_open(&self.hk, &hnonce, &[FRAME_SENDER_KEY], &frame[13..1 + HDR_LEN])?;
         let chain_id: [u8; 16] = arr(&h[..16])?;
         let n = u32::from_be_bytes(arr(&h[16..])?);
-        let i = self
-            .chains
-            .iter()
-            .position(|c| c.chain_id == chain_id)
-            .ok_or(Error::Session("unknown chain"))?;
+        // Chain ids are only unique per sender, so every chain with this id gets a try.
+        let mut last = Error::Session("unknown chain");
+        let candidates: Vec<usize> = (0..self.chains.len()).filter(|&i| self.chains[i].chain_id == chain_id).collect();
+        for i in candidates {
+            match self.decrypt_with_chain(i, frame, &chain_id, n, now) {
+                Ok(env) => return Ok(env),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
+    fn decrypt_with_chain(&mut self, i: usize, frame: &[u8], chain_id: &[u8; 16], n: u32, now: u64) -> Result<Envelope> {
         let mut chain = self.chains[i].clone();
-        let key_nonce = chain.take_key(n, now)?;
-        let (key, nonce) = key_nonce;
-        let plain = Zeroizing::new(aead_open(&key, &nonce, &chain_aad(&chain_id, n), &frame[1 + HDR_LEN..])?);
+        let (key, nonce) = chain.take_key(n, now)?;
+        let plain = Zeroizing::new(aead_open(&key, &nonce, &chain_aad(chain_id, n), &frame[1 + HDR_LEN..])?);
         if plain.len() < 64 {
             return Err(Error::Length);
         }
@@ -396,6 +406,12 @@ impl RecvSet {
             }
             for _ in 0..count {
                 c.skipped.push((r.u32()?, Zeroizing::new(r.array()?), r.u64()?));
+            }
+            let dup = set.chains.iter().any(|o| o.sender_ed == c.sender_ed && o.chain_id == c.chain_id);
+            let per_sender = set.chains.iter().filter(|o| o.sender_ed == c.sender_ed).count();
+            let foreign = scope == Scope::Channel && set.owner_ed != Some(c.sender_ed);
+            if dup || foreign || per_sender >= MAX_CHAINS_PER_SENDER {
+                return Err(Error::Session("state"));
             }
             set.chains.push(c);
         }

@@ -40,12 +40,32 @@ class CoverTest {
         now = s.nextSlotMs()!!
         val d = (s.tick(now, 0, false, rng) as CoverTick.Slot).slot as CoverSlot.Dummy
         assertEquals(300, d.reqLen)
-        assertEquals(4096, d.respLen)
-        assertEquals(4096, Cover.maxRespLen(300).coerceAtMost(4096))
-        assertEquals(65536, Cover.maxRespLen(20_000))
+        assertEquals(100_000, d.respLen)
+        assertEquals(1_048_592, Cover.maxRespLen(300))
+        assertEquals(1_048_592, Cover.maxRespLen(20_000))
         val body = Cover.nopBody(d.reqLen, d.respLen)
         assertEquals(300, body.size)
-        assertEquals(4096L, Bytes.be32(body, 0))
+        assertEquals(100_000L, Bytes.be32(body, 0))
+    }
+
+    @Test
+    fun nopBodyLimits() {
+        assertEquals(70_000L, Bytes.be32(Cover.nopBody(1024, 70_000), 0))
+        assertEquals(Cover.MAX_RESP_LEN.toLong(), Bytes.be32(Cover.nopBody(1024, 2_000_000), 0))
+        assertEquals(Cover.MAX_NOP_BODY, Cover.nopBody(1 shl 20, 5).size)
+        assertEquals(4, Cover.nopBody(0, 5).size)
+    }
+
+    @Test
+    fun failedRngTurnsTheTickOff() {
+        class Broken(private val r: CoverRng) : CoverRng by r {
+            override fun failed() = true
+        }
+        val rng = SeededCoverRng(3)
+        val s = CoverScheduler(CoverMode.Standard, 0, rng)
+        val now = s.nextSlotMs()!!
+        assertTrue(s.tick(now, 0, false, Broken(rng)) is CoverTick.Off)
+        assertTrue(s.tick(now, 0, false, rng) is CoverTick.Slot)
     }
 
     @Test

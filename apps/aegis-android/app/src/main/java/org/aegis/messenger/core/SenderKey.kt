@@ -120,6 +120,7 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
     private val g = g.copyOf()
     private val hk = SenderKey.headerKey(g)
     private val chains = ArrayList<RecvChain>()
+    private var lastNow = 0L
 
     init {
         if (scope == SkScope.Channel && ownerEd == null) throw AegisException.Session("channel needs an owner key")
@@ -136,10 +137,12 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
     }
 
     fun addChain(sender: String, senderEd: ByteArray, chainId: ByteArray, n: Long, ck: ByteArray, now: Long) {
+        if (Text.utf8(sender).size > 255) throw AegisException.Session("name too long")
         if (scope == SkScope.Channel && !Bytes.eq(ownerEd!!, senderEd)) throw AegisException.SenderMismatch()
-        val old = chains.firstOrNull { Bytes.eq(it.chainId, chainId) }
+        val old = chains.firstOrNull { Bytes.eq(it.chainId, chainId) && Bytes.eq(it.senderEd, senderEd) }
         if (old != null) {
-            if (Bytes.eq(old.senderEd, senderEd) && old.sender == sender) return
+            // A repeated distribution never rewinds a chain or renames its sender.
+            if (old.sender == sender) return
             throw AegisException.SenderMismatch()
         }
         if (chains.size >= SenderKey.MAX_CHAINS) throw AegisException.Session("too many chains")
@@ -152,6 +155,7 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
     /** Decrypts a type 0x05 frame. State changes only if every check passes. */
     fun decrypt(frame: ByteArray, now: Long): Envelope {
         purge(now)
+        lastNow = now
         if (frame.size < 1 + SenderKey.HDR_LEN + 16 + 64) throw AegisException.Length()
         if (frame[0] != SenderKey.FRAME) throw AegisException.BadFrameType()
         val hnonce = frame.copyOfRange(1, 13)
@@ -159,8 +163,20 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
         if (h.size != 20) throw AegisException.Length()
         val chainId = h.copyOfRange(0, 16)
         val n = Bytes.be32(h, 16)
-        val i = chains.indexOfFirst { Bytes.eq(it.chainId, chainId) }
-        if (i < 0) throw AegisException.Session("unknown chain")
+        // Chain ids are only unique per sender, so every chain with this id gets a try.
+        var last: AegisException = AegisException.Session("unknown chain")
+        for (i in chains.indices.filter { Bytes.eq(chains[it].chainId, chainId) }) {
+            try {
+                return decryptWithChain(i, frame, chainId, n)
+            } catch (e: AegisException) {
+                last = e
+            }
+        }
+        throw last
+    }
+
+    private fun decryptWithChain(i: Int, frame: ByteArray, chainId: ByteArray, n: Long): Envelope {
+        val now = lastNow
         val chain = chains[i].copy()
         val (key, nonce) = chain.takeKey(n, now)
         val plain = Crypto.aeadOpen(key, nonce, SenderKey.chainAad(chainId, n), frame.copyOfRange(1 + SenderKey.HDR_LEN, frame.size))
@@ -210,6 +226,10 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
                 if (count > SenderKey.MAX_SKIPPED) throw AegisException.Session("state")
                 val sk = ArrayList<Triple<Long, ByteArray, Long>>(count)
                 repeat(count) { sk.add(Triple(r.u32(), r.take(32), r.u64())) }
+                val dup = set.chains.any { Bytes.eq(it.senderEd, ed) && Bytes.eq(it.chainId, chainId) }
+                val perSender = set.chains.count { Bytes.eq(it.senderEd, ed) }
+                val foreign = scope == SkScope.Channel && set.ownerEd?.let { Bytes.eq(it, ed) } != true
+                if (dup || foreign || perSender >= SenderKey.MAX_CHAINS_PER_SENDER) throw AegisException.Session("state")
                 set.chains.add(RecvChain(chainId, sender, ed, next, ck, sk, sup))
             }
             r.end()

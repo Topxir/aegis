@@ -49,7 +49,7 @@ pub struct Profile {
 
 /// Bidi controls and zero-width characters, which let a name read as another one.
 pub fn is_spoofing_char(c: char) -> bool {
-    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+    crate::text::is_hidden_format_char(c)
 }
 
 fn check(s: &str, max: usize, what: &'static str) -> Result<()> {

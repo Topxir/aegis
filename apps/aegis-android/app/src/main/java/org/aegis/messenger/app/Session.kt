@@ -66,13 +66,16 @@ import org.aegis.messenger.net.Client
 import org.aegis.messenger.net.DirEntry
 import org.aegis.messenger.net.DirectTransport
 import org.aegis.messenger.net.Endpoint
+import org.aegis.messenger.net.Response
+import org.aegis.messenger.net.Transport
+import org.aegis.messenger.core.SlotGate
 import org.aegis.messenger.net.ProxyAddr
 import org.aegis.messenger.net.SocksTransport
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import java.util.concurrent.ConcurrentLinkedQueue
+
 import java.util.concurrent.Executors
 import org.aegis.messenger.core.CoverMode
 import org.aegis.messenger.core.CoverScheduler
@@ -94,7 +97,6 @@ class Session(private val ctx: Context) {
         const val MAX_MESSAGES = 2000
         const val MAX_TEXT_CHARS = 4000
         const val SEEN_CAP = 4000
-        const val MAX_SENDER_LOOKUPS = 8
         const val MAX_CAPTION = Attach.MAX_CAPTION
         private const val MAX_IMPORT = 64 * 1024 * 1024
         private val TTL_CHOICES = longArrayOf(0, 3600, 86400, 604800)
@@ -328,7 +330,7 @@ class Session(private val ctx: Context) {
             keyed = null
             file = null
         }
-        slotQueue.clear()
+        gate.reset()
         post { refreshPin() }
         openChat = null
         Notifier.cancelAll(ctx)
@@ -563,19 +565,56 @@ class Session(private val ctx: Context) {
     @Volatile private var pollNow = false
     @Volatile private var early = false
     @Volatile private var sched: CoverScheduler? = null
-    private val slotQueue = ConcurrentLinkedQueue<Runnable>()
+    @Volatile private var pollRunning = false
+    private val gate = SlotGate({ coverMode() != CoverMode.Off && foreground }, { early = true; wake.release() })
     private val coverRng = OsCoverRng()
 
-    /** Runs [task] now, or in the next cover slot when cover traffic is on and the app is in the foreground. */
+    /**
+     * Runs [task] on a worker. With cover traffic on and the app in the foreground every request the
+     * task makes waits for its own slot (see [gate]), so a task with several requests spreads them
+     * over several slots instead of sending them back to back.
+     */
     private fun realRequest(task: Runnable) {
-        if (coverMode() == CoverMode.Off || !foreground) {
-            net.execute(task)
-            return
-        }
-        slotQueue.add(task)
-        early = true
-        wake.release()
+        net.execute(task)
     }
+
+    /** A client whose requests take one cover slot each. */
+    private fun gatedClient(endpoint: String, proxy: String): Client =
+        clientFor(endpoint, proxy) { t ->
+            object : Transport {
+                override fun request(ep: Endpoint, method: String, pathQuery: String, body: ByteArray?, contentType: String?): Response =
+                    gate.pass { t.request(ep, method, pathQuery, body, contentType) }
+            }
+        }
+
+    private fun sendDummy(d: VaultData, reqLen: Int, respLen: Int) {
+        try {
+            val got = clientFor(d.settings.endpoint, d.settings.proxy).nop(reqLen, respLen)
+            sched?.let { sc -> synchronized(sc) { sc.recordResponse(got) } }
+        } catch (e: InterruptedException) {
+            throw e
+        } catch (e: Exception) {
+            // A failed dummy is not retried.
+        }
+    }
+
+    private fun startPollCycle() {
+        pollRunning = true
+        net.execute {
+            try {
+                gate.asPoll { pollOnce() }
+            } catch (e: Exception) {
+                // retried next round
+            } finally {
+                pollRunning = false
+                lastPollAt = SystemClock.elapsedRealtime()
+                // A slot that was given to this cycle but not used still carries one request.
+                if (gate.takeCredit()) data?.let { sendDummy(it, 64, 1024) }
+            }
+        }
+    }
+
+    @Volatile private var lastPollAt = 0L
 
     private fun coverMode(): CoverMode = when (Boot.coverMode(ctx)) {
         0 -> CoverMode.Off
@@ -601,8 +640,6 @@ class Session(private val ctx: Context) {
                 sched.earlySlot(now)
             }
             if (mode == CoverMode.Off || !foreground) {
-                var t: Runnable? = slotQueue.poll()
-                while (t != null) { net.execute(t); t = slotQueue.poll() }
                 if (pollNow || now - lastPoll >= pollMs - pollMs / 4) {
                     pollNow = false
                     try { pollOnce() } catch (e: InterruptedException) { throw e } catch (e: Exception) { /* retried next round */ }
@@ -613,29 +650,24 @@ class Session(private val ctx: Context) {
                 wake.drainPermits()
                 continue
             }
-            val pollDue = pollNow || now - lastPoll >= pollMs
-            pollNow = false
-            when (val t = synchronized(sched) { sched.tick(now, slotQueue.size, pollDue, coverRng) }) {
+            if (lastPollAt > lastPoll) lastPoll = lastPollAt
+            val pollDue = !pollRunning && (pollNow || now - lastPoll >= pollMs)
+            if (pollDue) pollNow = false
+            when (val t = synchronized(sched) { sched.tick(now, gate.queued(), pollDue, coverRng) }) {
                 CoverTick.Off -> {}
                 is CoverTick.Wait -> {
                     wake.tryAcquire(maxOf(t.untilMs - now, 1L), TimeUnit.MILLISECONDS)
                     wake.drainPermits()
-                    if (slotQueue.size > 1) sched.queueGrew(SystemClock.elapsedRealtime(), slotQueue.size)
+                    if (gate.queued() > 0) sched.queueGrew(SystemClock.elapsedRealtime(), gate.queued())
                 }
                 is CoverTick.Slot -> when (val s = t.slot) {
-                    CoverSlot.Real -> slotQueue.poll()?.run()
+                    CoverSlot.Real -> if (!gate.grantReal()) sendDummy(d, 64, 1024)
                     CoverSlot.Poll -> {
-                        try { pollOnce() } catch (e: InterruptedException) { throw e } catch (e: Exception) { /* retried */ }
+                        gate.grantPollStart()
                         lastPoll = SystemClock.elapsedRealtime()
+                        startPollCycle()
                     }
-                    is CoverSlot.Dummy -> try {
-                        val got = clientFor(d.settings).nop(s.reqLen, s.respLen)
-                        synchronized(sched) { sched.recordResponse(got) }
-                    } catch (e: InterruptedException) {
-                        throw e
-                    } catch (e: Exception) {
-                        // A failed dummy is not retried.
-                    }
+                    is CoverSlot.Dummy -> sendDummy(d, s.reqLen, s.respLen)
                 }
             }
         }
@@ -754,7 +786,7 @@ class Session(private val ctx: Context) {
     // ---- network -----------------------------------------------------------
 
     private fun clientFor(s: Settings): Client {
-        return clientFor(s.endpoint, s.proxy).also { it.observe = ::onTraffic }
+        return gatedClient(s.endpoint, s.proxy).also { it.observe = ::onTraffic }
     }
 
     private fun onTraffic(req: Int, resp: Int) {
@@ -769,7 +801,7 @@ class Session(private val ctx: Context) {
         val s = data?.settings ?: return done(false)
         busy = true
         net.execute {
-            val ok = try { clientFor(s).health() } catch (e: Throwable) { false }
+            val ok = try { clientFor(s.endpoint, s.proxy).health() } catch (e: Throwable) { false }
             post { busy = false; done(ok) }
         }
     }
@@ -920,8 +952,9 @@ class Session(private val ctx: Context) {
         Hex.encode(Crypto.sha256(x).copyOf(10)).chunked(4).joinToString(" ")
 
     /**
-     * A 0x03 frame from a key that is not a contact. The directory has no lookup by key, so the
-     * names we share a group or channel with are tried (at most 8); the rest waits as a request.
+     * A 0x03 frame from a key that is not a contact. The directory has no lookup by key and guessing
+     * names would tell the server who we share groups with, so the frame goes straight to the
+     * message requests. A key a contact has announced is matched here, without any request.
      */
     private fun unknownSender(client: Client, d: VaultData, frame: ByteArray, x: ByteArray): Int {
         val xHex = Hex.encode(x)
@@ -930,17 +963,6 @@ class Session(private val ctx: Context) {
             synchronized(d.fs) { d.fs.hold(xHex, frame) }
             queueSave()
             return 0
-        }
-        val names = LinkedHashSet<String>()
-        for (g in d.groups) names.addAll(g.members)
-        for (ch in d.channels) if (!ch.official) names.add(ch.owner)
-        names.remove(d.username)
-        for (u in names.take(MAX_SENDER_LOOKUPS)) {
-            val e = client.lookup(u) ?: continue
-            if (Bytes.eq(e.x, x)) {
-                val held = ArrayList<ByteArray>().also { it.add(frame) }
-                return adoptSender(client, d, e, held)
-            }
         }
         val stored = synchronized(d.fs) { d.fs.hold(xHex, frame) }
         if (stored) { queueSave(); post { requestTick++ } }

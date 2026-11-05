@@ -282,7 +282,95 @@ fn pin_unlock_wrong_pin_password_fallback_and_duress() {
         n.push(ext);
         assert!(!e.vault_path("alice").with_file_name(n).exists(), "{ext}");
     }
-    assert_eq!(e.unlock("alice", PW).unwrap_err().key, "err.no_account");
+    // Afterwards the account still looks like one with a PIN: the counter runs down, then
+    // "PIN gone", then a password is simply wrong. Nothing says that a wipe happened.
+    assert!(e.has_vaults());
+    let first: u32 = f.detail.parse().unwrap();
+    let mut left = first;
+    while left > 1 {
+        let f = e.unlock("alice", "5555").unwrap_err();
+        assert_eq!(f.key, "err.pin_wrong");
+        left -= 1;
+        assert_eq!(f.detail, left.to_string());
+    }
+    assert_eq!(e.unlock("alice", "5555").unwrap_err().key, "err.pin_gone");
+    let f = e.unlock("alice", PW).unwrap_err();
+    assert_ne!(f.key, "err.no_account");
+    assert_eq!(f.key, e.unlock("alice", "other password!!").unwrap_err().key);
+    // A restart (new engine on the same folder) shows the same.
+    let e2 = engine(&dir, &srv);
+    assert!(e2.has_vaults());
+    assert_ne!(e2.unlock("alice", "5555").unwrap_err().key, "err.no_account");
+    assert_eq!(e2.unlock("bob", PW).unwrap_err().key, "err.no_account");
+}
+
+#[cfg(windows)]
+#[test]
+fn an_edited_pinmeta_is_refused_before_anything_is_sent() {
+    let dir = TempDir::new("pinmeta");
+    let srv = start_server();
+    let e = engine(&dir, &srv);
+    e.create_account("alice", "Alice", PW, PW).unwrap();
+    e.pin_set("1234", "1234").unwrap();
+    let s = e.detach().unwrap();
+    e.persist(s);
+    let meta = e.vault_path("alice").with_extension("vault.pinmeta");
+    let good = std::fs::read(&meta).unwrap();
+    // Plain JSON that points to another server.
+    let evil = format!(
+        "{{\"endpoint\":\"http://127.0.0.1:9\",\"socks5\":\"\",\"tor\":false,\"server_key\":\"{}\"}}",
+        "00".repeat(32)
+    );
+    std::fs::write(&meta, evil).unwrap();
+    assert_eq!(e.unlock("alice", "1234").unwrap_err().key, "err.pin_gone");
+    // A flipped byte, and a copy from another vault, are refused too.
+    let mut bad = good.clone();
+    let n = bad.len() - 2;
+    bad[n] ^= 1;
+    std::fs::write(&meta, &bad).unwrap();
+    assert_eq!(e.unlock("alice", "1234").unwrap_err().key, "err.pin_gone");
+    // The PIN still works once the real file is back, and the password always does.
+    std::fs::write(&meta, &good).unwrap();
+    e.unlock("alice", "1234").unwrap();
+}
+
+#[test]
+fn deleting_the_account_removes_the_pin_files_and_the_server_slot() {
+    use aegis_core::net::PinOpen;
+    use aegis_core::pin::PinFile;
+    let dir = TempDir::new("delpin");
+    let srv = start_server();
+    let e = engine(&dir, &srv);
+    e.create_account("alice", "Alice", PW, PW).unwrap();
+    e.pin_set("1234", "1234").unwrap();
+    e.duress_set("1234", "9999").unwrap();
+    let vault = e.vault_path("alice");
+    let side = |ext: &str| {
+        let mut n = vault.file_name().unwrap().to_os_string();
+        n.push(".");
+        n.push(ext);
+        vault.with_file_name(n)
+    };
+    let file = PinFile::parse(&std::fs::read(side("pin")).unwrap()).unwrap();
+    let verifier = file.derive("1234").unwrap().verifier().unwrap();
+    let client = Client::new(&format!("http://{}", srv.addr), None)
+        .unwrap()
+        .with_pow_bits(BITS)
+        .with_pinned_server_key(None)
+        .unwrap();
+    assert!(matches!(
+        client.pin_open(&file.slot, &verifier).unwrap(),
+        PinOpen::Secret(_)
+    ));
+    e.delete_account("alice").unwrap();
+    for ext in ["pin", "pinpw", "pinmeta", "duress", "ghost"] {
+        assert!(!side(ext).exists(), "{ext}");
+    }
+    assert!(matches!(
+        client.pin_open(&file.slot, &verifier).unwrap(),
+        PinOpen::Gone
+    ));
+    assert_eq!(e.unlock("alice", "1234").unwrap_err().key, "err.no_account");
 }
 
 #[test]

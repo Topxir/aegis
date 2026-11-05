@@ -375,6 +375,7 @@ impl Session {
             blocked: Vec::new(),
             deferred: Vec::new(),
             skeys: BTreeMap::new(),
+            pin_verifier: String::new(),
         };
         Self::new(data, password)
     }
@@ -547,34 +548,6 @@ impl Session {
                 Some((d.kind, d.contact, Envelope::decode(&b).ok()?))
             })
             .collect()
-    }
-
-    /// Usernames that may have written to us without being a contact yet (shared groups and
-    /// channels), at most `max`.
-    pub fn sender_candidates(&self, max: usize) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        let me = &self.data.username;
-        let others = self
-            .data
-            .groups
-            .values()
-            .flat_map(|g| g.members.iter())
-            .chain(
-                self.data
-                    .channels
-                    .values()
-                    .filter(|c| !c.official)
-                    .flat_map(|c| std::iter::once(&c.owner).chain(c.subs.iter())),
-            );
-        for u in others {
-            if u != me && !self.data.contacts.contains_key(u) && !out.contains(u) {
-                out.push(u.clone());
-                if out.len() >= max {
-                    break;
-                }
-            }
-        }
-        out
     }
 
     /// Encrypts a group or channel message on our sender chain, starting or replacing the
@@ -1819,25 +1792,6 @@ mod tests {
         assert!(s.data.deferred.is_empty());
     }
 
-    #[test]
-    fn sender_candidates_skip_contacts_and_self() {
-        let mut s = session();
-        s.add_contact(&entry("bob", 1), 1);
-        s.data.groups.insert(
-            "g".into(),
-            Group {
-                id: "g".into(),
-                key: Zeroizing::new([1; 32]),
-                title: "t".into(),
-                creator: "alice".into(),
-                members: vec!["alice".into(), "bob".into(), "carol".into(), "dave".into()],
-                cursor: 0,
-                chat: Chat::new(1),
-            },
-        );
-        assert_eq!(s.sender_candidates(8), vec!["carol".to_owned(), "dave".to_owned()]);
-        assert_eq!(s.sender_candidates(1).len(), 1);
-    }
 
     fn gid() -> String {
         aegis_core::group::group_id(&[7; 32])

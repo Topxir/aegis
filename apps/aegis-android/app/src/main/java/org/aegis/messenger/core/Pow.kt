@@ -43,11 +43,11 @@ object Pow {
         leadingZeroBits(hash(scope, ts, bodyHash, pow)) >= bits
 
     /** Smallest nonce satisfying [bits], searching upward from zero. Blocking: call off the main thread. */
-    fun mine(scope: String, ts: Long, bodyHash: String, bits: Int): ULong {
+    fun mine(scope: String, ts: Long, bodyHash: String, bits: Int, from: ULong = 0UL): ULong {
         val base = prefix(scope, ts, bodyHash)
         val work = SHA256Digest(base)
         val out = ByteArray(32)
-        var n = 0UL
+        var n = from
         while (true) {
             work.reset(base)
             val s = Text.utf8(n.toString())
