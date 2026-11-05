@@ -31,6 +31,10 @@ pub struct Opened {
 }
 
 /// Seals a `dm` or `ginv` envelope with a fresh ephemeral key.
+///
+/// Legacy: this is the static-key frame type 0x01, which the recipient's long-term key opens
+/// forever (no forward secrecy). Chats must use the session API (frame type 0x03); keep this
+/// only for `ginv` and for reading old frames.
 pub fn seal_dm(sender_x_sk: &[u8; 32], recipient_x_pk: &[u8; 32], env: &Envelope) -> Result<Vec<u8>> {
     seal_dm_with(&crate::random_bytes::<32>()?, sender_x_sk, recipient_x_pk, env)
 }

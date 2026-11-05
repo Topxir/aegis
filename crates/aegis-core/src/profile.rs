@@ -47,8 +47,13 @@ pub struct Profile {
     pub particles: Particles,
 }
 
+/// Bidi controls and zero-width characters, which let a name read as another one.
+pub fn is_spoofing_char(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
 fn check(s: &str, max: usize, what: &'static str) -> Result<()> {
-    if s.chars().count() > max || s.chars().any(char::is_control) {
+    if s.chars().count() > max || s.chars().any(|c| c.is_control() || is_spoofing_char(c)) {
         return Err(Error::InvalidEnvelope(what));
     }
     Ok(())
@@ -111,6 +116,11 @@ mod tests {
             "PF1\nn\nx\ty\nnone",
             "PF1\nn\nx\r\nnone",
             "PF1\nn\nx\u{85}\nnone",
+            "PF1\nadmin\u{202E}\nx\nnone",
+            "PF1\nn\nx\u{2066}y\nnone",
+            "PF1\nad\u{200B}min\nx\nnone",
+            "PF1\n\u{FEFF}n\nx\nnone",
+            "PF1\nn\nx\u{2064}\nnone",
             &long_name,
             &long_about,
             "",

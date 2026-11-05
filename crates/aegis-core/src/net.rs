@@ -3,7 +3,9 @@
 use crate::directory::Registration;
 use crate::identity::{is_valid_username, Identity};
 use crate::text::{pct_encode, sanitize_display_text};
-use crate::{hex, now_secs, pad, pow, Error, Result};
+use crate::prekeys::{PrekeyPut, PrekeyTake};
+use crate::x3dh::Bundle;
+use crate::{hex, now_secs, pad, pin, pow, sealed, Error, Result};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
@@ -86,6 +88,8 @@ pub struct DirEntry {
 pub struct Poll {
     pub frames: Vec<(u64, Vec<u8>)>,
     pub next: u64,
+    /// More frames are waiting beyond `next`; poll again right away.
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +98,36 @@ pub struct Client {
     socks5: Option<String>,
     pow_bits: u32,
     timeout: Duration,
+    srv_pk: Option<[u8; 32]>,
+}
+
+/// Most work a client agrees to do when a queue asks for more.
+const MAX_SEND_BITS: u32 = 28;
+
+static LAST_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A timestamp strictly greater than any returned before, so two identical requests in the
+/// same second still carry different proofs of work (the server rejects a repeated one).
+fn unique_ts() -> u64 {
+    use std::sync::atomic::Ordering;
+    let now = now_secs();
+    let mut last = LAST_TS.load(Ordering::SeqCst);
+    loop {
+        let next = now.max(last.saturating_add(1));
+        match LAST_TS.compare_exchange(last, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return next,
+            Err(l) => last = l,
+        }
+    }
+}
+
+/// Result of `pin/open`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinOpen {
+    Secret([u8; 32]),
+    Wrong { left: u32 },
+    Gone,
+    Throttled,
 }
 
 impl Client {
@@ -105,6 +139,7 @@ impl Client {
             socks5: socks5.map(str::to_owned),
             pow_bits: pow::DEFAULT_BITS,
             timeout: Duration::from_secs(20),
+            srv_pk: None,
         })
     }
 
@@ -117,6 +152,36 @@ impl Client {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// Uses the sealed transport (section 23) with a known server key, without contacting the server.
+    pub fn with_server_key(mut self, pk: [u8; 32]) -> Self {
+        self.srv_pk = Some(pk);
+        self
+    }
+
+    pub fn server_key(&self) -> Option<[u8; 32]> {
+        self.srv_pk
+    }
+
+    /// Fetches `GET /api/v2/key` (the only call that is not sealed).
+    pub fn fetch_server_key(&self) -> Result<[u8; 32]> {
+        let (code, body) = self.raw_request("GET", "/api/v2/key", "", &[], 4096)?;
+        if code != 200 {
+            return Err(Error::Http(code));
+        }
+        let v: serde_json::Value = serde_json::from_slice(&body).map_err(|_| Error::BadResponse)?;
+        hex::decode_array(v["x"].as_str().ok_or(Error::BadResponse)?).map_err(|_| Error::BadResponse)
+    }
+
+    /// Fetches the server key and switches to the sealed transport. With a `known` (pinned) key
+    /// a different answer is a hard error; the caller stores `server_key()` on first use.
+    pub fn with_pinned_server_key(self, known: Option<[u8; 32]>) -> Result<Self> {
+        let key = self.fetch_server_key()?;
+        if known.is_some_and(|k| k != key) {
+            return Err(Error::ServerKeyChanged);
+        }
+        Ok(self.with_server_key(key))
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -182,20 +247,48 @@ impl Client {
 
     /// Posts a padded frame to queue `q`; returns the assigned sequence number.
     pub fn send(&self, q: &[u8; 32], padded: &[u8]) -> Result<u64> {
+        self.send_inner(q, padded, None)
+    }
+
+    /// Posts to the official queue, which the server accepts only with the owner's signature.
+    pub fn send_official(&self, owner_ed_sk: &[u8; 32], padded: &[u8]) -> Result<u64> {
+        self.send_inner(&crate::official::official_queue()?, padded, Some(owner_ed_sk))
+    }
+
+    fn send_inner(&self, q: &[u8; 32], padded: &[u8], owner_sk: Option<&[u8; 32]>) -> Result<u64> {
         if !pad::is_bucket(padded.len()) {
             return Err(Error::BadPadding);
         }
         let body = hex::encode(padded);
         let qhex = hex::encode(q);
-        let ts = now_secs();
-        let n = pow::mine(&qhex, ts, &pow::body_hash_hex(body.as_bytes()), self.pow_bits);
-        let path = format!("/api/v2/queue/send?q={qhex}&ts={ts}&pow={n}");
-        let (code, resp) = self.request("POST", &path, "text/plain", body.as_bytes())?;
-        if code != 200 {
-            return Err(Error::Http(code));
+        let mut bits = self.pow_bits;
+        // A filling queue asks for more work (429 with the bits it wants); retry once.
+        for _ in 0..2 {
+            let ts = unique_ts();
+            let n = pow::mine(&qhex, ts, &pow::body_hash_hex(body.as_bytes()), bits);
+            let mut path = format!("/api/v2/queue/send?q={qhex}&ts={ts}&pow={n}");
+            if let Some(sk) = owner_sk {
+                let sig = crate::official::sign_post_auth(sk, q, ts, padded);
+                path.push_str(&format!("&sig={}", hex::encode(&sig)));
+            }
+            let (code, resp) = self.request("POST", &path, "text/plain", body.as_bytes())?;
+            if code == 429 {
+                let want = serde_json::from_slice::<serde_json::Value>(&resp)
+                    .ok()
+                    .and_then(|v| v["bits"].as_u64())
+                    .and_then(|b| u32::try_from(b).ok());
+                if let Some(w) = want.filter(|w| *w > bits && *w <= MAX_SEND_BITS) {
+                    bits = w;
+                    continue;
+                }
+            }
+            if code != 200 {
+                return Err(Error::Http(code));
+            }
+            let v: serde_json::Value = serde_json::from_slice(&resp).map_err(|_| Error::BadResponse)?;
+            return v["seq"].as_u64().ok_or(Error::BadResponse);
         }
-        let v: serde_json::Value = serde_json::from_slice(&resp).map_err(|_| Error::BadResponse)?;
-        v["seq"].as_u64().ok_or(Error::BadResponse)
+        Err(Error::Http(429))
     }
 
     /// Fetches up to 100 frames with `seq > after`.
@@ -226,7 +319,94 @@ impl Client {
         if next != last {
             return Err(Error::BadResponse);
         }
-        Ok(Poll { frames, next })
+        Ok(Poll { frames, next, has_more: v["has_more"].as_bool().unwrap_or(false) })
+    }
+
+    /// Uploads signed and one-time prekeys (section 27.1); returns the number of one-time
+    /// prekeys now stored.
+    pub fn prekeys_put(&self, put: &PrekeyPut) -> Result<usize> {
+        let (code, body) = self.request("POST", "/api/v2/prekeys/put", "application/x-www-form-urlencoded", put.to_form().as_bytes())?;
+        if code != 200 {
+            return Err(Error::Http(code));
+        }
+        let v: serde_json::Value = serde_json::from_slice(&body).map_err(|_| Error::BadResponse)?;
+        usize::try_from(v["opks"].as_u64().ok_or(Error::BadResponse)?).map_err(|_| Error::BadResponse)
+    }
+
+    /// Takes a prekey bundle for `u`; `None` if the user has no signed prekey.
+    pub fn prekeys_take(&self, u: &str) -> Result<Option<Bundle>> {
+        if !is_valid_username(u) {
+            return Err(Error::InvalidUsername);
+        }
+        let take = PrekeyTake::mine(u, unique_ts(), self.pow_bits);
+        let (code, body) = self.request("POST", "/api/v2/prekeys/take", "application/x-www-form-urlencoded", take.to_form().as_bytes())?;
+        match code {
+            404 => Ok(None),
+            200 => Bundle::from_json(&body).map(Some),
+            c => Err(Error::Http(c)),
+        }
+    }
+
+    /// Cover-traffic request of `req_len` bytes asking for `resp_len` bytes back (section 26).
+    pub fn nop(&self, req_len: u32, resp_len: u32) -> Result<()> {
+        let body = crate::cover::nop_body(req_len, resp_len)?;
+        let (code, _) = self.request("POST", "/api/v2/nop", "application/octet-stream", &body)?;
+        if code == 200 {
+            Ok(())
+        } else {
+            Err(Error::Http(code))
+        }
+    }
+
+    fn pin_call(&self, op: &str, slot: &[u8; 32], v: &[u8; 32], s: Option<&[u8; 32]>) -> Result<(u16, Vec<u8>)> {
+        let (slot_h, v_h) = (hex::encode(slot), hex::encode(v));
+        let s_h = s.map(|s| hex::encode(s));
+        let input = match &s_h {
+            Some(s_h) => pin::create_hash_input(&slot_h, &v_h, s_h),
+            None => pin::open_hash_input(&slot_h, &v_h),
+        };
+        let ts = unique_ts();
+        let n = pow::mine(&pin::pow_scope(&slot_h), ts, &pow::body_hash_hex(input.as_bytes()), self.pow_bits);
+        let mut form = format!("slot={slot_h}&v={v_h}");
+        if let Some(s_h) = &s_h {
+            form.push_str(&format!("&s={s_h}"));
+        }
+        form.push_str(&format!("&ts={ts}&pow={n}"));
+        self.request("POST", &format!("/api/v2/pin/{op}"), "application/x-www-form-urlencoded", form.as_bytes())
+    }
+
+    /// Stores a new PIN slot; `Error::Http(409)` if it exists.
+    pub fn pin_create(&self, slot: &[u8; 32], verifier: &[u8; 32], s: &[u8; 32]) -> Result<()> {
+        match self.pin_call("create", slot, verifier, Some(s))?.0 {
+            200 => Ok(()),
+            c => Err(Error::Http(c)),
+        }
+    }
+
+    pub fn pin_open(&self, slot: &[u8; 32], verifier: &[u8; 32]) -> Result<PinOpen> {
+        let (code, body) = self.pin_call("open", slot, verifier, None)?;
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        match code {
+            200 => {
+                let s = hex::decode_array(v["s"].as_str().ok_or(Error::BadResponse)?).map_err(|_| Error::BadResponse)?;
+                Ok(PinOpen::Secret(s))
+            }
+            403 => {
+                let left = u32::try_from(v["left"].as_u64().ok_or(Error::BadResponse)?).map_err(|_| Error::BadResponse)?;
+                Ok(PinOpen::Wrong { left })
+            }
+            404 => Ok(PinOpen::Gone),
+            429 => Ok(PinOpen::Throttled),
+            c => Err(Error::Http(c)),
+        }
+    }
+
+    /// Removes the slot when `verifier` matches (a mismatch counts as a failed attempt).
+    pub fn pin_delete(&self, slot: &[u8; 32], verifier: &[u8; 32]) -> Result<()> {
+        match self.pin_call("delete", slot, verifier, None)?.0 {
+            200 | 404 => Ok(()),
+            c => Err(Error::Http(c)),
+        }
     }
 
     /// Uploads one ciphertext chunk under a random id (spec section 14).
@@ -282,6 +462,30 @@ impl Client {
     }
 
     fn request_capped(
+        &self,
+        method: &str,
+        path: &str,
+        ctype: &str,
+        body: &[u8],
+        cap: usize,
+    ) -> Result<(u16, Vec<u8>)> {
+        let Some(pk) = &self.srv_pk else {
+            return self.raw_request(method, path, ctype, body, cap);
+        };
+        let (outer, k_resp) = sealed::seal_request(pk, method, path, body)?;
+        let (code, resp) =
+            self.raw_request("POST", "/api/v2/s", "application/octet-stream", &outer, sealed::MAX_OUTER_BYTES + 64)?;
+        if code != 200 {
+            return Err(Error::Http(code));
+        }
+        let (status, inner) = sealed::open_response(&k_resp, &resp)?;
+        if inner.len() > cap {
+            return Err(Error::BadResponse);
+        }
+        Ok((status, inner))
+    }
+
+    fn raw_request(
         &self,
         method: &str,
         path: &str,

@@ -204,9 +204,9 @@ fn pin_slots_expire_after_90_days_unused() {
 }
 
 #[test]
-fn pin_throttle_per_slot_and_global() {
+fn pin_throttle_per_slot_only() {
     let d = TempDir::new();
-    let s = open(&d, Config { pin_min_interval_secs: 1, pin_global_per_sec: 3, ..cfg() });
+    let s = open(&d, Config { pin_min_interval_secs: 1, ..cfg() });
     let now = now_secs();
     for slot in 1..=5 {
         assert_eq!(create(&s, slot, 2, 3, now), 200);
@@ -219,13 +219,11 @@ fn pin_throttle_per_slot_and_global() {
     // the right verifier is also throttled right after an attempt
     assert_eq!(open_pin(&s, 1, 2, now + 1).0, 429);
     assert_eq!(open_pin(&s, 1, 2, now + 2).0, 200);
-    // global: 3 per second over all slots
+    // no shared budget: other slots are not affected by what slot 1 did
     let t = now + 10;
-    assert_eq!(open_pin(&s, 2, 2, t).0, 200);
-    assert_eq!(open_pin(&s, 3, 2, t).0, 200);
-    assert_eq!(open_pin(&s, 4, 2, t).0, 200);
-    assert_eq!(open_pin(&s, 5, 2, t).0, 429);
-    assert_eq!(open_pin(&s, 5, 2, t + 1).0, 200);
+    for slot in 2..=5 {
+        assert_eq!(open_pin(&s, slot, 2, t).0, 200);
+    }
 }
 
 // ---- key file ------------------------------------------------------------------------
@@ -311,7 +309,7 @@ fn sealed_call(r: &Running, method: &str, target: &str, body: &[u8]) -> (u16, Ve
     let (outer, k) = sealed::seal_request(&r.srv_pk, method, target, body).unwrap();
     let (c, resp) = post_outer(r, &outer);
     assert_eq!(c, 200);
-    assert!(sealed::BUCKETS.contains(&(resp.len() - 16)), "response size {}", resp.len());
+    assert!(sealed::BUCKETS.contains(&(resp.len() - 28)), "response size {}", resp.len());
     sealed::open_response(&k, &resp).unwrap()
 }
 
@@ -345,7 +343,7 @@ fn sealed_queue_send_and_poll() {
 }
 
 #[test]
-fn replayed_outer_request_is_replayed_inner() {
+fn replayed_outer_request_is_refused() {
     let r = start();
     let q = hex::encode(&[8u8; 32]);
     let frame = hex::encode(&pad::pad(b"x").unwrap());
@@ -354,9 +352,9 @@ fn replayed_outer_request_is_replayed_inner() {
     let target = format!("/api/v2/queue/send?q={q}&ts={ts}&pow={n}");
     let (outer, k) = sealed::seal_request(&r.srv_pk, "POST", &target, frame.as_bytes()).unwrap();
     let (_, a) = post_outer(&r, &outer);
-    let (_, b) = post_outer(&r, &outer);
+    let (status, b) = post_outer(&r, &outer);
     assert_eq!(sealed::open_response(&k, &a).unwrap().0, 200);
-    assert_eq!(sealed::open_response(&k, &b).unwrap().0, 403);
+    assert_eq!((status, b), (400, vec![]));
 }
 
 #[test]
@@ -458,7 +456,7 @@ fn response_buckets_for_many_sizes() {
         assert_eq!(sealed_call(&r, "POST", &format!("/api/v2/blob/put?id={id}&ts={ts}&pow={nonce}"), &body).0, 200);
         let (outer, k) = sealed::seal_request(&r.srv_pk, "GET", &format!("/api/v2/blob/get?id={id}"), b"").unwrap();
         let (_, resp) = post_outer(&r, &outer);
-        assert_eq!(resp.len() - 16, sealed::bucket_for(n + 2).unwrap(), "n={n}");
+        assert_eq!(resp.len() - 28, sealed::bucket_for(n + 2).unwrap(), "n={n}");
         assert_eq!(sealed::open_response(&k, &resp).unwrap().1, body);
     }
 }
@@ -478,7 +476,7 @@ fn nop_through_sealed_transport() {
     assert_eq!(c, 200);
     assert_eq!(b, vec![0u8; 3000]);
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(0, 0)).1, Vec::<u8>::new());
-    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(65_536, 10)).1.len(), 65_536);
+    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(65_536, 16_400)).1.len(), 65_536);
     // no pow needed and nothing consumed: repeat is fine
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(3000, 500)).0, 200);
 }
@@ -488,6 +486,10 @@ fn nop_rejections() {
     let r = start();
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(65_537, 0)).0, 400);
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(u32::MAX, 0)).0, 400);
+    // The answer may be at most four times the request's bucket.
+    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(4096, 0)).0, 200);
+    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(4097, 0)).0, 400);
+    assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(65_536, 1000)).0, 400);
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", b"").0, 400);
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &[0, 0, 1]).0, 400);
     assert_eq!(sealed_call(&r, "POST", "/api/v2/nop", &nop_body(10, 64 * 1024)).0, 413);
@@ -506,7 +508,7 @@ fn nop_response_bucket_matches_real_response_of_same_length() {
         assert_eq!(sealed_call(&r, "POST", &format!("/api/v2/blob/put?id={id}&ts={ts}&pow={nonce}"), &body).0, 200);
         let (o1, _) = sealed::seal_request(&r.srv_pk, "GET", &format!("/api/v2/blob/get?id={id}"), b"").unwrap();
         let real = post_outer(&r, &o1).1.len();
-        let (o2, _) = sealed::seal_request(&r.srv_pk, "POST", "/api/v2/nop", &nop_body(n as u32, 300)).unwrap();
+        let (o2, _) = sealed::seal_request(&r.srv_pk, "POST", "/api/v2/nop", &nop_body(n as u32, 5000)).unwrap();
         let cover = post_outer(&r, &o2).1.len();
         assert_eq!(real, cover, "n={n}");
     }

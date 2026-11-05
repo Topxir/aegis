@@ -17,7 +17,13 @@ const BLOB_PUT_PATH: &str = "/api/v2/blob/put";
 const SEALED_PATH: &str = "/api/v2/s";
 const MAX_CONNECTIONS: usize = 256;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_DEADLINE: Duration = Duration::from_secs(15);
+/// The request line and all headers must be complete this long after the connection opened.
+const HEADER_DEADLINE: Duration = Duration::from_secs(10);
+/// A small body must be complete this long after the headers.
+const SMALL_BODY_WINDOW: Duration = Duration::from_secs(10);
+/// Large bodies: after this grace period the average rate must stay above `MIN_BODY_RATE`.
+const BODY_RATE_GRACE: Duration = Duration::from_secs(10);
+const MIN_BODY_RATE: u64 = 4096;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A parsed request. The query string is already form-decoded.
@@ -119,6 +125,15 @@ fn ascii(b: Vec<u8>) -> Result<String, HttpError> {
 
 /// Reads one request. Only `Content-Length` bodies are accepted.
 pub fn read_request<R: BufRead>(r: &mut R, deadline: Instant) -> Result<Request, HttpError> {
+    read_request_with(r, deadline, &mut || {})
+}
+
+/// Like [`read_request`]; `headers_done` runs once the request line and headers are in.
+fn read_request_with<R: BufRead>(
+    r: &mut R,
+    deadline: Instant,
+    headers_done: &mut dyn FnMut(),
+) -> Result<Request, HttpError> {
     let mut budget = MAX_HEADER_BYTES;
     let first = ascii(read_line(r, &mut budget, deadline)?)?;
     let mut parts = first.split(' ');
@@ -163,14 +178,16 @@ pub fn read_request<R: BufRead>(r: &mut R, deadline: Instant) -> Result<Request,
             _ => {}
         }
     }
+    headers_done();
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     // The limit is decided by the request line alone, before any body byte is read.
-    let (limit, deadline) = if method == "POST" && path == BLOB_PUT_PATH {
-        (MAX_BLOB_BYTES, deadline.max(Instant::now() + BLOB_BODY_WINDOW))
+    let body_start = Instant::now();
+    let (limit, deadline, floor) = if method == "POST" && path == BLOB_PUT_PATH {
+        (MAX_BLOB_BYTES, body_start + BLOB_BODY_WINDOW, true)
     } else if method == "POST" && path == SEALED_PATH {
-        (sealed::MAX_OUTER_BYTES, deadline.max(Instant::now() + BLOB_BODY_WINDOW))
+        (sealed::MAX_OUTER_BYTES, body_start + BLOB_BODY_WINDOW, true)
     } else {
-        (MAX_BODY_BYTES, deadline)
+        (MAX_BODY_BYTES, body_start + SMALL_BODY_WINDOW, false)
     };
     let length = length.unwrap_or(0);
     if length > limit {
@@ -180,8 +197,15 @@ pub fn read_request<R: BufRead>(r: &mut R, deadline: Instant) -> Result<Request,
     let mut body = Vec::with_capacity(length.min(16 * 1024));
     let mut chunk = [0u8; 16 * 1024];
     while body.len() < length {
-        if Instant::now() > deadline {
+        let now = Instant::now();
+        if now > deadline {
             return Err(HttpError::Timeout);
+        }
+        if floor {
+            let slow = now.duration_since(body_start).saturating_sub(BODY_RATE_GRACE).as_secs();
+            if (body.len() as u64) < slow.saturating_mul(MIN_BODY_RATE) {
+                return Err(HttpError::Timeout);
+            }
         }
         let want = chunk.len().min(length - body.len());
         match r.read(&mut chunk[..want]) {
@@ -270,6 +294,15 @@ fn handle_sealed(state: &Mutex<ServerState>, outer: &Request) -> BlobReply {
     let Ok((inner, k_resp)) = sealed::open_request(&sk, &outer.body) else {
         return empty_400();
     };
+    let mut e_pk = [0u8; 32];
+    e_pk.copy_from_slice(&outer.body[..32]);
+    let fresh = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .sealed_first_use(e_pk, aegis_core::now_secs());
+    if !fresh {
+        return empty_400();
+    }
     let (status, body) = run_inner(state, &inner);
     match sealed::seal_response(&k_resp, status, &body) {
         Ok(b) => BlobReply::Bytes(b),
@@ -307,7 +340,7 @@ fn run_inner(state: &Mutex<ServerState>, inner: &sealed::SealedRequest) -> (u16,
     }
 }
 
-fn handle_connection(stream: TcpStream, state: &Mutex<ServerState>) {
+fn handle_connection(stream: TcpStream, state: &Mutex<ServerState>, ready: &AtomicBool) {
     if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
     {
@@ -317,8 +350,8 @@ fn handle_connection(stream: TcpStream, state: &Mutex<ServerState>) {
         return;
     };
     let mut reader = BufReader::new(read_half);
-    let deadline = Instant::now() + REQUEST_DEADLINE;
-    let reply = match read_request(&mut reader, deadline) {
+    let deadline = Instant::now() + HEADER_DEADLINE;
+    let reply = match read_request_with(&mut reader, deadline, &mut || ready.store(true, Ordering::SeqCst)) {
         Ok(req) if req.method == "POST" && req.path == SEALED_PATH => handle_sealed(state, &req),
         Ok(req) => dispatch(state, &req, aegis_core::now_secs()),
         Err(HttpError::Io) => return,
@@ -345,15 +378,51 @@ fn handle_connection(stream: TcpStream, state: &Mutex<ServerState>) {
     }
 }
 
-struct Slot(Arc<AtomicUsize>);
+/// A live connection, so that one still waiting for its headers can be cut when the server is full.
+struct Conn {
+    id: u64,
+    started: Instant,
+    stream: TcpStream,
+    ready: Arc<AtomicBool>,
+}
+
+type Registry = Arc<Mutex<Vec<Conn>>>;
+
+struct Slot {
+    active: Arc<AtomicUsize>,
+    registry: Registry,
+    id: u64,
+}
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|c| c.id != self.id);
     }
 }
 
-/// Accepts connections until `stop` is set. One thread per connection, capped.
+/// Closes the oldest connection that has not finished its headers. False when there is none.
+fn evict_unready(registry: &Registry) -> bool {
+    let reg = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let victim = reg
+        .iter()
+        .filter(|c| !c.ready.load(Ordering::SeqCst))
+        .min_by_key(|c| c.started);
+    match victim {
+        Some(c) => {
+            let _ = c.stream.shutdown(Shutdown::Both);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Accepts connections until `stop` is set. One thread per connection, capped. When the cap is
+/// reached the oldest connection that has not yet sent its headers is cut, so idle sockets
+/// cannot lock others out; there are no per-IP limits (Tor exits are shared).
 pub fn serve(
     listener: &TcpListener,
     state: &Arc<Mutex<ServerState>>,
@@ -361,23 +430,38 @@ pub fn serve(
 ) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let active = Arc::new(AtomicUsize::new(0));
+    let registry: Registry = Arc::new(Mutex::new(Vec::new()));
+    let mut next_id = 0u64;
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
                 if stream.set_nonblocking(false).is_err() {
                     continue;
                 }
-                if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-                    active.fetch_sub(1, Ordering::SeqCst);
+                if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS
+                    && (!evict_unready(&registry)
+                        || active.load(Ordering::SeqCst) >= MAX_CONNECTIONS + MAX_CONNECTIONS / 4)
+                {
                     continue;
                 }
-                let slot = Slot(Arc::clone(&active));
+                active.fetch_add(1, Ordering::SeqCst);
+                next_id += 1;
+                let ready = Arc::new(AtomicBool::new(false));
+                let Ok(clone) = stream.try_clone() else {
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    continue;
+                };
+                registry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(Conn { id: next_id, started: Instant::now(), stream: clone, ready: Arc::clone(&ready) });
+                let slot = Slot { active: Arc::clone(&active), registry: Arc::clone(&registry), id: next_id };
                 let st = Arc::clone(state);
                 let spawned = std::thread::Builder::new()
                     .stack_size(256 * 1024)
                     .spawn(move || {
                         let _slot = slot;
-                        handle_connection(stream, &st);
+                        handle_connection(stream, &st, &ready);
                     });
                 drop(spawned);
             }

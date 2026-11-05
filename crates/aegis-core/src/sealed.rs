@@ -116,14 +116,25 @@ pub fn open_request(srv_sk: &[u8; 32], outer: &[u8]) -> Result<(SealedRequest, K
     Ok((SealedRequest { method, target, body: body.to_vec() }, k_resp))
 }
 
-/// Seals `BE16(status) || body` under the response key.
+/// Seals `BE16(status) || body` under the response key with a fresh random nonce.
+/// The result is `nonce(12) || AEAD`.
 pub fn seal_response(k_resp: &[u8; 32], status: u16, body: &[u8]) -> Result<Vec<u8>> {
+    seal_response_with(&crate::random_bytes::<12>()?, k_resp, status, body)
+}
+
+/// Deterministic variant of [`seal_response`] with an injected nonce (tests and vectors).
+pub fn seal_response_with(nonce: &[u8; 12], k_resp: &[u8; 32], status: u16, body: &[u8]) -> Result<Vec<u8>> {
     let inner = [status.to_be_bytes().as_slice(), body].concat();
-    aead_seal(k_resp, &[0; 12], AAD_RESP, &pad(&inner)?)
+    let ct = aead_seal(k_resp, nonce, AAD_RESP, &pad(&inner)?)?;
+    Ok([nonce.as_slice(), &ct].concat())
 }
 
 pub fn open_response(k_resp: &[u8; 32], sealed: &[u8]) -> Result<(u16, Vec<u8>)> {
-    let padded = aead_open(k_resp, &[0; 12], AAD_RESP, sealed)?;
+    if sealed.len() <= 12 {
+        return Err(Error::Length);
+    }
+    let nonce: [u8; 12] = arr(&sealed[..12])?;
+    let padded = aead_open(k_resp, &nonce, AAD_RESP, &sealed[12..])?;
     let inner = unpad(&padded)?;
     if inner.len() < 2 {
         return Err(Error::Length);
@@ -149,7 +160,7 @@ mod tests {
         assert_eq!(req.body, body);
         assert_eq!(*k_resp, *k2);
         let resp = seal_response(&k2, 403, b"{\"left\":2}").unwrap();
-        assert_eq!(resp.len(), 1024 + 16);
+        assert_eq!(resp.len(), 12 + 1024 + 16);
         assert_eq!(open_response(&k_resp, &resp).unwrap(), (403, b"{\"left\":2}".to_vec()));
         assert!(open_request(&[6; 32], &outer).is_err());
         let mut bad = outer.clone();
@@ -157,7 +168,9 @@ mod tests {
         assert!(open_request(&srv_sk, &bad).is_err());
         assert!(seal_response(&k2, 200, &vec![0; 1_114_112]).is_err());
         let fit = seal_response(&k2, 200, &vec![0; 1_114_112 - 6]).unwrap();
-        assert_eq!(fit.len(), 1_114_112 + 16);
+        assert_eq!(fit.len(), 12 + 1_114_112 + 16);
+        let again = seal_response(&k2, 200, &vec![0; 1_114_112 - 6]).unwrap();
+        assert_ne!(fit[..12], again[..12]);
     }
 
     #[test]
@@ -181,7 +194,7 @@ mod tests {
         let (outer, k) = seal_request_with(&[2; 32], &srv_pk, "GET", "/health", b"").unwrap();
         let (outer2, _) = seal_request_with(&[2; 32], &srv_pk, "GET", "/health", b"").unwrap();
         assert_eq!(outer, outer2);
-        let resp = seal_response(&k, 200, b"{}").unwrap();
+        let resp = seal_response_with(&[3; 12], &k, 200, b"{}").unwrap();
         // Run with `-- --nocapture` to export these as vectors.
         println!("sealed-req {}", crate::hex::encode(&outer));
         println!("sealed-resp {}", crate::hex::encode(&resp));

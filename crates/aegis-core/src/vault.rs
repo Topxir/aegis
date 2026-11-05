@@ -106,17 +106,25 @@ pub fn vault_file_name(username: &str) -> String {
     format!("{}.vault", &hex::encode(&h)[..32])
 }
 
-/// Writes `bytes` to a temporary sibling file, syncs it and renames it over `path`.
+/// Writes `bytes` to a uniquely named temporary sibling (owner-only permissions on unix), syncs
+/// it and renames it over `path`. Concurrent writers never share a temporary file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut tmp_name = path
         .file_name()
         .ok_or(Error::Io("path has no file name".into()))?
         .to_os_string();
-    tmp_name.push(".tmp");
+    tmp_name.push(format!(".{}.tmp", hex::encode(&crate::random_bytes::<8>()?)));
     let tmp = path.with_file_name(tmp_name);
     let res = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         std::fs::rename(&tmp, path)
@@ -184,6 +192,30 @@ mod tests {
         write_atomic(&p, b"two").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"two");
         assert!(!dir.join("a.vault.tmp").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_do_not_collide() {
+        let dir = std::env::temp_dir().join(format!("aegis-core-vault-conc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("s.bin");
+        let hs: Vec<_> = (0..8u8)
+            .map(|i| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..40 {
+                        write_atomic(&p, &[i; 64]).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        let got = std::fs::read(&p).unwrap();
+        assert!(got.len() == 64 && got.iter().all(|b| *b == got[0]));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

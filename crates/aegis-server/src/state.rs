@@ -6,7 +6,7 @@ use aegis_core::identity::is_valid_username;
 use aegis_core::text::parse_u64;
 use aegis_core::{hex, pad, pow};
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,9 @@ pub const KEY_FILE: &str = "server-x25519.key";
 const PIN_TTL_SECS: u64 = 90 * 24 * 3600;
 const PIN_MAX_FAILS: u8 = 5;
 const POLL_PAGE: usize = 100;
+/// A poll answer must fit the largest sealed bucket (1114112 bytes minus framing) with room to spare.
+const POLL_MAX_BYTES: usize = 1_000_000;
+const POLL_ENVELOPE_BYTES: usize = 64;
 
 /// Tunable limits. The defaults are the protocol values.
 #[derive(Debug, Clone)]
@@ -38,13 +41,17 @@ pub struct Config {
     pub max_pin_slots: usize,
     /// Most users with stored prekeys (about 3.5 KiB each when full).
     pub max_prekey_users: usize,
+    /// Minimum seconds between accepted `prekeys/put` calls of one user (`0` disables).
+    pub prekey_put_interval_secs: u64,
+    /// Most accepted `prekeys/put` calls per user in any rolling hour (`0` disables).
+    pub prekey_puts_per_hour: usize,
     /// Minimum seconds between verification attempts on one PIN slot (`0` disables).
     pub pin_min_interval_secs: u64,
-    /// Most PIN verification attempts per second over all slots.
-    pub pin_global_per_sec: u32,
     /// Total size cap of the blob store in bytes.
     pub blob_quota_bytes: u64,
     pub blob_ttl_secs: u64,
+    /// Owner `ed_pk`. Only this key may register `owner` and append to the official queue.
+    pub owner_ed_pk: Option<[u8; 32]>,
 }
 
 impl Default for Config {
@@ -58,10 +65,12 @@ impl Default for Config {
             max_directory_entries: 1_000_000,
             max_pin_slots: 100_000,
             max_prekey_users: 1_000_000,
+            prekey_put_interval_secs: 60,
+            prekey_puts_per_hour: 5,
             pin_min_interval_secs: 1,
-            pin_global_per_sec: 50,
             blob_quota_bytes: DEFAULT_BLOB_QUOTA_BYTES,
             blob_ttl_secs: DEFAULT_BLOB_TTL_SECS,
+            owner_ed_pk: None,
         }
     }
 }
@@ -99,6 +108,9 @@ struct DirEntry {
     ed: [u8; 32],
 }
 
+/// Most remembered sealed-request keys; the oldest go first.
+const SEALED_SEEN_CAP: usize = 262_144;
+
 struct PinSlot {
     v: [u8; 32],
     s: [u8; 32],
@@ -115,6 +127,44 @@ struct Prekeys {
     opks: VecDeque<[u8; 32]>,
 }
 
+/// Hashes with an expiry time, evicted in expiry order.
+#[derive(Default)]
+struct Expiring {
+    map: HashMap<[u8; 32], u64>,
+    order: BTreeSet<(u64, [u8; 32])>,
+}
+
+impl Expiring {
+    fn contains_key(&self, k: &[u8; 32]) -> bool {
+        self.map.contains_key(k)
+    }
+
+    fn insert(&mut self, k: [u8; 32], exp: u64) {
+        if let Some(old) = self.map.insert(k, exp) {
+            self.order.remove(&(old, k));
+        }
+        self.order.insert((exp, k));
+    }
+
+    fn expire(&mut self, now: u64) {
+        while let Some(&(exp, k)) = self.order.first() {
+            if exp > now {
+                break;
+            }
+            self.order.pop_first();
+            self.map.remove(&k);
+        }
+    }
+
+    /// Drops the entries closest to expiry until at most `cap` remain.
+    fn trim(&mut self, cap: usize) {
+        while self.map.len() > cap {
+            let Some((_, k)) = self.order.pop_first() else { break };
+            self.map.remove(&k);
+        }
+    }
+}
+
 struct Frame {
     seq: u64,
     stored_at: u64,
@@ -127,12 +177,14 @@ pub struct ServerState {
     path: Option<PathBuf>,
     dir: HashMap<String, DirEntry>,
     queues: HashMap<[u8; 32], VecDeque<Frame>>,
+    /// Times of recent accepted prekey puts per user (memory only).
+    prekey_puts: HashMap<String, VecDeque<u64>>,
     next_seq: u64,
-    replay: HashMap<[u8; 32], u64>,
+    replay: Expiring,
+    sealed_seen: Expiring,
     blobs: Option<Arc<BlobStore>>,
     pins: HashMap<[u8; 32], PinSlot>,
     prekeys: HashMap<String, Prekeys>,
-    pin_window: (u64, u32),
     srv_sk: Option<[u8; 32]>,
     dirty: bool,
 }
@@ -212,12 +264,13 @@ impl ServerState {
             path: None,
             dir: HashMap::new(),
             queues: HashMap::new(),
+            prekey_puts: HashMap::new(),
             next_seq: 1,
-            replay: HashMap::new(),
+            replay: Expiring::default(),
+            sealed_seen: Expiring::default(),
             blobs: None,
             pins: HashMap::new(),
             prekeys: HashMap::new(),
-            pin_window: (0, 0),
             srv_sk: aegis_core::random_bytes::<32>().ok(),
             dirty: false,
         }
@@ -257,7 +310,7 @@ impl ServerState {
     }
 
     fn pow_spent(&mut self, hash: [u8; 32], now: u64) -> bool {
-        self.replay.retain(|_, exp| *exp > now);
+        self.replay.expire(now);
         self.replay.contains_key(&hash)
     }
 
@@ -280,6 +333,9 @@ impl ServerState {
         let hash = pow::pow_hash(&aegis_core::directory::pow_scope(&reg.u), reg.ts, &reg.body_hash(), reg.pow);
         if self.pow_spent(hash, now) {
             return err(403, "proof of work already used");
+        }
+        if is_reserved_name(&reg.u) && self.config.owner_ed_pk != Some(reg.ed) {
+            return err(403, "reserved username");
         }
         match self.dir.get(&reg.u) {
             Some(e) if e.ed != reg.ed => return err(409, "username is bound to another key"),
@@ -337,14 +393,30 @@ impl ServerState {
         }
         let qhex = hex::encode(&qid);
         let body_hash = pow::body_hash_hex(body);
-        if !pow::verify(&qhex, ts, &body_hash, nonce, self.config.pow_bits) {
+        self.purge_queue(&qid, now);
+        let len = self.queues.get(&qid).map_or(0, VecDeque::len);
+        let base = self.config.pow_bits;
+        let need = base + fill_extra_bits(len, self.config.max_frames_per_queue);
+        if !pow::verify(&qhex, ts, &body_hash, nonce, need) {
+            if need > base && pow::verify(&qhex, ts, &body_hash, nonce, base) {
+                return json_resp(429, &json!({"error": "queue is filling, more proof of work needed", "bits": need}));
+            }
             return err(403, "insufficient proof of work");
         }
         let hash = pow::pow_hash(&qhex, ts, &body_hash, nonce);
         if self.pow_spent(hash, now) {
             return err(403, "proof of work already used");
         }
-        self.purge_queue(&qid, now);
+        if official_queue_id() == Some(qid) {
+            let sig = one(q, "sig").ok().flatten().and_then(|s| hex::decode_array::<64>(s).ok());
+            let ok = match (self.config.owner_ed_pk, sig) {
+                (Some(pk), Some(sig)) => aegis_core::official::post_auth_ok(&pk, &qid, ts, &frame, &sig),
+                _ => false,
+            };
+            if !ok {
+                return err(403, "official queue needs the owner signature");
+            }
+        }
         match self.queues.get(&qid) {
             Some(fr) if fr.len() >= self.config.max_frames_per_queue => {
                 return err(429, "queue full");
@@ -379,22 +451,26 @@ impl ServerState {
             Err(r) => return r,
         };
         self.purge_queue(&qid, now);
-        let frames: Vec<_> = self
-            .queues
-            .get(&qid)
-            .map(|fr| {
-                fr.iter()
-                    .filter(|f| f.seq > after)
-                    .take(POLL_PAGE)
-                    .map(|f| json!({"seq": f.seq, "d": hex::encode(&f.data)}))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut frames = Vec::new();
+        let mut size = POLL_ENVELOPE_BYTES;
+        let mut has_more = false;
+        if let Some(fr) = self.queues.get(&qid) {
+            for f in fr.iter().filter(|f| f.seq > after) {
+                // `{"seq":N,"d":"..."},` per frame.
+                let item = 2 * f.data.len() + 40;
+                if frames.len() >= POLL_PAGE || (!frames.is_empty() && size + item > POLL_MAX_BYTES) {
+                    has_more = true;
+                    break;
+                }
+                size += item;
+                frames.push(json!({"seq": f.seq, "d": hex::encode(&f.data)}));
+            }
+        }
         let next = frames
             .last()
             .and_then(|f| f["seq"].as_u64())
             .unwrap_or(after);
-        json_resp(200, &json!({"frames": frames, "next": next}))
+        json_resp(200, &json!({"frames": frames, "next": next, "has_more": has_more}))
     }
 
     fn purge_queue(&mut self, qid: &[u8; 32], now: u64) {
@@ -414,6 +490,17 @@ impl ServerState {
         }
     }
 
+    /// Records the ephemeral key of a sealed request. False when it was already seen.
+    pub fn sealed_first_use(&mut self, e_pk: [u8; 32], now: u64) -> bool {
+        self.sealed_seen.expire(now);
+        if self.sealed_seen.contains_key(&e_pk) {
+            return false;
+        }
+        self.sealed_seen.insert(e_pk, now + self.config.replay_secs);
+        self.sealed_seen.trim(SEALED_SEEN_CAP);
+        true
+    }
+
     /// A spent proof of work stays remembered until its `ts` can no longer pass the window check.
     fn replay_expiry(&self, ts: u64, now: u64) -> u64 {
         (now + self.config.replay_secs).max(ts.saturating_add(pow::MAX_SKEW_SECS + 1))
@@ -431,7 +518,9 @@ impl ServerState {
             changed |= fr.len() != before;
             !fr.is_empty()
         });
-        self.replay.retain(|_, exp| *exp > now);
+        self.replay.expire(now);
+        self.sealed_seen.expire(now);
+        self.prekey_puts.retain(|_, t| t.back().is_some_and(|b| b.saturating_add(3600) > now));
         let before = self.pins.len();
         self.pins.retain(|_, p| p.last_used.saturating_add(PIN_TTL_SECS) > now);
         changed |= self.pins.len() != before;
@@ -480,11 +569,27 @@ impl ServerState {
             return err(403, "spk_ts in the future");
         }
         let stored = self.prekeys.get(&put.u);
-        if stored.is_some_and(|p| put.spk_ts <= p.spk_ts) {
+        let stale = stored.is_some_and(|p| {
+            put.spk_ts < p.spk_ts || (put.spk_ts == p.spk_ts && (put.spk != p.spk || put.spk_sig != p.spk_sig))
+        });
+        if stale {
             return err(409, "spk_ts is not newer");
         }
         if stored.is_none() && self.prekeys.len() >= self.config.max_prekey_users {
             return err(503, "prekey table full");
+        }
+        {
+            let times = self.prekey_puts.entry(put.u.clone()).or_default();
+            while times.front().is_some_and(|t| t.saturating_add(3600) <= now) {
+                times.pop_front();
+            }
+            let (gap, per_hour) = (self.config.prekey_put_interval_secs, self.config.prekey_puts_per_hour);
+            let too_soon = gap > 0 && times.back().is_some_and(|t| t.saturating_add(gap) > now);
+            let too_many = per_hour > 0 && times.len() >= per_hour;
+            if too_soon || too_many {
+                return err(429, "too many prekey uploads");
+            }
+            times.push_back(now);
         }
         self.replay.insert(hash, self.replay_expiry(put.ts, now));
         let rec = self.prekeys.entry(put.u).or_insert_with(|| Prekeys {
@@ -633,18 +738,14 @@ impl ServerState {
             self.replay.insert(hash, expiry);
             return err(404, "not found");
         }
-        // Throttles: the request is not counted and its proof of work stays usable.
+        // The only throttle is per slot: a throttled request is not counted and its proof of work
+        // stays usable. There is deliberately no budget shared between slots: attackers can open
+        // as many slots of their own as they like and would starve everybody else with it.
+        // Every wrong verifier counts against its own slot, so nothing is guessed for free.
         let min = self.config.pin_min_interval_secs;
         if min > 0 && entry.last_attempt != 0 && now < entry.last_attempt.saturating_add(min) {
             return err(429, "too many attempts");
         }
-        if self.pin_window.0 != now {
-            self.pin_window = (now, 0);
-        }
-        if self.pin_window.1 >= self.config.pin_global_per_sec {
-            return err(429, "too many attempts");
-        }
-        self.pin_window.1 += 1;
         self.replay.insert(hash, expiry);
         let Some(entry) = self.pins.get_mut(&slot) else {
             return err(404, "not found");
@@ -896,11 +997,50 @@ pub fn handle_blob(state: &Mutex<ServerState>, req: &Request, now: u64) -> BlobR
 }
 
 /// Cover traffic (section 26): `BE32(resp_len) || random` is answered with `resp_len` zero bytes.
+fn official_queue_id() -> Option<[u8; 32]> {
+    static Q: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
+    *Q.get_or_init(|| aegis_core::official::official_queue().ok())
+}
+
+/// Extra proof-of-work bits for a queue holding `len` of `max` frames: none up to half full,
+/// then one more bit for every further 12.5% (so +1 from 62.5%, +4 when full).
+fn fill_extra_bits(len: usize, max: usize) -> u32 {
+    if max == 0 {
+        return 0;
+    }
+    let eighths = len.saturating_mul(8) / max;
+    u32::try_from(eighths.saturating_sub(4)).unwrap_or(4).min(4)
+}
+
+const RESERVED_NAMES: [&str; 5] = ["owner", "aegis", "admin", "support", "official"];
+
+/// Folds look-alike spellings (digits, underscores) to a plain skeleton.
+fn name_skeleton(u: &str) -> String {
+    u.chars()
+        .filter(|c| *c != '_')
+        .map(|c| match c {
+            '0' => 'o',
+            '1' | 'l' => 'i',
+            '3' => 'e',
+            '4' => 'a',
+            '5' | '$' => 's',
+            '7' => 't',
+            '8' => 'b',
+            c => c.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+fn is_reserved_name(u: &str) -> bool {
+    let sk = name_skeleton(u);
+    RESERVED_NAMES.iter().any(|r| name_skeleton(r) == sk)
+}
+
 fn nop(body: &[u8]) -> Response {
     let Some(len) = body.first_chunk::<4>().map(|b| u32::from_be_bytes(*b) as usize) else {
         return err(400, "short body");
     };
-    if len > 65_536 {
+    if len > aegis_core::cover::max_resp_len(body.len()) as usize {
         return err(400, "bad length");
     }
     Response { status: 200, body: " ".repeat(len) }
@@ -985,6 +1125,9 @@ impl<'a> Reader<'a> {
 
 /// Writes the state to disk if it changed since the last call.
 pub fn persist_now(state: &Mutex<ServerState>) -> Result<(), ServerError> {
+    // One writer at a time: a snapshot taken later is always written later.
+    static PERSIST: Mutex<()> = Mutex::new(());
+    let _one = PERSIST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let snap = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

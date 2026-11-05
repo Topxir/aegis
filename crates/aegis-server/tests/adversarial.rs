@@ -133,7 +133,8 @@ fn send_target(q: &str, ts: u64, pow_n: u64) -> String {
 
 fn send_at(addr: SocketAddr, q: &str, padded: &[u8], ts: u64) -> Reply {
     let body = hex::encode(padded).into_bytes();
-    let n = pow::mine(q, ts, &pow::body_hash_hex(&body), BITS);
+    // Four extra bits, so a nearly full queue (which asks for up to four more) still accepts.
+    let n = pow::mine(q, ts, &pow::body_hash_hex(&body), BITS + 4);
     http(addr, "POST", &send_target(q, ts, n), &[], &body)
 }
 
@@ -504,7 +505,7 @@ fn queue_full_returns_429_keeps_old_frames_and_does_not_burn_pow() {
     }
     let body = hex::encode(&frame_of(99, 256)).into_bytes();
     let ts = now();
-    let n = pow::mine(&q, ts, &pow::body_hash_hex(&body), BITS);
+    let n = pow::mine(&q, ts, &pow::body_hash_hex(&body), BITS + 4);
     let t = send_target(&q, ts, n);
     assert_eq!(http(s.addr, "POST", &t, &[], &body).status, 429);
     assert_eq!(http(s.addr, "POST", &t, &[], &body).status, 429, "pow not consumed by a rejected send");
@@ -869,7 +870,7 @@ fn req(method: &str, path: &str, query: &[(&str, String)], body: Vec<u8>) -> Req
 
 fn handle_send(st: &mut ServerState, q: &str, frame: &[u8], ts: u64, now_s: u64) -> u16 {
     let body = hex::encode(frame).into_bytes();
-    let n = pow::mine(q, ts, &pow::body_hash_hex(&body), BITS);
+    let n = pow::mine(q, ts, &pow::body_hash_hex(&body), BITS + 4);
     st.handle(
         &req(
             "POST",

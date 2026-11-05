@@ -1,8 +1,8 @@
 //! MP4/MOV sanitizer (spec section 16, videos).
 //!
-//! The output has exactly the length of the input: everything that is not on the allowlist is
-//! overwritten in place (a `free` box of the same size with a zeroed payload), so every
-//! `stco`/`co64` offset stays valid. Pure safe Rust; every read is bounds-checked and no input
+//! The output has exactly the length of the input, so every `stco`/`co64` offset stays valid:
+//! everything that is not on the allowlist is dropped and the freed bytes of each container
+//! become one zeroed `free` box at its end; `mdat` bytes that no kept sample refers to are zeroed. Pure safe Rust; every read is bounds-checked and no input
 //! can make it panic. Nesting depth is fixed by the allowlist (no recursion).
 
 use crate::{Error, Result};
@@ -114,12 +114,10 @@ fn one(list: &[BoxRef], typ: &[u8; 4]) -> Result<Option<BoxRef>> {
 
 #[derive(Default)]
 struct Plan {
-    /// Boxes turned into `free` (type rewritten, payload zeroed).
-    free: Vec<BoxRef>,
-    /// Allowlisted filler boxes whose payload is zeroed but keep their type.
-    scrub: Vec<BoxRef>,
-    /// Plain ranges to zero (timestamps, dropped-track samples).
+    /// Ranges overwritten with zeros (timestamps, names, dropped-track samples).
     zero: Vec<(usize, usize)>,
+    /// Bytes written at a position (sanitized `ftyp`, `dref` entries).
+    set: Vec<(usize, Vec<u8>)>,
 }
 
 impl Plan {
@@ -283,16 +281,124 @@ fn sample_ranges(
     Ok(())
 }
 
-struct TrackOut {
-    dims: Option<(u32, u32)>,
+/// Brands that may stay in `ftyp`; anything else is replaced by the major brand.
+const BRANDS: [&[u8; 4]; 12] = [
+    b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"qt  ", b"M4V ",
+    b"M4A ", b"hvc1",
+];
+
+fn ftyp_plan(buf: &[u8], b: &BoxRef, plan: &mut Plan) -> Result<()> {
+    let p = b.payload();
+    let len = b.payload_len();
+    let get = |o: usize| -> Result<[u8; 4]> {
+        let s = buf.get(o..o + 4).ok_or(bad("truncated"))?;
+        Ok([s[0], s[1], s[2], s[3]])
+    };
+    let allowed = |t: &[u8; 4]| BRANDS.contains(&t);
+    let major = if allowed(&get(p)?) { get(p)? } else { *b"isom" };
+    let mut new = Vec::with_capacity(len);
+    new.extend_from_slice(&major);
+    new.extend_from_slice(&[0; 4]);
+    let mut o = p + 8;
+    while o + 4 <= b.end {
+        let t = get(o)?;
+        new.extend_from_slice(if allowed(&t) { &t } else { &major });
+        o += 4;
+    }
+    new.resize(len, 0);
+    plan.set.push((p, new));
+    Ok(())
 }
 
-fn keep_only(list: &[BoxRef], allowed: &[&[u8; 4]], plan: &mut Plan) {
-    for b in list {
-        if !allowed.iter().any(|a| **a == b.typ) {
-            plan.free.push(*b);
+fn trak_handler(buf: &[u8], trak: &BoxRef) -> Result<Option<[u8; 4]>> {
+    let kids = children(buf, trak)?;
+    match one(&kids, b"mdia")? {
+        Some(m) => handler(buf, &children(buf, &m)?),
+        None => Ok(None),
+    }
+}
+
+/// Offsets inside a sample entry payload (bytes after the 8-byte box header).
+const VISUAL_FIXED: usize = 78;
+const VISUAL_COMPRESSOR: (usize, usize) = (42, 74);
+const AUDIO_VENDOR: (usize, usize) = (12, 16);
+
+/// Offset of the first child box of a sample entry.
+fn entry_children_at(buf: &[u8], e: &BoxRef, hd: [u8; 4]) -> Result<usize> {
+    let p = e.payload();
+    let rel = if &hd == b"vide" {
+        VISUAL_FIXED
+    } else {
+        let ver = buf.get(p + 8..p + 10).ok_or(bad("sample entry"))?;
+        match u16::from_be_bytes([ver[0], ver[1]]) {
+            0 => 28,
+            1 => 44,
+            2 => 64,
+            _ => return Err(bad("sample entry")),
+        }
+    };
+    if e.payload_len() < rel {
+        return Err(bad("sample entry"));
+    }
+    Ok(p + rel)
+}
+
+/// Schedules the free-text fields of a kept track for zeroing and checks its `dref`/`stsd`.
+fn scrub_track_text(buf: &[u8], mdia_kids: &[BoxRef], minf: &[BoxRef], hd: [u8; 4], plan: &mut Plan) -> Result<()> {
+    if let Some(h) = one(mdia_kids, b"hdlr")? {
+        // Everything after the handler type: reserved words and the name.
+        plan.zero_len(h.payload() + 12, h.payload_len().saturating_sub(12))?;
+    }
+    if let Some(dinf) = one(minf, b"dinf")? {
+        let kids = children(buf, &dinf)?;
+        if let Some(dref) = one(&kids, b"dref")? {
+            if dref.payload_len() < 8 {
+                return Err(bad("dref"));
+            }
+            let n = usz(be32(buf, dref.payload() + 4)?);
+            let ents = parse_boxes(buf, dref.payload() + 8, dref.end)?;
+            if ents.len() != n {
+                return Err(bad("dref"));
+            }
+            for e in ents {
+                if &e.typ != b"url " && &e.typ != b"urn " {
+                    return Err(bad("dref"));
+                }
+                // Always "self-contained, no location".
+                let mut v = vec![0u8; e.payload_len()];
+                if let Some(f) = v.get_mut(3) {
+                    *f = 1;
+                }
+                plan.set.push((e.start + 4, b"url ".to_vec()));
+                plan.set.push((e.payload(), v));
+            }
         }
     }
+    let Some(stbl) = one(minf, b"stbl")? else { return Ok(()) };
+    let kids = children(buf, &stbl)?;
+    let Some(stsd) = one(&kids, b"stsd")? else { return Ok(()) };
+    if stsd.payload_len() < 8 {
+        return Err(bad("stsd"));
+    }
+    let n = usz(be32(buf, stsd.payload() + 4)?);
+    let ents = parse_boxes(buf, stsd.payload() + 8, stsd.end)?;
+    if ents.len() != n {
+        return Err(bad("stsd"));
+    }
+    for e in ents {
+        entry_children_at(buf, &e, hd)?;
+        let p = e.payload();
+        if &hd == b"vide" {
+            plan.zero_len(p + VISUAL_COMPRESSOR.0, VISUAL_COMPRESSOR.1 - VISUAL_COMPRESSOR.0)?;
+        } else {
+            plan.zero_len(p + AUDIO_VENDOR.0, AUDIO_VENDOR.1 - AUDIO_VENDOR.0)?;
+        }
+    }
+    Ok(())
+}
+
+struct TrackOut {
+    dims: Option<(u32, u32)>,
 }
 
 fn process_track(
@@ -300,7 +406,8 @@ fn process_track(
     trak: &BoxRef,
     plan: &mut Plan,
     budget: &mut usize,
-    samples: &mut Vec<(usize, usize)>,
+    dropped: &mut Vec<(usize, usize)>,
+    kept: &mut Vec<(usize, usize)>,
 ) -> Result<TrackOut> {
     let kids = children(buf, trak)?;
     let tk = one(&kids, b"tkhd")?;
@@ -320,21 +427,99 @@ fn process_track(
     if !is_av {
         // Whole track goes; its samples are wiped through the sample tables.
         if let Some(s) = stbl {
-            sample_ranges(buf, &s, budget, samples)?;
+            sample_ranges(buf, &s, budget, dropped)?;
         }
-        plan.free.push(*trak);
         return Ok(TrackOut { dims: None });
     }
 
+    let hd = hdlr.ok_or(bad("hdlr"))?;
     let tk = tk.ok_or(bad("tkhd missing"))?;
     let (w, h) = tkhd(buf, &tk, plan)?;
-    keep_only(&kids, &[b"tkhd", b"edts", b"mdia"], plan);
     let mdhd = one(&mdia_kids, b"mdhd")?.ok_or(bad("mdhd missing"))?;
     zero_times_and_duration(buf, &mdhd, plan)?;
-    keep_only(&mdia_kids, &[b"mdhd", b"hdlr", b"minf"], plan);
-    keep_only(&minf, &[b"vmhd", b"smhd", b"dinf", b"stbl"], plan);
-    let dims = (hdlr == Some(*b"vide")).then_some((w, h));
+    let stbl = stbl.ok_or(bad("stbl missing"))?;
+    sample_ranges(buf, &stbl, budget, kept)?;
+    scrub_track_text(buf, &mdia_kids, &minf, hd, plan)?;
+    let dims = (&hd == b"vide").then_some((w, h));
     Ok(TrackOut { dims })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Moov,
+    Trak,
+    Edts,
+    Mdia,
+    Minf,
+    Dinf,
+    Stbl,
+    Stsd,
+    Entry,
+    Leaf,
+}
+
+const ENTRY_KEEP: [&[u8; 4]; 14] = [
+    b"avcC", b"hvcC", b"av1C", b"vpcC", b"vvcC", b"esds", b"colr", b"pasp", b"clap", b"btrt",
+    b"dac3", b"dec3", b"dOps", b"dfLa",
+];
+const STBL_LEAVES: [&[u8; 4]; 8] = [b"stts", b"ctts", b"stss", b"stsc", b"stsz", b"stco", b"co64", b"cslg"];
+
+/// What a child of a `kind` box becomes; `None` drops it.
+fn child_kind(buf: &[u8], kind: Kind, k: &BoxRef) -> Result<Option<Kind>> {
+    let t = &k.typ;
+    Ok(match (kind, t) {
+        (Kind::Moov, b"mvhd") => Some(Kind::Leaf),
+        (Kind::Moov, b"trak") => {
+            matches!(trak_handler(buf, k)?, Some(h) if &h == b"vide" || &h == b"soun").then_some(Kind::Trak)
+        }
+        (Kind::Trak, b"tkhd") => Some(Kind::Leaf),
+        (Kind::Trak, b"edts") => Some(Kind::Edts),
+        (Kind::Trak, b"mdia") => Some(Kind::Mdia),
+        (Kind::Edts, b"elst") => Some(Kind::Leaf),
+        (Kind::Mdia, b"mdhd" | b"hdlr") => Some(Kind::Leaf),
+        (Kind::Mdia, b"minf") => Some(Kind::Minf),
+        (Kind::Minf, b"vmhd" | b"smhd") => Some(Kind::Leaf),
+        (Kind::Minf, b"dinf") => Some(Kind::Dinf),
+        (Kind::Minf, b"stbl") => Some(Kind::Stbl),
+        (Kind::Dinf, b"dref") => Some(Kind::Leaf),
+        (Kind::Stbl, b"stsd") => Some(Kind::Stsd),
+        (Kind::Stbl, _) if STBL_LEAVES.contains(&t) => Some(Kind::Leaf),
+        (Kind::Stsd, _) => Some(Kind::Entry),
+        (Kind::Entry, _) if ENTRY_KEEP.contains(&t) => Some(Kind::Leaf),
+        _ => None,
+    })
+}
+
+/// Rewrites a container with the same total length: allowed children first, in order, then one
+/// `free` box that takes all the bytes of the dropped ones. `w` is already scrubbed.
+fn emit(w: &[u8], b: &BoxRef, kind: Kind, hd: Option<[u8; 4]>, out: &mut Vec<u8>) -> Result<()> {
+    let hd = if kind == Kind::Trak { trak_handler(w, b)? } else { hd };
+    let first = match kind {
+        Kind::Stsd => b.payload() + 8,
+        Kind::Entry => entry_children_at(w, b, hd.ok_or(bad("hdlr"))?)?,
+        _ => b.payload(),
+    };
+    let kids = parse_boxes(w, first, b.end)?;
+    out.extend_from_slice(w.get(b.start..first).ok_or(bad("truncated"))?);
+    let mut freed = 0usize;
+    for k in &kids {
+        match child_kind(w, kind, k)? {
+            Some(Kind::Leaf) => out.extend_from_slice(w.get(k.start..k.end).ok_or(bad("truncated"))?),
+            Some(ck) => emit(w, k, ck, hd, out)?,
+            None => freed += k.end - k.start,
+        }
+    }
+    push_free(out, freed);
+    Ok(())
+}
+
+/// A `free` box of exactly `total` bytes (nothing when 0).
+fn push_free(out: &mut Vec<u8>, total: usize) {
+    if total >= 8 {
+        out.extend_from_slice(&u32::try_from(total).unwrap_or(8).to_be_bytes());
+        out.extend_from_slice(b"free");
+        out.resize(out.len() + total - 8, 0);
+    }
 }
 
 /// Sanitizes an MP4/MOV file. See the module docs and spec section 16.
@@ -349,9 +534,10 @@ pub fn sanitize_video(input: &[u8]) -> Result<SanitizedVideo> {
     for b in &top {
         match &b.typ {
             b"ftyp" => {
-                if b.payload_len() < 8 {
+                if b.payload_len() < 8 || ftyp {
                     return Err(bad("ftyp"));
                 }
+                ftyp_plan(input, b, &mut plan)?;
                 ftyp = true;
             }
             b"moov" => {
@@ -360,9 +546,7 @@ pub fn sanitize_video(input: &[u8]) -> Result<SanitizedVideo> {
                 }
             }
             b"moof" => return Err(bad("fragmented video")),
-            b"mdat" => {}
-            b"free" | b"skip" | b"wide" => plan.scrub.push(*b),
-            _ => plan.free.push(*b),
+            _ => {}
         }
     }
     let moov = moov.ok_or(bad("moov missing"))?;
@@ -376,45 +560,69 @@ pub fn sanitize_video(input: &[u8]) -> Result<SanitizedVideo> {
     if timescale == 0 {
         return Err(bad("timescale"));
     }
-    keep_only(&kids, &[b"mvhd", b"trak"], &mut plan);
 
     let mut budget = input.len();
-    let mut samples = Vec::new();
+    let mut dropped = Vec::new();
+    let mut kept = Vec::new();
     let mut dims = None;
     for t in kids.iter().filter(|k| &k.typ == b"trak") {
-        let mut sub = Plan::default();
-        let out = process_track(input, t, &mut sub, &mut budget, &mut samples)?;
-        plan.free.append(&mut sub.free);
-        plan.zero.append(&mut sub.zero);
+        let out = process_track(input, t, &mut plan, &mut budget, &mut dropped, &mut kept)?;
         if dims.is_none() {
             dims = out.dims;
         }
     }
     let (width, height) = dims.ok_or(bad("no video track"))?;
 
-    let mut out = input.to_vec();
-    for b in &plan.free {
-        if let Some(t) = out.get_mut(b.start + 4..b.start + 8) {
-            t.copy_from_slice(b"free");
-        }
-        if let Some(p) = out.get_mut(b.payload()..b.end) {
+    let mut w = input.to_vec();
+    for (pos, v) in &plan.set {
+        let dst = w.get_mut(*pos..pos + v.len()).ok_or(bad("truncated"))?;
+        dst.copy_from_slice(v);
+    }
+    for &(s, e) in plan.zero.iter().chain(dropped.iter()) {
+        if let Some(p) = w.get_mut(s..e) {
             p.fill(0);
         }
     }
-    for b in &plan.scrub {
-        if let Some(p) = out.get_mut(b.payload()..b.end) {
+    // Inside `mdat`, only the samples of kept tracks survive.
+    kept.sort_unstable();
+    for b in top.iter().filter(|b| &b.typ == b"mdat") {
+        let mut cur = b.payload();
+        for &(s, e) in &kept {
+            if e <= cur || s >= b.end {
+                continue;
+            }
+            if let Some(p) = w.get_mut(cur..s.max(cur)) {
+                p.fill(0);
+            }
+            cur = cur.max(e);
+        }
+        if let Some(p) = w.get_mut(cur.min(b.end)..b.end) {
             p.fill(0);
         }
     }
-    for &(s, e) in plan.zero.iter().chain(samples.iter()) {
-        if let Some(p) = out.get_mut(s..e) {
-            p.fill(0);
+
+    // Rebuild the top level with the same positions: kept boxes stay, runs of everything else
+    // become one `free` box.
+    let mut out = Vec::with_capacity(w.len());
+    let mut run = 0usize;
+    for b in &top {
+        if !matches!(&b.typ, b"ftyp" | b"moov" | b"mdat") {
+            run += b.end - b.start;
+            continue;
+        }
+        push_free(&mut out, run);
+        run = 0;
+        if &b.typ == b"moov" {
+            emit(&w, b, Kind::Moov, None, &mut out)?;
+        } else {
+            out.extend_from_slice(w.get(b.start..b.end).ok_or(bad("truncated"))?);
         }
     }
-    // Zeroing sample ranges must not have damaged the box structure.
-    if parse_boxes(&out, 0, out.len())?.len() != top.len() {
+    push_free(&mut out, run);
+    if out.len() != input.len() {
         return Err(bad("structure damaged"));
     }
+    parse_boxes(&out, 0, out.len())?;
 
     let ms = u128::from(duration) * 1000 / u128::from(timescale);
     Ok(SanitizedVideo {
@@ -445,6 +653,15 @@ pub mod fixture {
     pub const TIME_MARK: u8 = 0x5a;
     pub const GPS_SAMPLE: &[u8; 20] = b"GPS+55.7558+037.6173";
     pub const GPS_UDTA: &[u8; 18] = b"+55.7558+037.6173/";
+    /// Bytes in `mdat` that no sample table refers to.
+    pub const MDAT_SECRET: &[u8; 18] = b"UNREFERENCED-MDAT!";
+    pub const HDLR_NAME: &str = "SecretHandlerName";
+    pub const COMPRESSOR: &[u8; 16] = b"SecretCompressor";
+    pub const VENDOR: &[u8; 4] = b"VNDR";
+    pub const ENTRY_JUNK: &[u8; 10] = b"entry-junk";
+    pub const STBL_JUNK: &[u8; 9] = b"stbl-junk";
+    pub const DREF_URL: &[u8; 20] = b"http://secret.test/x";
+    pub const EDTS_JUNK: &[u8; 9] = b"edts-junk";
 
     fn tkhd(ver: u8, id: u32, w: u32, h: u32) -> Vec<u8> {
         let t = |n: usize| vec![TIME_MARK; n];
@@ -478,14 +695,46 @@ pub mod fixture {
         fullbox(b"hdlr", 0, &p)
     }
 
+    fn sample_entry(kind: &[u8; 4]) -> Vec<u8> {
+        let junk = bx(b"junk", ENTRY_JUNK);
+        if kind == b"vide" {
+            let mut comp = COMPRESSOR.to_vec();
+            comp.resize(32, 0);
+            let mut p = vec![0u8; 8];
+            p.extend_from_slice(&[0; 16]);
+            p.extend_from_slice(&[1, 0x40, 0, 0xf0]);
+            p.extend_from_slice(&[0; 14]);
+            p.extend_from_slice(&comp);
+            p.extend_from_slice(&[0; 4]);
+            assert_eq!(p.len(), 78);
+            p.extend_from_slice(&bx(b"avcC", &[1, 2, 3, 4]));
+            p.extend_from_slice(&junk);
+            bx(b"avc1", &p)
+        } else {
+            let mut p = vec![0u8; 8];
+            p.extend_from_slice(&[0, 0, 0, 0]);
+            p.extend_from_slice(VENDOR);
+            p.extend_from_slice(&[0, 2, 0, 16, 0, 0, 0, 0, 0xbb, 0x80, 0, 0]);
+            assert_eq!(p.len(), 28);
+            p.extend_from_slice(&bx(b"esds", &[5, 6, 7, 8]));
+            p.extend_from_slice(&junk);
+            bx(b"mp4a", &p)
+        }
+    }
+
     /// One chunk with `sizes.len()` samples at file offset `off`.
-    fn stbl(sizes: &[u32], off: u32) -> Vec<u8> {
+    fn stbl(kind: &[u8; 4], sizes: &[u32], off: u32) -> Vec<u8> {
         let n = u32::try_from(sizes.len()).unwrap_or(0);
-        let stsd = fullbox(b"stsd", 0, &u32s(&[0]));
+        let stsd = if kind == b"vide" || kind == b"soun" {
+            fullbox(b"stsd", 0, &[u32s(&[1]), sample_entry(kind)].concat())
+        } else {
+            fullbox(b"stsd", 0, &u32s(&[0]))
+        };
         let stsc = fullbox(b"stsc", 0, &u32s(&[1, 1, n, 1]));
         let stsz = fullbox(b"stsz", 0, &[u32s(&[0, n]), u32s(sizes)].concat());
         let stco = fullbox(b"stco", 0, &u32s(&[1, off]));
-        bx(b"stbl", &[stsd, stsc, stsz, stco].concat())
+        let junk = bx(b"sgpd", STBL_JUNK);
+        bx(b"stbl", &[stsd, junk, stsc, stsz, stco].concat())
     }
 
     fn trak(kind: &[u8; 4], tk_ver: u8, md_ver: u8, id: u32, sizes: &[u32], off: u32, extra: &[u8]) -> Vec<u8> {
@@ -496,11 +745,12 @@ pub mod fixture {
         } else {
             fullbox(b"nmhd", 0, &[])
         };
-        let dinf = bx(b"dinf", &fullbox(b"dref", 0, &u32s(&[0])));
-        let minf = bx(b"minf", &[media_hdr, dinf, stbl(sizes, off)].concat());
-        let mdia = bx(b"mdia", &[mdhd(md_ver, 90000, 225_000), hdlr(kind, "Handler"), minf].concat());
+        let url = fullbox(b"url ", 0, &[DREF_URL.as_slice(), &[0]].concat());
+        let dinf = bx(b"dinf", &fullbox(b"dref", 0, &[u32s(&[1]), url].concat()));
+        let minf = bx(b"minf", &[media_hdr, dinf, stbl(kind, sizes, off)].concat());
+        let mdia = bx(b"mdia", &[mdhd(md_ver, 90000, 225_000), hdlr(kind, HDLR_NAME), minf].concat());
         let (w, h) = if kind == b"vide" { (320, 240) } else { (0, 0) };
-        let edts = bx(b"edts", &fullbox(b"elst", 0, &u32s(&[0])));
+        let edts = bx(b"edts", &[fullbox(b"elst", 0, &u32s(&[0])), bx(b"junk", EDTS_JUNK)].concat());
         bx(b"trak", &[tkhd(tk_ver, id, w, h), edts, mdia, extra.to_vec()].concat())
     }
 
@@ -538,7 +788,7 @@ pub mod fixture {
             bx(b"moov", &[mvhd, v, a, m, udta.clone()].concat())
         };
 
-        let ftyp = bx(b"ftyp", &[b"isom".as_slice(), &[0, 0, 2, 0], b"isommp41"].concat());
+        let ftyp = bx(b"ftyp", &[b"isom".as_slice(), &[0, 0, 2, 0], b"isommp41XSEC"].concat());
         let junk = {
             let payload = b"free-secret-bytes".to_vec();
             let size = (16 + payload.len()) as u64;
@@ -551,7 +801,10 @@ pub mod fixture {
         let off = |o: usize| u32::try_from(base + o).unwrap_or(0);
         let (ov, om, oa) = (off(0), off(video_samples.len()), off(video_samples.len() + meta_samples.len()));
         let moov = moov(ov, om, oa);
-        let mdat = bx(b"mdat", &[video_samples.clone(), meta_samples.clone(), audio_samples.clone()].concat());
+        let mdat = bx(
+            b"mdat",
+            &[video_samples.clone(), meta_samples.clone(), audio_samples.clone(), MDAT_SECRET.to_vec()].concat(),
+        );
         let bytes = [ftyp, moov, junk, meta_box, mdat].concat();
         let (vs, ms) = (base, base + video_samples.len());
         Fixture {

@@ -54,6 +54,21 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(out)
 }
 
+/// Owner `ed_pk` (64 hex digits) from `AEGIS_OWNER_ED_PK`, else from `<data dir>/owner-ed-pk`.
+fn owner_key(data_dir: &std::path::Path) -> Result<Option<[u8; 32]>, String> {
+    let text = match std::env::var("AEGIS_OWNER_ED_PK") {
+        Ok(v) => v,
+        Err(_) => match std::fs::read_to_string(data_dir.join("owner-ed-pk")) {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("cannot read owner-ed-pk".into()),
+        },
+    };
+    aegis_core::hex::decode_array::<32>(text.trim())
+        .map(Some)
+        .map_err(|_| "owner key must be 64 lowercase hex digits".to_owned())
+}
+
 fn run() -> Result<(), String> {
     let args = parse_args(std::env::args().skip(1))?;
     let data_dir = match args.data_dir {
@@ -64,10 +79,15 @@ fn run() -> Result<(), String> {
         )
         .ok_or("no data directory: pass --data-dir")?,
     };
+    let owner_ed_pk = owner_key(&data_dir)?;
+    if owner_ed_pk.is_none() {
+        eprintln!("no owner key configured: `owner` cannot be registered and the official queue is closed");
+    }
     let state = ServerState::open_with(
         &data_dir,
         Config {
             blob_quota_bytes: args.blob_quota_mib.saturating_mul(1024 * 1024),
+            owner_ed_pk,
             ..Config::default()
         },
     ).map_err(|e| format!("cannot open state: {e}"))?;

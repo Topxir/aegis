@@ -8,6 +8,7 @@
 pub mod attach;
 pub mod avatar;
 pub mod channel;
+pub mod cover;
 pub mod directory;
 pub mod envelope;
 mod error;
@@ -23,11 +24,15 @@ pub mod pow;
 pub mod prekeys;
 pub mod profile;
 pub mod queue_ids;
+pub mod ratchet;
 pub mod seal;
 pub mod sealed;
+pub mod senderkey;
+pub mod session;
 pub mod text;
 pub mod vault;
 pub mod vectors;
+pub mod x3dh;
 
 pub use error::{Error, Result};
 

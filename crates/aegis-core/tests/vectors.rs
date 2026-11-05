@@ -1,6 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use aegis_core::{group, hex, pad, pow, seal, vault, vectors};
+use aegis_core::identity::x25519_public;
+use aegis_core::ratchet::Ratchet;
+use aegis_core::senderkey::{RecvSet, Scope};
+use aegis_core::x3dh::{self, Bundle};
+use aegis_core::envelope::Envelope;
+use aegis_core::{group, hex, pad, pow, seal, sealed, vault, vectors};
 use serde_json::Value;
 
 fn load() -> Value {
@@ -135,6 +140,61 @@ fn new_vectors_verify_with_published_inputs() {
     for b in pf["invalid_bodies"].as_array().unwrap() {
         assert!(Profile::parse(b.as_str().unwrap()).is_err());
     }
+
+    let x = &v["x3dh"];
+    let (a_x, b_x) = (a32(x, "a_x_sk"), a32(x, "b_x_sk"));
+    for case in x["cases"].as_array().unwrap() {
+        let with_opk = case["with_opk"].as_bool().unwrap();
+        let bundle = Bundle {
+            spk: a32(x, "spk_pk"),
+            spk_ts: x["spk_ts"].as_u64().unwrap(),
+            spk_sig: hex::decode(s_(x, "spk_sig")).unwrap().try_into().unwrap(),
+            opk: with_opk.then(|| a32(x, "opk_pk")),
+        };
+        bundle.check(&a32(x, "b_ed_pk"), x["spk_ts"].as_u64().unwrap()).unwrap();
+        let sk = x3dh::initiate_with(&a32(x, "ek_sk"), &a_x, &x25519_public(&b_x), &bundle).unwrap();
+        assert_eq!(h(sk.as_ref()), s_(case, "sk"));
+        let sk_b = x3dh::respond(&b_x, &a32(x, "spk_sk"), with_opk.then(|| a32(x, "opk_sk")).as_ref(), &x25519_public(&a_x), &a32(x, "ek_pk")).unwrap();
+        assert_eq!(*sk_b, *sk);
+    }
+
+    let r = &v["ratchet"];
+    let ad: [u8; 128] = hex::decode(s_(r, "ad")).unwrap().try_into().unwrap();
+    let now = r["now"].as_u64().unwrap();
+    let mut rb = Ratchet::init_responder(&a32(r, "sk"), &ad, &a32(r, "spk_sk"));
+    let msgs: Vec<Vec<u8>> = r["a_to_b"].as_array().unwrap().iter().map(|m| hex::decode(s_(m, "msg")).unwrap()).collect();
+    for i in r["delivery_order"].as_array().unwrap() {
+        let i = i.as_u64().unwrap() as usize;
+        let p = rb.decrypt_with(&a32(r, "b_new_dhs_sk"), &msgs[i], now).unwrap();
+        assert_eq!(p.as_slice(), r["a_to_b"][i]["plain_text"].as_str().unwrap().as_bytes());
+    }
+    assert_eq!(rb.skipped_len(), 0);
+    let mut ra = Ratchet::init_initiator_with(&a32(r, "a_dhs_sk"), &a32(r, "sk"), &ad, &x25519_public(&a32(r, "spk_sk"))).unwrap();
+    let again = ra.encrypt(b"one").unwrap();
+    assert_eq!(h(&again), s_(&r["a_to_b"][0], "msg"));
+    let reply = hex::decode(s_(&r["b_to_a"], "msg")).unwrap();
+    let p = ra.decrypt_with(&a32(r, "a_new_dhs_sk"), &reply, now).unwrap();
+    assert_eq!(p.as_slice(), b"reply");
+
+    let sk = &v["senderkey"];
+    let g = a32(sk, "g");
+    let mut rs = RecvSet::new(Scope::Group, &g, None).unwrap();
+    let skey = Envelope::decode(&hex::decode(s_(&sk["skey_envelope"], "encoded")).unwrap()).unwrap();
+    assert_eq!(skey.kind.as_str(), "skey");
+    rs.add_from_skey(&skey, sk["now"].as_u64().unwrap()).unwrap();
+    let frame = hex::decode(s_(sk, "frame")).unwrap();
+    assert_eq!(frame[0], 5);
+    assert_eq!(h(&frame[1..13]), s_(sk, "hnonce"));
+    let env = rs.decrypt(&frame, sk["now"].as_u64().unwrap()).unwrap();
+    assert_eq!(env.body, "hello chain");
+
+    let st = &v["sealed_transport"];
+    let (req, k_resp) = sealed::open_request(&a32(st, "srv_sk"), &hex::decode(s_(st, "request")).unwrap()).unwrap();
+    assert_eq!((req.method.as_str(), req.target.as_str()), (s_(st, "method"), s_(st, "target")));
+    assert_eq!(req.body, s_(st, "body_text").as_bytes());
+    assert_eq!(h(k_resp.as_ref()), s_(st, "k_resp"));
+    let (code, body) = sealed::open_response(&k_resp, &hex::decode(s_(st, "response")).unwrap()).unwrap();
+    assert_eq!((u64::from(code), body.as_slice()), (st["response_status"].as_u64().unwrap(), s_(st, "response_body_text").as_bytes()));
 
     let pn = &v["pin"];
     let params = PinParams { m_kib: 64, t: 1, p: 1 };

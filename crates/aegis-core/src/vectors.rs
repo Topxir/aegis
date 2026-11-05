@@ -10,7 +10,11 @@ use crate::attach::{self, AttachmentMeta, MediaKind};
 use crate::avatar::Avatar;
 use crate::pin::{self, DuressRecord, PinKey, PinParams, PinSetup};
 use crate::profile::{Particles, Profile};
-use crate::{channel, group, hex, mp4clean, official, pad, pow, queue_ids, seal, sha256, Result};
+use crate::ratchet::Ratchet;
+use crate::senderkey::{Scope, SendChain};
+use crate::session::{Encrypted, SessionStore};
+use crate::x3dh::{self, Bundle, Parties, SignedPrekey};
+use crate::{channel, group, sealed, hex, mp4clean, official, pad, pow, queue_ids, seal, sha256, Result};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
@@ -213,6 +217,11 @@ pub fn generate() -> Result<Value> {
         "official": official_v,
         "prof": prof,
         "pin": pin_v,
+        "x3dh": x3dh_vectors()?,
+        "ratchet": ratchet_vectors()?,
+        "session": session_vectors(&dm)?,
+        "senderkey": senderkey_vectors(&dm, &g)?,
+        "sealed_transport": sealed_vectors()?,
     }))
 }
 
@@ -335,7 +344,7 @@ fn official_vectors(alice: &Identity, dm: &Envelope) -> Result<Value> {
 fn profile_vectors(dm: &Envelope) -> Result<Value> {
     let p = Profile {
         name: "Alice <b>\u{e9}".into(),
-        about: "100% here\u{202e}".into(),
+        about: "100% here <b>".into(),
         particles: Particles::Embers,
     };
     let env = Envelope {
@@ -386,4 +395,201 @@ fn pin_vectors() -> Result<Value> {
         "duress_pin_text": "9999",
         "duress_file": h(&duress.encode()),
     }))
+}
+
+fn b32(b: &[u8]) -> Result<[u8; 32]> {
+    crate::arr(b)
+}
+
+fn x3dh_vectors() -> Result<Value> {
+    let alice = Identity::from_secrets(seq(0x10), seq(0x20));
+    let bob = Identity::from_secrets(seq(0x30), seq(0x40));
+    let (spk_sk, opk_sk, ek_sk) = (seq(0xc0), seq(0xd0), seq(0xe0));
+    let spk_ts = 1_700_000_000;
+    let spk = SignedPrekey::from_secret(&bob, spk_sk, spk_ts);
+    let opk_pk = x25519_public(&opk_sk);
+    let ad = Parties { a_ed: alice.ed_public(), a_x: alice.x_public(), b_ed: bob.ed_public(), b_x: bob.x_public() }.ad();
+    let mut cases = Vec::new();
+    for with_opk in [true, false] {
+        let bundle = Bundle { spk: spk.pk, spk_ts, spk_sig: spk.sig, opk: with_opk.then_some(opk_pk) };
+        let sk = x3dh::initiate_with(&ek_sk, alice.x_secret(), &bob.x_public(), &bundle)?;
+        cases.push(json!({"with_opk": with_opk, "sk": h(sk.as_ref())}));
+    }
+    Ok(json!({
+        "a_x_sk": h(alice.x_secret()), "b_x_sk": h(bob.x_secret()),
+        "b_ed_pk": h(&bob.ed_public()), "ek_sk": h(&ek_sk), "ek_pk": h(&x25519_public(&ek_sk)),
+        "spk_sk": h(&spk_sk), "spk_pk": h(&spk.pk), "spk_ts": spk_ts, "spk_sig": h(&spk.sig),
+        "opk_sk": h(&opk_sk), "opk_pk": h(&opk_pk),
+        "ad": h(&ad),
+        "cases": cases,
+    }))
+}
+
+fn ratchet_vectors() -> Result<Value> {
+    let alice = Identity::from_secrets(seq(0x10), seq(0x20));
+    let bob = Identity::from_secrets(seq(0x30), seq(0x40));
+    let ad = Parties { a_ed: alice.ed_public(), a_x: alice.x_public(), b_ed: bob.ed_public(), b_x: bob.x_public() }.ad();
+    let (sk, spk_sk, a_dhs, b_dhs, a_dhs2) = (seq(0x01), seq(0xc0), seq(0xe1), seq(0xe2), seq(0xe3));
+    let mut a = Ratchet::init_initiator_with(&a_dhs, &sk, &ad, &x25519_public(&spk_sk))?;
+    let mut b = Ratchet::init_responder(&sk, &ad, &spk_sk);
+    let t = 1_700_000_000;
+    let plains = ["one", "two", "three"];
+    let msgs: Vec<Vec<u8>> = plains.iter().map(|p| a.encrypt(p.as_bytes())).collect::<Result<_>>()?;
+    // delivery order 0, 2, 1: message 1 arrives late from the skipped-key store
+    for i in [0usize, 2, 1] {
+        b.decrypt_with(&b_dhs, &msgs[i], t)?;
+    }
+    let reply = b.encrypt(b"reply")?;
+    a.decrypt_with(&a_dhs2, &reply, t)?;
+    Ok(json!({
+        "sk": h(&sk), "ad": h(&ad), "spk_sk": h(&spk_sk),
+        "a_dhs_sk": h(&a_dhs), "b_new_dhs_sk": h(&b_dhs), "a_new_dhs_sk": h(&a_dhs2),
+        "now": t,
+        "a_to_b": msgs.iter().zip(plains).map(|(m, p)| json!({"plain_text": p, "msg": h(m)})).collect::<Vec<_>>(),
+        "delivery_order": [0, 2, 1],
+        "b_to_a": {"plain_text": "reply", "msg": h(&reply)},
+    }))
+}
+
+fn session_vectors(dm: &Envelope) -> Result<Value> {
+    let alice = Identity::from_secrets(seq(0x10), seq(0x20));
+    let bob = Identity::from_secrets(seq(0x30), seq(0x40));
+    let (spk_sk, opk_sk, ek_sk, dhs_sk) = (seq(0xc0), seq(0xd0), seq(0xe0), seq(0xe1));
+    let spk_ts = 1_700_000_000;
+    let now = spk_ts + 100;
+    let spk = SignedPrekey::from_secret(&bob, spk_sk, spk_ts);
+    let bundle = Bundle { spk: spk.pk, spk_ts, spk_sig: spk.sig, opk: Some(x25519_public(&opk_sk)) };
+    let mut store = SessionStore::new();
+    store.add_contact("bob", bob.ed_public(), bob.x_public())?;
+    store.start_session_with(&ek_sk, &dhs_sk, &alice, "bob", &bundle, now)?;
+    let Encrypted::Frame(start) = store.encrypt_with(&seq(0xa1), &alice, "bob", dm, now)? else {
+        return Err(crate::Error::Session("vector: no frame"));
+    };
+    // Bob answers; until Alice hears back every frame of hers still carries the start header.
+    let ad = Parties { a_ed: alice.ed_public(), a_x: alice.x_public(), b_ed: bob.ed_public(), b_x: bob.x_public() }.ad();
+    let sk = x3dh::respond(bob.x_secret(), &spk_sk, Some(&opk_sk), &alice.x_public(), &x25519_public(&ek_sk))?;
+    let mut bob_ratchet = Ratchet::init_responder(&sk, &ad, &spk_sk);
+    let first_inner = crate::seal::open_raw(0x03, bob.x_secret(), &start)?.1;
+    bob_ratchet.decrypt_with(&seq(0x77), &first_inner[97..], now)?;
+    let mut pong = dm.clone();
+    pong.sender = "bob".into();
+    pong.sender_ed = bob.ed_public();
+    pong.msg_id = h(&seq(0x61)[..16]);
+    pong.body = "pong".into();
+    let reply_msg = bob_ratchet.encrypt(&pong.encode()?)?;
+    let reply_frame = crate::seal::seal_raw(0x03, &seq(0xa3), bob.x_secret(), &alice.x_public(), &[&[1u8][..], &reply_msg].concat())?;
+    let got = store.decrypt_with(&seq(0xe2), &alice, &reply_frame, now + 2)?;
+    if got.envelope.as_ref().map(|e| e.body.as_str()) != Some("pong") {
+        return Err(crate::Error::Session("vector: reply not accepted"));
+    }
+    let mut next_env = dm.clone();
+    next_env.msg_id = h(&seq(0x62)[..16]);
+    next_env.body = "second".into();
+    let Encrypted::Frame(second) = store.encrypt_with(&seq(0xa2), &alice, "bob", &next_env, now + 3)? else {
+        return Err(crate::Error::Session("vector: no frame"));
+    };
+    Ok(json!({
+        "a_x_sk": h(alice.x_secret()), "a_ed_pk": h(&alice.ed_public()),
+        "b_x_sk": h(bob.x_secret()), "b_ed_pk": h(&bob.ed_public()),
+        "spk_sk": h(&spk_sk), "spk_pk": h(&spk.pk), "spk_ts": spk_ts, "spk_sig": h(&spk.sig),
+        "opk_sk": h(&opk_sk), "opk_pk": h(&x25519_public(&opk_sk)),
+        "ek_sk": h(&ek_sk), "dhs_sk": h(&dhs_sk), "now": now,
+        "start_e_sk": h(&seq(0xa1)), "start_frame": h(&start),
+        "start_body_text": dm.body,
+        "reply_e_sk": h(&seq(0xa3)), "reply_frame": h(&reply_frame), "reply_body_text": "pong", "a_new_dhs_sk": h(&seq(0xe2)),
+        "message_e_sk": h(&seq(0xa2)), "message_frame": h(&second),
+        "message_body_text": next_env.body,
+        "message_msg_id": next_env.msg_id,
+        "note": "frames are unpadded; the start frame inner is 0x00||EK||spk||opk||ratchet_msg, 0x01||ratchet_msg once the sender has received a frame",
+    }))
+}
+
+fn senderkey_vectors(dm: &Envelope, g: &[u8; 32]) -> Result<Value> {
+    let alice = Identity::from_secrets(seq(0x10), seq(0x20));
+    let (chain_id, ck, hnonce) = (crate::arr::<16>(&seq(0xf0)[..16])?, seq(0xf1), crate::arr::<12>(&seq(0xf2)[..12])?);
+    let gid = group::group_id(g);
+    let mut chain = SendChain::new_with(chain_id, b32(&ck)?, 1_700_000_000);
+    let skey = chain.skey_envelope_with(h(&seq(0x63)[..16]), "alice", &dm.sender_name, alice.ed_public(), &gid, dm.ts_ms);
+    let gmsg = Envelope {
+        kind: Kind::Gmsg,
+        msg_id: h(&seq(0x64)[..16]),
+        group_id: gid.clone(),
+        body: "hello chain".into(),
+        ttl_s: 0,
+        group_key: None,
+        members: vec![],
+        ..dm.clone()
+    };
+    let frame = chain.encrypt_with(&hnonce, Scope::Group, g, alice.ed_secret(), &gmsg)?;
+    Ok(json!({
+        "g": h(g), "group_id": gid, "chain_id": h(&chain_id), "ck": h(&ck), "hnonce": h(&hnonce),
+        "ed_sk": h(alice.ed_secret()),
+        "skey_envelope": env_json(&skey)?,
+        "gmsg_envelope": env_json(&gmsg)?,
+        "frame": h(&frame),
+        "frame_layout": "0x05 || hnonce(12) || AEAD(hk, hnonce, aad 0x05, chain_id||BE32(n)) (36 bytes) || AEAD(msg_key, nonce, aad 0x05||chain_id||BE32(n), envelope||sig)",
+        "n": 0,
+        "now": 1_700_000_000,
+    }))
+}
+
+fn sealed_vectors() -> Result<Value> {
+    let (srv_sk, e_sk) = (seq(0xb0), seq(0xb1));
+    let srv_pk = x25519_public(&srv_sk);
+    let body = b"u=alice&ts=1700000000&pow=1".to_vec();
+    let (outer, k_resp) = sealed::seal_request_with(&e_sk, &srv_pk, "POST", "/api/v2/prekeys/take", &body)?;
+    let resp = sealed::seal_response_with(&seq(0xb2)[..12].try_into().map_err(|_| crate::Error::Length)?, &k_resp, 200, br#"{"opks":3}"#)?;
+    Ok(json!({
+        "srv_sk": h(&srv_sk), "srv_pk": h(&srv_pk), "e_sk": h(&e_sk),
+        "method": "POST", "target": "/api/v2/prekeys/take", "body_text": String::from_utf8_lossy(&body),
+        "request": h(&outer), "request_len": outer.len(),
+        "k_resp": h(k_resp.as_ref()),
+        "response_nonce": h(&seq(0xb2)[..12]), "response_status": 200, "response_body_text": r#"{"opks":3}"#, "response": h(&resp), "response_len": resp.len(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hx(v: &Value, k: &str) -> Vec<u8> {
+        hex::decode(v[k].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn session_frames_follow_the_spec() {
+        let v = generate().unwrap();
+        let s = &v["session"];
+        let b_x = b32(&hx(s, "b_x_sk")).unwrap();
+        let a_x = b32(&hx(s, "a_x_sk")).unwrap();
+        let a_x = x25519_public(&a_x);
+        let (spk_sk, opk_sk) = (b32(&hx(s, "spk_sk")).unwrap(), b32(&hx(s, "opk_sk")).unwrap());
+        let now = s["now"].as_u64().unwrap();
+
+        let (sender, inner) = crate::seal::open_raw(0x03, &b_x, &hx(s, "start_frame")).unwrap();
+        assert_eq!(sender, a_x);
+        assert_eq!(inner[0], 0);
+        let ek = b32(&inner[1..33]).unwrap();
+        assert_eq!(ek, b32(&hx(s, "ek_sk")).map(|k| x25519_public(&k)).unwrap());
+        assert_eq!(inner[33..65], hx(s, "spk_pk")[..]);
+        assert_eq!(inner[65..97], hx(s, "opk_pk")[..]);
+        let sk = x3dh::respond(&b_x, &spk_sk, Some(&opk_sk), &a_x, &ek).unwrap();
+        let ad = Parties {
+            a_ed: b32(&hx(s, "a_ed_pk")).unwrap(),
+            a_x,
+            b_ed: b32(&hx(s, "b_ed_pk")).unwrap(),
+            b_x: x25519_public(&b_x),
+        }
+        .ad();
+        let mut r = Ratchet::init_responder(&sk, &ad, &spk_sk);
+        let plain = r.decrypt_with(&seq(0x77), &inner[97..], now).unwrap();
+        assert_eq!(Envelope::decode(&plain).unwrap().body, s["start_body_text"].as_str().unwrap());
+
+        let reply = r.encrypt(b"x").unwrap();
+        drop(reply);
+        let (_, inner) = crate::seal::open_raw(0x03, &b_x, &hx(s, "message_frame")).unwrap();
+        assert_eq!(inner[0], 1);
+        let plain = r.decrypt_with(&seq(0x78), &inner[1..], now).unwrap();
+        assert_eq!(Envelope::decode(&plain).unwrap().body, s["message_body_text"].as_str().unwrap());
+    }
 }

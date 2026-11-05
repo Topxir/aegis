@@ -11,6 +11,12 @@ pub const MAX_CHUNKS: usize = 32;
 pub const MAX_SIZE: usize = 31 * CHUNK;
 const MIN_PADDED: usize = 1 << 16;
 const TAG: usize = 16;
+/// Largest caption in characters.
+pub const MAX_CAPTION: usize = 1024;
+/// Largest width or height in pixels.
+pub const MAX_DIMENSION: u64 = 16_384;
+/// Longest video, 24 hours.
+pub const MAX_DURATION_MS: u64 = 86_400_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
@@ -204,8 +210,13 @@ impl AttachmentDescriptor {
         if self.size == 0 || self.ids.len() != n || n > MAX_CHUNKS || n == 0 {
             return Err(Error::Media("chunk count"));
         }
-        if self.caption.contains('\n') {
+        if self.caption.chars().count() > MAX_CAPTION
+            || self.caption.chars().any(|c| c.is_control() || crate::profile::is_spoofing_char(c))
+        {
             return Err(Error::Media("caption"));
+        }
+        if self.width > MAX_DIMENSION || self.height > MAX_DIMENSION || self.duration_ms > MAX_DURATION_MS {
+            return Err(Error::Media("dimensions"));
         }
         if self.kind == MediaKind::Image && self.duration_ms != 0 {
             return Err(Error::Media("duration"));
@@ -283,12 +294,27 @@ mod tests {
             width: 640,
             height: 480,
             duration_ms: 0,
-            caption: "hi \u{202E}%".into(),
+            caption: "hi %41 <b>".into(),
         }
     }
 
     fn ids(n: usize) -> Vec<[u8; 32]> {
         (0..n).map(|i| [u8::try_from(i).unwrap() + 1; 32]).collect()
+    }
+
+    #[test]
+    fn descriptor_bounds() {
+        let ok = |m: AttachmentMeta| seal_attachment(&m, &jpeg(100)).is_ok();
+        assert!(ok(meta()));
+        assert!(ok(AttachmentMeta { width: MAX_DIMENSION, height: MAX_DIMENSION, ..meta() }));
+        assert!(!ok(AttachmentMeta { width: MAX_DIMENSION + 1, ..meta() }));
+        assert!(!ok(AttachmentMeta { height: u64::MAX, ..meta() }));
+        assert!(!ok(AttachmentMeta { kind: MediaKind::Video, duration_ms: MAX_DURATION_MS + 1, ..meta() }));
+        assert!(!ok(AttachmentMeta { caption: "x".repeat(MAX_CAPTION + 1), ..meta() }));
+        assert!(ok(AttachmentMeta { caption: "x".repeat(MAX_CAPTION), ..meta() }));
+        assert!(!ok(AttachmentMeta { caption: "a\u{202E}b".into(), ..meta() }));
+        assert!(!ok(AttachmentMeta { caption: "a\tb".into(), ..meta() }));
+        assert!(!ok(AttachmentMeta { caption: "a\u{200B}b".into(), ..meta() }));
     }
 
     #[test]

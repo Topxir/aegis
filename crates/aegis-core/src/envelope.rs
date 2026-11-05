@@ -429,6 +429,7 @@ pub(crate) mod tests {
         let all = [
             (Kind::Dm, 1), (Kind::Prof, 1), (Kind::Ginv, 1), (Kind::Dmf, 1), (Kind::Cinv, 1),
             (Kind::Gmsg, 2), (Kind::Gmf, 2), (Kind::Cmsg, 2), (Kind::Cmf, 2),
+            (Kind::Skey, 1),
         ];
         for (k, t) in all {
             assert_eq!(k.frame_type(), t);

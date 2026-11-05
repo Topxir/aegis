@@ -34,7 +34,7 @@ impl Drop for TempDir {
 }
 
 fn cfg() -> Config {
-    Config { pow_bits: BITS, ..Config::default() }
+    Config { pow_bits: BITS, prekey_put_interval_secs: 0, prekey_puts_per_hour: 0, ..Config::default() }
 }
 
 fn open(dir: &TempDir, config: Config) -> Mutex<ServerState> {
@@ -199,7 +199,11 @@ fn take_requires_pow_and_rejects_replay() {
     let bad = (0..).find(|n| !PrekeyTake { u: "alice".into(), ts: now, pow: *n }.pow_ok(BITS)).unwrap();
     assert_eq!(call(&s, "/api/v2/prekeys/take", &format!("u=alice&ts={now}&pow={bad}"), now).0, 403);
     // work for another user does not carry over
-    let other = PrekeyTake::mine("bobby", now, BITS);
+    // (skip work that happens to satisfy alice's puzzle too, which a low BITS allows by chance)
+    let other = (0..)
+        .map(|i| PrekeyTake::mine("bobby", now - i, BITS))
+        .find(|o| !PrekeyTake { u: "alice".into(), ts: now, pow: o.pow }.pow_ok(BITS))
+        .unwrap();
     assert_eq!(call(&s, "/api/v2/prekeys/take", &format!("u=alice&ts={now}&pow={}", other.pow), now).0, 403);
     // stale ts
     assert_eq!(call(&s, "/api/v2/prekeys/take", &PrekeyTake::mine("alice", now - 601, BITS).to_form(), now).0, 403);
@@ -326,7 +330,7 @@ fn sealed_call(r: &Running, method: &str, target: &str, body: &[u8]) -> (u16, se
     let _ = s.read_to_end(&mut out);
     let pos = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
     let resp = &out[pos + 4..];
-    assert!(sealed::BUCKETS.contains(&(resp.len() - 16)));
+    assert!(sealed::BUCKETS.contains(&(resp.len() - 28)));
     let (status, body) = sealed::open_response(&k, resp).unwrap();
     (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
 }
@@ -349,4 +353,15 @@ fn prekeys_over_sealed_transport() {
     let t2 = PrekeyTake::mine("alice", now - 1, BITS).to_form();
     assert_eq!(sealed_call(&r, "POST", "/api/v2/prekeys/take", t2.as_bytes()).1["opk"], hex::encode(&opk(2)));
     assert_eq!(sealed_call(&r, "POST", "/api/v2/prekeys/take", b"u=alice&ts=1&pow=1").0, 403);
+}
+
+#[test]
+fn equal_spk_ts_with_identical_spk_refills_opks() {
+    let (_d, s, now) = setup();
+    let put = |spk: u8, opks: Vec<[u8; 32]>, ts: u64| call(&s, "/api/v2/prekeys/put", &put_form(&id(), "alice", spk, now - 100, opks, ts), now);
+    assert_eq!(put(3, vec![opk(1)], now).0, 200);
+    let (c, b) = put(3, vec![opk(2), opk(3)], now - 1);
+    assert_eq!((c, b["opks"].as_u64()), (200, Some(3)));
+    assert_eq!(put(4, vec![opk(9)], now - 2).0, 409, "different spk at equal ts");
+    assert_eq!(take(&s, "alice", now).1["spk"], hex::encode(&[3u8; 32]));
 }
