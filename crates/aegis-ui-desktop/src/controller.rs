@@ -125,12 +125,46 @@ impl Controller {
                     self.job(Job::Import { path, password });
                 }
             }
+            Cmd::PinSet { pin, confirm } => {
+                if !self.is_busy() {
+                    self.job(Job::PinSet { pin, confirm });
+                }
+            }
+            Cmd::PinRemove { pin } => {
+                if !self.is_busy() {
+                    self.job(Job::PinRemove(pin));
+                }
+            }
+            Cmd::DuressSet { pin, duress } => {
+                if !self.is_busy() {
+                    self.job(Job::DuressSet { pin, duress });
+                }
+            }
+            Cmd::DuressClear {} => {
+                if !self.is_busy() {
+                    self.job(Job::DuressClear);
+                }
+            }
             Cmd::Lock {} => self.lock(),
+            Cmd::KeyReset { step } => {
+                match step.as_str() {
+                    "ask" => e.app().key_reset_ask = true,
+                    "cancel" => e.app().key_reset_ask = false,
+                    "do" => e.reset_server_key(),
+                    _ => {}
+                }
+                e.changed();
+            }
             Cmd::Nav { to, id } => self.nav(&to, &id),
             Cmd::OpenDialog { kind, id } => {
                 let d = match kind.as_str() {
                     "delete_chat" => Dialog::DeleteChat(id),
                     "leave_group" => Dialog::LeaveGroup(id),
+                    "leave_channel" => Dialog::LeaveChannel(id),
+                    "clear_chat" => match self.current_chat() {
+                        Some(r) => Dialog::ClearChat(r),
+                        None => return,
+                    },
                     "delete_account" => Dialog::DeleteAccount,
                     _ => return,
                 };
@@ -174,6 +208,20 @@ impl Controller {
                 if let Some(u) = target {
                     e.mutate(|s| s.set_verified(&u, on));
                     self.local_change();
+                }
+            }
+            Cmd::AcceptRequest { x, username } => {
+                if !self.is_busy() {
+                    self.job(Job::AcceptRequest { x, username });
+                }
+            }
+            Cmd::BlockRequest { x } => {
+                if let Err(f) = e.block_request(&x) {
+                    e.app().flash = Some(crate::engine::Flash {
+                        ok: false,
+                        key: f.key,
+                        detail: f.detail,
+                    });
                 }
             }
             Cmd::AcceptKey { id } => {
@@ -220,38 +268,122 @@ impl Controller {
                     self.local_change();
                 }
             }
-            Cmd::SaveSettings {
+            Cmd::SaveConnection {
                 endpoint,
                 socks5,
-                idle_min,
-                flash,
+                tor,
+                cover,
             } => {
-                let idle = idle_min.trim().parse::<u32>().ok();
-                let r = match idle {
-                    Some(n) => e.apply_settings(&endpoint, &socks5, n, flash),
-                    None => Err(Failure::new("err.generic")),
-                };
-                e.app().flash = Some(match r {
-                    Ok(()) => Flash {
-                        ok: true,
-                        key: "ok.saved",
-                        detail: String::new(),
-                    },
-                    Err(f) => Flash {
-                        ok: false,
-                        key: f.key,
-                        detail: f.detail,
-                    },
-                });
+                let r = e.apply_connection(&endpoint, &socks5, tor, &cover);
+                self.saved(r);
                 e.app().conn = None;
                 self.local_change();
             }
-            Cmd::TestConn { endpoint, socks5 } => {
-                self.job(Job::TestConnection { endpoint, socks5 });
+            Cmd::SavePrivacy { idle_min, protect } => {
+                let r = match idle_min.trim().parse::<u32>() {
+                    Ok(n) => e.apply_privacy(n, protect),
+                    Err(_) => Err(Failure::new("err.generic")),
+                };
+                self.saved(r);
+                self.local_change();
             }
-            Cmd::UpdateDisplay { display } => {
+            Cmd::SaveNotify { on, name } => {
+                e.mutate(|s| {
+                    s.data.settings.flash_taskbar = on;
+                    s.data.settings.notify_name = name;
+                });
+                self.saved(Ok(()));
+                self.local_change();
+            }
+            Cmd::TestConn {
+                endpoint,
+                socks5,
+                tor,
+            } => {
+                self.job(Job::TestConnection {
+                    endpoint,
+                    socks5,
+                    tor,
+                });
+            }
+            Cmd::SaveProfile {
+                display,
+                about,
+                particles,
+            } => {
                 if !self.is_busy() {
-                    self.job(Job::UpdateDisplay(display));
+                    self.job(Job::SaveProfile {
+                        display,
+                        about,
+                        particles,
+                    });
+                }
+            }
+            Cmd::PickMedia {} => {
+                if let Some(chat) = self.current_chat() {
+                    self.job(Job::PickMedia(chat));
+                }
+            }
+            Cmd::Mute {} => {
+                if let Some(chat) = self.current_chat() {
+                    e.mutate(|s| s.toggle_mute(&chat));
+                    self.local_change();
+                }
+            }
+            Cmd::Pin {} => {
+                if let Some(chat) = self.current_chat() {
+                    e.mutate(|s| s.toggle_pin(&chat));
+                    self.local_change();
+                }
+            }
+            Cmd::InfoToggle {} => {
+                {
+                    let mut app = e.app();
+                    app.info = !app.info;
+                }
+                e.changed();
+            }
+            Cmd::ClearChat {} => {
+                let chat = match e.app().dialog.take() {
+                    Some(Dialog::ClearChat(r)) => Some(r),
+                    _ => None,
+                };
+                if let Some(r) = chat {
+                    e.mutate(|s| s.clear_history(&r));
+                    self.local_change();
+                }
+            }
+            Cmd::LeaveChannel {} => {
+                let id = match e.app().dialog.take() {
+                    Some(Dialog::LeaveChannel(c)) => Some(c),
+                    _ => None,
+                };
+                if let Some(c) = id {
+                    e.mutate(|s| s.leave_channel(&c));
+                    e.app().route = Route::Welcome;
+                    self.local_change();
+                }
+            }
+            Cmd::CreateChannel {
+                title,
+                about,
+                members,
+            } => {
+                if !self.is_busy() {
+                    self.job(Job::CreateChannel {
+                        title,
+                        about,
+                        members,
+                    });
+                }
+            }
+            Cmd::InviteChannel { members } => {
+                let id = match &e.app().route {
+                    Route::ChannelInfo(c) => Some(c.clone()),
+                    _ => None,
+                };
+                if let Some(channel) = id {
+                    self.job(Job::InviteChannel { channel, members });
                 }
             }
             Cmd::Export { path } => self.job(Job::Export(path)),
@@ -260,6 +392,21 @@ impl Controller {
                 self.job(Job::DeleteAccount(confirm));
             }
         }
+    }
+
+    fn saved(&self, r: Result<(), Failure>) {
+        self.engine.app().flash = Some(match r {
+            Ok(()) => Flash {
+                ok: true,
+                key: "ok.saved",
+                detail: String::new(),
+            },
+            Err(f) => Flash {
+                ok: false,
+                key: f.key,
+                detail: f.detail,
+            },
+        });
     }
 
     pub fn lock(&self) {
@@ -278,7 +425,18 @@ impl Controller {
             };
             match to {
                 "welcome" => Some(Route::Welcome),
-                "settings" => Some(Route::Settings),
+                "account" => crate::engine::SECTIONS
+                    .iter()
+                    .find(|x| **x == id)
+                    .map(|x| Route::Account(x)),
+                "contacts" => Some(Route::Contacts),
+                "new_channel" => Some(Route::NewChannel),
+                "channel" if s.data.channels.contains_key(id) => {
+                    Some(Route::Chat(ChatRef::Channel(id.to_owned())))
+                }
+                "channel_info" if s.data.channels.contains_key(id) => {
+                    Some(Route::ChannelInfo(id.to_owned()))
+                }
                 "new_chat" => Some(Route::NewChat),
                 "new_group" => Some(Route::NewGroup),
                 "dm" if s.data.contacts.contains_key(id) => {
@@ -306,6 +464,9 @@ impl Controller {
                 if let Some(s) = app.session.as_mut() {
                     s.mark_read(&r);
                 }
+            }
+            if app.route != route {
+                app.info = false;
             }
             app.route = route;
             app.dialog = None;

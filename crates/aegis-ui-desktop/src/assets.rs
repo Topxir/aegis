@@ -1,6 +1,6 @@
 //! Static files compiled into the binary and the headers they are served with.
 
-pub const CSP: &str = "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self' data:; script-src 'self'; connect-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
+pub const CSP: &str = "default-src 'none'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; script-src 'self'; connect-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
 
 static INDEX: &[u8] = include_bytes!("../assets/index.html");
 static CSS: &[u8] = include_bytes!("../assets/app.css");
@@ -95,5 +95,8 @@ mod tests {
         assert!(CSP.starts_with("default-src 'none'"));
         assert!(!CSP.contains("unsafe"));
         assert!(CSP.contains("connect-src 'none'"));
+        assert!(CSP.contains("media-src 'self';"));
+        assert!(CSP.contains("img-src 'self' data:;"));
+        assert!(!CSP.contains('*'));
     }
 }

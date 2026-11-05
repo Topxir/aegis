@@ -103,29 +103,17 @@ fun Field(
     enabled: Boolean = true,
     mono: Boolean = false,
 ) {
-    OutlinedTextField(
-        value = value,
-        onValueChange = onChange,
-        label = { Text(label) },
-        singleLine = singleLine,
-        enabled = enabled,
-        visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
-        keyboardOptions = KeyboardOptions(keyboardType = if (password) KeyboardType.Password else keyboard, autoCorrect = false),
-        shape = RoundedCornerShape(12.dp),
-        textStyle = if (mono) MaterialTheme.typography.bodyLarge.copy(fontFamily = GeistMono) else MaterialTheme.typography.bodyLarge,
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Ui.muted,
-            unfocusedBorderColor = Ui.border,
-            focusedContainerColor = Ui.surface,
-            unfocusedContainerColor = Ui.surface,
-            focusedLabelColor = Ui.text,
-            unfocusedLabelColor = Ui.muted,
-            focusedTextColor = Ui.text,
-            unfocusedTextColor = Ui.text,
-            cursorColor = Ui.accent,
-        ),
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-    )
+    val shape = RoundedCornerShape(12.dp)
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = Ui.muted, modifier = Modifier.padding(bottom = 4.dp))
+        Box(Modifier.fillMaxWidth().clip(shape).background(Ui.surface).border(1.dp, Ui.border, shape).padding(horizontal = 14.dp)) {
+            ImeText(
+                value, onChange, label, Modifier.fillMaxWidth(), maxLines = if (singleLine) 1 else 5, enabled = enabled,
+                password = password, single = singleLine, mono = mono,
+                uri = keyboard == KeyboardType.Uri, ascii = keyboard == KeyboardType.Ascii,
+            )
+        }
+    }
 }
 
 @Composable

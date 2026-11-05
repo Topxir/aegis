@@ -72,6 +72,7 @@ fun StartScreen(session: Session) {
     var server by rememberSaveable { mutableStateOf(Endpoint.DEFAULT) }
     var error by remember { mutableStateOf<Int?>(null) }
     var info by remember { mutableStateOf<Int?>(null) }
+    var usePassword by rememberSaveable { mutableStateOf(false) }
 
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) session.importVault(user, pass, uri) { e -> error = e; info = if (e == null) R.string.info_imported else null }
@@ -153,7 +154,9 @@ fun StartScreen(session: Session) {
                 }
             }
             Spacer(Modifier.height(24.dp))
-            Reveal(1, anim) {
+            if ((session.pinSet || session.pinGhost) && !usePassword) Reveal(1, anim) {
+                PinUnlockCard(session, { error = it; usePassword = true }) { usePassword = true }
+            } else Reveal(1, anim) {
                 Column(
                     Modifier.fillMaxWidth()
                         .clip(RoundedCornerShape(22.dp))

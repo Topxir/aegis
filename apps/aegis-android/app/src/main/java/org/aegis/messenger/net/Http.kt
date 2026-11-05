@@ -19,7 +19,7 @@ interface Transport {
     fun request(ep: Endpoint, method: String, pathQuery: String, body: ByteArray?, contentType: String?): Response
 }
 
-const val MAX_RESPONSE = 1 shl 20
+const val MAX_RESPONSE = 1114112 + 64
 private const val TIMEOUT_MS = 20_000
 
 /** Direct connection through the platform stack; never uses a system proxy. */

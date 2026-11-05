@@ -23,7 +23,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        applySecure()
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -32,6 +32,12 @@ class MainActivity : ComponentActivity() {
         setContent {
             AegisTheme { Root(session) { recreate() } }
         }
+    }
+
+    /** FLAG_SECURE follows the setting, on by default. */
+    fun applySecure() {
+        if (Boot.secureScreen(this)) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }
 
     override fun onStart() {

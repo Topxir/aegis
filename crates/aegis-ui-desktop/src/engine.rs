@@ -6,24 +6,39 @@
 
 use crate::config::Config;
 use crate::i18n::Lang;
-use crate::model::{Data, MsgState, Settings, SCHEMA};
-use crate::session::{now_ms, ChatRef, Failure, Outbound, Outcome, Session};
-use aegis_core::envelope::Kind;
+use crate::media;
+use crate::model::{Data, MediaRef, MsgState, Settings, SCHEMA};
+use crate::session::{
+    ChainRx,
+    now_ms, now_s, ChatRef, Draft, Failure, Need, Outbound, Outcome, Payload, Sendable, Session,
+};
+use aegis_core::attach::{
+    open_attachment, seal_attachment, AttachmentDescriptor, AttachmentMeta, MediaKind,
+};
+use aegis_core::envelope::{Envelope, Kind};
+use aegis_core::session::Action;
 use aegis_core::group::group_decrypt;
 use aegis_core::identity::{normalize_username, Identity};
 use aegis_core::net::{Client, DirEntry};
 use aegis_core::seal::open_dm;
 use aegis_core::text::sanitize_display_text;
 use aegis_core::vault::{vault_decrypt, vault_encrypt, vault_file_name, write_atomic};
+use aegis_core::{channel, official};
 use aegis_core::{directory, pad, Error};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
+pub mod cover;
+mod extra;
+mod pin;
+
 const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
 const POLL_PAGES: usize = 10;
+const KEY_RECHECK: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthTab {
@@ -40,13 +55,28 @@ pub enum Route {
     GroupInfo(String),
     NewChat,
     NewGroup,
-    Settings,
+    Account(&'static str),
+    NewChannel,
+    ChannelInfo(String),
+    Contacts,
 }
+
+/// Sections of the account cabinet, in display order.
+pub const SECTIONS: [&str; 6] = [
+    "profile",
+    "privacy",
+    "notifications",
+    "appearance",
+    "connection",
+    "data",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dialog {
     DeleteChat(String),
     LeaveGroup(String),
+    LeaveChannel(String),
+    ClearChat(ChatRef),
     DeleteAccount,
 }
 
@@ -78,6 +108,23 @@ pub struct App {
     pub net_ok: Option<bool>,
     pub last_activity: Instant,
     pub attention: bool,
+    /// Info panel next to the open chat.
+    pub info: bool,
+    /// Keys the page-visible media ids; changes on every start.
+    pub media_secret: [u8; 32],
+    /// The server showed another transport key than the pinned one. Nothing is sent.
+    pub key_alert: bool,
+    /// The reset-key confirmation step is showing.
+    pub key_reset_ask: bool,
+    /// When the server key was last compared with the pinned one.
+    pub key_checked: Option<Instant>,
+    /// Next time to top up the one-time prekeys on the server.
+    pub prekeys_due: Instant,
+    /// A PIN, and a duress PIN, are set for the open account.
+    pub pin_on: bool,
+    pub duress_on: bool,
+    /// Tries left the server last reported for a wrong PIN (memory only).
+    pub pin_left: Option<u32>,
 }
 
 impl App {
@@ -95,6 +142,15 @@ impl App {
             net_ok: None,
             last_activity: Instant::now(),
             attention: false,
+            info: false,
+            media_secret: aegis_core::random_bytes::<32>().unwrap_or([7; 32]),
+            key_alert: false,
+            key_reset_ask: false,
+            key_checked: None,
+            prekeys_due: Instant::now(),
+            pin_on: false,
+            duress_on: false,
+            pin_left: None,
         }
     }
 
@@ -103,6 +159,15 @@ impl App {
             .as_ref()
             .map_or(self.pre_lang, |s| s.data.settings.lang)
     }
+}
+
+const PREKEY_EVERY: Duration = Duration::from_secs(30 * 60);
+
+enum Resolved {
+    Known,
+    Held,
+    Dropped,
+    Stop,
 }
 
 pub enum Job {
@@ -121,6 +186,10 @@ pub enum Job {
         password: Zeroizing<String>,
     },
     AddContact(String),
+    AcceptRequest {
+        x: String,
+        username: String,
+    },
     Send {
         chat: ChatRef,
         text: String,
@@ -128,6 +197,25 @@ pub enum Job {
     Retry {
         chat: ChatRef,
         id: String,
+    },
+    PickMedia(ChatRef),
+    SendMedia {
+        chat: ChatRef,
+        path: PathBuf,
+    },
+    CreateChannel {
+        title: String,
+        about: String,
+        members: Vec<String>,
+    },
+    InviteChannel {
+        channel: String,
+        members: Vec<String>,
+    },
+    SaveProfile {
+        display: String,
+        about: String,
+        particles: String,
     },
     CreateGroup {
         title: String,
@@ -140,8 +228,19 @@ pub enum Job {
     TestConnection {
         endpoint: String,
         socks5: String,
+        tor: bool,
     },
     UpdateDisplay(String),
+    PinSet {
+        pin: Zeroizing<String>,
+        confirm: Zeroizing<String>,
+    },
+    PinRemove(Zeroizing<String>),
+    DuressSet {
+        pin: Zeroizing<String>,
+        duress: Zeroizing<String>,
+    },
+    DuressClear,
     Export(String),
     DeleteAccount(String),
     Flush,
@@ -161,12 +260,22 @@ enum Flow {
     Stop,
 }
 
+/// One frame ready to post: the tag the caller knows it by, the sealed frame, whether the
+/// vault must be saved first, and a key distribution to note once it is out.
+type Step = (Option<String>, Result<Outbound, Failure>, bool, Option<(String, [u8; 16], String)>);
+
 pub struct Engine {
     cfg: Config,
     app: Mutex<App>,
     save_lock: Mutex<()>,
     on_change: Box<dyn Fn() + Send + Sync>,
+    /// Mirror of `App::key_alert` that can be read while the app lock is held.
+    key_alert: AtomicBool,
     kick: Mutex<Option<Sender<()>>>,
+    /// The window is on screen (not minimized). Cover traffic runs only then.
+    visible: AtomicBool,
+    /// Real requests wait here for their cover-traffic slot.
+    pub gate: cover::Gate,
 }
 
 impl core::fmt::Debug for Engine {
@@ -184,6 +293,36 @@ fn io_failure(e: &std::io::Error) -> Failure {
 
 fn identity_of(s: &Session) -> Identity {
     Identity::from_secrets(*s.data.x_sk, *s.data.ed_sk)
+}
+
+const TOR_DEFAULT: &str = "127.0.0.1:9050";
+
+/// 0 off, 1 standard, 2 high.
+pub fn cover_level(s: &str) -> u8 {
+    match s {
+        "off" => 0,
+        "high" => 2,
+        _ => 1,
+    }
+}
+
+/// True when something accepts connections at `addr` (host:port).
+fn proxy_up(addr: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    addr.to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .is_some_and(|sa| {
+            std::net::TcpStream::connect_timeout(&sa, Duration::from_millis(600)).is_ok()
+        })
+}
+
+/// Looks for a local Tor proxy: the daemon (9050) or Tor Browser (9150).
+fn detect_tor() -> Option<String> {
+    [TOR_DEFAULT, "127.0.0.1:9150"]
+        .into_iter()
+        .find(|a| proxy_up(a))
+        .map(str::to_owned)
 }
 
 fn valid_socks(s: &str) -> bool {
@@ -206,7 +345,10 @@ impl Engine {
             app: Mutex::new(App::new()),
             save_lock: Mutex::new(()),
             on_change: Box::new(on_change),
+            key_alert: AtomicBool::new(false),
             kick: Mutex::new(None),
+            visible: AtomicBool::new(true),
+            gate: cover::Gate::default(),
         })
     }
 
@@ -279,9 +421,106 @@ impl Engine {
         std::mem::take(&mut self.app().attention)
     }
 
+    /// A client on the sealed transport with the pinned server key. It does not touch the
+    /// network, so it is safe to call while the app lock is held.
     fn client_for(&self, s: &Settings) -> Result<Client, Failure> {
-        let socks = (!s.socks5.is_empty()).then_some(s.socks5.as_str());
-        Ok(Client::new(&s.endpoint, socks)?.with_pow_bits(self.cfg.pow_bits))
+        if self.key_alert.load(Ordering::SeqCst) {
+            return Err(Failure::new("err.server_key_changed"));
+        }
+        if s.tor && s.socks5.is_empty() {
+            return Err(Failure::new("err.tor_down"));
+        }
+        let Some(key) = s.pinned_key() else {
+            return Err(Failure::new("err.server_key_unset"));
+        };
+        Ok(Client::new(&s.endpoint, s.proxy())?
+            .with_pow_bits(self.cfg.pow_bits)
+            .with_server_key(key))
+    }
+
+    /// Forgets the pinned key after the user confirmed twice; the next check pins whatever
+    /// the server shows then.
+    pub fn reset_server_key(&self) {
+        let mut app = self.app();
+        if !app.key_alert || !app.key_reset_ask {
+            return;
+        }
+        if let Some(s) = app.session.as_mut() {
+            s.data.settings.server_key = None;
+            s.data.settings.server_key_for.clear();
+            s.dirty = true;
+        }
+        app.key_alert = false;
+        app.key_reset_ask = false;
+        app.key_checked = None;
+        app.prekeys_due = Instant::now();
+        self.key_alert.store(false, Ordering::SeqCst);
+        drop(app);
+        self.kick_poll();
+        self.changed();
+    }
+
+    /// Stops all network traffic and shows the blocking screen.
+    fn raise_key_alert(&self) {
+        self.key_alert.store(true, Ordering::SeqCst);
+        self.app().key_alert = true;
+        self.changed();
+    }
+
+    /// Fetches the server key. The first key seen for an endpoint is pinned in `st`; a
+    /// different key later is a hard stop.
+    fn pin_key(&self, st: &mut Settings) -> Result<(), Failure> {
+        let known = st.pinned_key();
+        let client = Client::new(&st.endpoint, st.proxy())?
+            .with_pow_bits(self.cfg.pow_bits)
+            .with_pinned_server_key(known)
+            .map_err(|e| {
+                if matches!(e, Error::ServerKeyChanged) {
+                    self.raise_key_alert();
+                }
+                Failure::from(e)
+            })?;
+        if known.is_none() {
+            st.server_key = client.server_key();
+            st.server_key_for.clone_from(&st.endpoint);
+        }
+        Ok(())
+    }
+
+    /// Compares the server key with the pinned one, pinning it on first use. Network errors
+    /// are ignored here; the next poll tries again.
+    pub(crate) fn verify_server_key(&self) {
+        let (epoch, mut st) = {
+            let app = self.app();
+            match app.session.as_ref() {
+                Some(s) => (app.epoch, s.data.settings.clone()),
+                None => return,
+            }
+        };
+        let had = st.pinned_key().is_some();
+        let ok = self.pin_key(&mut st).is_ok();
+        if ok {
+            self.app().key_checked = Some(Instant::now());
+        }
+        if ok && !had {
+            self.live(epoch, |s| {
+                if s.data.settings.endpoint == st.endpoint {
+                    s.data.settings.server_key = st.server_key;
+                    s.data.settings.server_key_for.clone_from(&st.server_key_for);
+                    s.dirty = true;
+                }
+            });
+        }
+    }
+
+    /// True when the pinned key is missing or has not been compared for a while.
+    fn key_check_due(&self) -> bool {
+        let app = self.app();
+        let Some(s) = app.session.as_ref() else {
+            return false;
+        };
+        s.data.settings.pinned_key().is_none()
+            || app.key_checked.is_none_or(|t| t.elapsed() > KEY_RECHECK)
     }
 
     fn install(&self, s: Session) {
@@ -291,11 +530,14 @@ impl Engine {
             app.epoch += 1;
             app.route = Route::Welcome;
             app.dialog = None;
+            app.info = false;
             app.flash = None;
             app.conn = None;
             app.net_ok = None;
             app.last_activity = Instant::now();
+            app.key_checked = None;
         }
+        self.refresh_pin();
         self.kick_poll();
     }
 
@@ -311,6 +553,10 @@ impl Engine {
         app.flash = None;
         app.conn = None;
         app.busy = None;
+        app.key_alert = false;
+        app.key_reset_ask = false;
+        app.key_checked = None;
+        self.key_alert.store(false, Ordering::SeqCst);
         s
     }
 
@@ -332,7 +578,9 @@ impl Engine {
         let plain = s.snapshot()?;
         let enc = vault_encrypt(&s.password, self.cfg.vault_params, &plain)?;
         std::fs::create_dir_all(&self.cfg.data_dir).map_err(|e| io_failure(&e))?;
-        write_atomic(&self.vault_path(&s.data.username), &enc)?;
+        let path = self.vault_path(&s.data.username);
+        write_atomic(&path, &enc)?;
+        pin::sync_meta(&path, &s.data.settings);
         s.dirty = false;
         Ok(())
     }
@@ -340,13 +588,14 @@ impl Engine {
     /// Saves the live session if it changed.
     pub fn flush(&self) -> Result<(), Failure> {
         let _g = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let (plain, pw, epoch, path) = {
+        let (plain, pw, epoch, path, st) = {
             let mut app = self.app();
             let epoch = app.epoch;
             let Some(s) = app.session.as_mut() else {
                 return Ok(());
             };
             if !s.dirty {
+                s.dirty = false;
                 return Ok(());
             }
             s.dirty = false;
@@ -362,6 +611,7 @@ impl Engine {
                 s.password.clone(),
                 epoch,
                 self.vault_path(&s.data.username),
+                s.data.settings.clone(),
             )
         };
         let result = vault_encrypt(&pw, self.cfg.vault_params, &plain).and_then(|enc| {
@@ -380,6 +630,8 @@ impl Engine {
         });
         if result.is_err() {
             self.live(epoch, |s| s.dirty = true);
+        } else {
+            pin::sync_meta(&path, &st);
         }
         result.map_err(Failure::from)
     }
@@ -415,6 +667,9 @@ impl Engine {
             .endpoint
             .clone_from(&self.cfg.default_endpoint);
         let identity = identity_of(&s);
+        let mut st = s.data.settings.clone();
+        self.pin_key(&mut st)?;
+        s.data.settings = st;
         s.dirty = true;
         self.write_session(&mut s)?;
         let registered = self
@@ -428,15 +683,20 @@ impl Engine {
         Ok(())
     }
 
+    /// `secret` is the password, or the PIN when one is set for this account. A password has
+    /// at least ten characters and a PIN is four or six digits, so the two never overlap.
     pub fn unlock(&self, username: &str, password: &str) -> Result<(), Failure> {
         let u = normalize_username(username)?;
         let path = self.vault_path(&u);
+        if aegis_core::pin::is_valid_pin(password) && pin::side(&path, "pin").exists() {
+            return self.pin_unlock(&u, &path, password);
+        }
         let bytes = read_vault_file(&path)?;
         let data = decode_vault(password, &bytes)?;
         if data.username != u {
             return Err(Failure::new("err.vault_format"));
         }
-        self.install(Session::new(data, password));
+        self.install(Session::new(data, password)?);
         Ok(())
     }
 
@@ -453,8 +713,9 @@ impl Engine {
             return Err(Failure::new("err.exists"));
         }
         std::fs::create_dir_all(&self.cfg.data_dir).map_err(|e| io_failure(&e))?;
+        let s = Session::new(data, password)?;
         write_atomic(&dest, &bytes)?;
-        self.install(Session::new(data, password));
+        self.install(s);
         Ok(())
     }
 
@@ -487,6 +748,7 @@ impl Engine {
             return Err(Failure::new("err.confirm_name"));
         }
         let path = self.vault_path(&s.data.username);
+        let _ = std::fs::remove_dir_all(media::media_dir(&path));
         app.session = None;
         app.epoch += 1;
         app.route = Route::Welcome;
@@ -525,6 +787,7 @@ impl Engine {
         if !exists {
             let entry = client.lookup(&u)?.ok_or(Failure::new("err.not_found"))?;
             self.live(epoch, |s| s.add_contact(&entry, now_ms()));
+            self.send_profile_to(&client, &u);
         }
         let mut app = self.app();
         if app.epoch == epoch {
@@ -539,27 +802,27 @@ impl Engine {
         text: &str,
         retry_id: Option<&str>,
     ) -> Result<(), Failure> {
-        let (epoch, client, id, out) = {
+        let (epoch, client, id, out): (u64, Client, String, Sendable) = {
             let mut app = self.app();
             let epoch = app.epoch;
             let s = app.session.as_mut().ok_or(Failure::new("err.locked"))?;
             let client = self.client_for(&s.data.settings)?;
             let now = now_ms();
-            let (id, out) = match chat {
-                ChatRef::Dm(u) => s.prepare_dm(u, text, retry_id, now)?,
-                ChatRef::Group(g) => s.prepare_group_msg(g, text, retry_id, now)?,
-            };
+            let (id, out) = s.prepare_send(chat, Payload::Text(text.to_owned()), retry_id, now)?;
             (epoch, client, id, out)
         };
         self.changed();
-        let res = client.send(&out.queue, &out.padded);
+        let res = self
+            .deliver(epoch, &client, vec![(id.clone(), out)])
+            .pop()
+            .map_or(Ok(()), |(_, r)| r);
         let state = if res.is_ok() {
             MsgState::Sent
         } else {
             MsgState::Failed
         };
         self.live(epoch, |s| s.set_msg_state(chat, &id, state));
-        res.map(|_| ()).map_err(Failure::from)
+        res
     }
 
     pub fn retry(&self, chat: &ChatRef, id: &str) -> Result<(), Failure> {
@@ -582,9 +845,9 @@ impl Engine {
             (epoch, client, gid, invites)
         };
         self.changed();
-        let failed = send_all(&client, invites);
+        let failed = self.deliver_drafts(epoch, &client, invites);
         self.kick_poll();
-        let _ = (epoch, gid);
+        let _ = gid;
         if failed.is_empty() {
             Ok(())
         } else {
@@ -600,14 +863,15 @@ impl Engine {
     }
 
     pub fn resend_invite(&self, group: &str, member: &str) -> Result<(), Failure> {
-        let (client, out) = {
+        let (epoch, client, d) = {
             let app = self.app();
             let s = app.session.as_ref().ok_or(Failure::new("err.locked"))?;
             let client = self.client_for(&s.data.settings)?;
-            (client, s.invite_frame(group, member, now_ms())?)
+            (app.epoch, client, s.invite_frame(group, member, now_ms())?)
         };
-        client.send(&out.queue, &out.padded)?;
-        Ok(())
+        self.deliver(epoch, &client, vec![(member.to_owned(), Sendable::Draft(d))])
+            .pop()
+            .map_or(Ok(()), |(_, r)| r)
     }
 
     pub fn update_display(&self, name: &str) -> Result<(), Failure> {
@@ -633,38 +897,80 @@ impl Engine {
         Ok(())
     }
 
-    pub fn test_connection(&self, endpoint: &str, socks5: &str) -> Result<(), Failure> {
-        let socks = (!socks5.is_empty()).then_some(socks5);
-        if socks.is_some_and(|s| !valid_socks(s)) {
+    pub fn test_connection(&self, endpoint: &str, socks5: &str, tor: bool) -> Result<(), Failure> {
+        let mut socks = socks5.to_owned();
+        if tor {
+            if socks.is_empty() {
+                socks = detect_tor().ok_or(Failure::new("err.tor_down"))?;
+            } else if !proxy_up(&socks) {
+                return Err(Failure::new("err.tor_down"));
+            }
+        }
+        if !socks.is_empty() && !valid_socks(&socks) {
             return Err(Failure::new("err.socks"));
         }
-        let client = Client::new(endpoint, socks)?;
+        let known = {
+            let app = self.app();
+            app.session
+                .as_ref()
+                .filter(|s| s.data.settings.endpoint == endpoint)
+                .and_then(|s| s.data.settings.pinned_key())
+        };
+        let proxy = (!socks.is_empty()).then_some(socks.as_str());
+        let client = Client::new(endpoint, proxy)?
+            .with_pinned_server_key(known)
+            .map_err(|e| {
+                if known.is_some() && matches!(e, Error::ServerKeyChanged) {
+                    self.raise_key_alert();
+                }
+                Failure::from(e)
+            })?;
         client.health()?;
         Ok(())
     }
 
-    pub fn apply_settings(
+    /// Saves the connection settings: server, proxy, Tor and cover traffic.
+    pub fn apply_connection(
         &self,
         endpoint: &str,
         socks5: &str,
-        idle_min: u32,
-        flash_taskbar: bool,
+        tor: bool,
+        cover: &str,
     ) -> Result<(), Failure> {
         let endpoint = endpoint.trim().trim_end_matches('/').to_owned();
-        let socks5 = socks5.trim().to_owned();
+        let mut socks5 = socks5.trim().to_owned();
         aegis_core::net::Endpoint::parse(&endpoint)?;
+        if tor && socks5.is_empty() {
+            socks5 = detect_tor().unwrap_or_else(|| TOR_DEFAULT.to_owned());
+        }
         if !socks5.is_empty() && !valid_socks(&socks5) {
             return Err(Failure::new("err.socks"));
         }
+        let cover = cover_level(cover);
+        self.mutate(|s| {
+            let st = &mut s.data.settings;
+            if st.endpoint != endpoint {
+                st.server_key = None;
+                st.server_key_for.clear();
+            }
+            st.endpoint = endpoint;
+            st.socks5 = socks5;
+            st.tor = tor;
+            st.cover = cover;
+        })
+        .ok_or(Failure::new("err.locked"))?;
+        self.app().key_checked = None;
+        self.kick_poll();
+        Ok(())
+    }
+
+    pub fn apply_privacy(&self, idle_min: u32, protect: bool) -> Result<(), Failure> {
         if idle_min > 24 * 60 {
             return Err(Failure::new("err.generic"));
         }
         self.mutate(|s| {
-            let st = &mut s.data.settings;
-            st.endpoint = endpoint;
-            st.socks5 = socks5;
-            st.idle_min = idle_min;
-            st.flash_taskbar = flash_taskbar;
+            s.data.settings.idle_min = idle_min;
+            s.data.settings.protect = protect;
         })
         .ok_or(Failure::new("err.locked"))
     }
@@ -694,18 +1000,20 @@ impl Engine {
             .is_some_and(|s| s.data.settings.flash_taskbar);
         match outcome {
             Outcome::Added(r) => {
+                let muted = app.session.as_ref().is_some_and(|s| s.is_muted(r));
                 if route == Route::Chat(r.clone()) {
                     if let Some(s) = app.session.as_mut() {
                         s.mark_read(r);
                     }
                 }
+                app.attention |= flash && !muted;
+                true
+            }
+            Outcome::GroupJoined(_) | Outcome::ChannelJoined(_) => {
                 app.attention |= flash;
                 true
             }
-            Outcome::GroupJoined(_) => {
-                app.attention |= flash;
-                true
-            }
+            Outcome::Profile(_) => true,
             Outcome::KeyChanged(_) => true,
             Outcome::Dropped => false,
         }
@@ -715,13 +1023,19 @@ impl Engine {
         let Ok(frame) = pad::unpad(padded) else {
             return (Flow::Next, false);
         };
+        if frame.first() == Some(&0x03) {
+            return self.handle_session_frame(epoch, client, &frame, true);
+        }
         let opened = match self.live(epoch, |s| open_dm(&s.data.x_sk, &frame)) {
             None => return (Flow::Stop, false),
             Some(Err(_)) => return (Flow::Next, false),
             Some(Ok(o)) => o,
         };
         let env = opened.envelope;
-        if !matches!(env.kind, Kind::Dm | Kind::Ginv) {
+        if !matches!(
+            env.kind,
+            Kind::Dm | Kind::Dmf | Kind::Ginv | Kind::Cinv | Kind::Prof
+        ) {
             return (Flow::Next, false);
         }
         let known = self.live(epoch, |s| {
@@ -742,13 +1056,483 @@ impl Engine {
             },
         };
         let sender_x = opened.sender_x_pk;
+        let mut media = None;
+        let mut env = env;
+        if env.kind == Kind::Dmf {
+            let ok = self.live(epoch, |s| s.inbox_plausible(&env, sender_x, entry.as_ref()));
+            match ok {
+                None => return (Flow::Stop, false),
+                Some(false) => return (Flow::Next, false),
+                Some(true) => {}
+            }
+            match self.with_media(epoch, client, env) {
+                Ok((e, m)) => {
+                    env = e;
+                    media = m;
+                }
+                Err(f) => return (f, false),
+            }
+        }
         let outcome = self.live(epoch, |s| {
-            s.accept_inbox(env, sender_x, entry.as_ref(), now_ms())
+            s.accept_inbox(env, sender_x, entry.as_ref(), media, now_ms())
         });
         match outcome {
             None => (Flow::Stop, false),
             Some(o) => (Flow::Next, self.note_outcome(epoch, &o)),
         }
+    }
+
+    /// Seals one draft on its pairwise session, taking the contact's prekeys when no session
+    /// exists yet.
+    fn seal(&self, epoch: u64, client: &Client, d: &Draft) -> Result<Outbound, Failure> {
+        for round in 0..2 {
+            match self.live(epoch, |s| s.seal_draft(d, now_s())) {
+                None => return Err(Failure::new("err.locked")),
+                Some(Ok(o)) => return Ok(o),
+                Some(Err(Need::Fail(f))) => return Err(f),
+                Some(Err(Need::Prekeys)) => {
+                    if round == 1 {
+                        return Err(Failure::new("err.needs_update"));
+                    }
+                    let Some(b) = client.prekeys_take(&d.to)? else {
+                        return Err(Failure::new("err.needs_update"));
+                    };
+                    match self.live(epoch, |s| s.begin_session(&d.to, &b, now_s())) {
+                        None => return Err(Failure::new("err.locked")),
+                        Some(Err(_)) => return Err(Failure::new("err.needs_update")),
+                        Some(Ok(())) => {}
+                    }
+                }
+            }
+        }
+        Err(Failure::new("err.needs_update"))
+    }
+
+    /// Seals every draft, saves the vault once, and only then posts. A session frame never
+    /// leaves before the ratchet state that produced it is on disk.
+    pub(super) fn deliver(
+        &self,
+        epoch: u64,
+        client: &Client,
+        items: Vec<(String, Sendable)>,
+    ) -> Vec<(String, Result<(), Failure>)> {
+        // (tag, sealed frame, needs the vault saved first, key distribution to note once sent)
+        let mut ready: Vec<Step> = Vec::new();
+        for (tag, it) in items {
+            match it {
+                Sendable::Frame(o) => ready.push((Some(tag), Ok(o), false, None)),
+                Sendable::Draft(d) => {
+                    let r = self.seal(epoch, client, &d);
+                    ready.push((Some(tag), r, true, None));
+                }
+                Sendable::Chain(cd) => match self.live(epoch, |s| s.seal_chain(&cd, now_s())) {
+                    None => ready.push((Some(tag), Err(Failure::new("err.locked")), false, None)),
+                    Some(Err(f)) => ready.push((Some(tag), Err(f), false, None)),
+                    Some(Ok(cs)) => {
+                        // Members without the chain get it first, through their sessions.
+                        for d in cs.skeys {
+                            let to = d.to.clone();
+                            let r = self.seal(epoch, client, &d);
+                            ready.push((None, r, true, Some((cd.id.clone(), cs.chain_id, to))));
+                        }
+                        ready.push((Some(tag), Ok(cs.out), true, None));
+                    }
+                },
+            }
+        }
+        let saved = if ready.iter().any(|(_, r, d, _)| *d && r.is_ok()) {
+            self.flush()
+        } else {
+            Ok(())
+        };
+        let mut out = Vec::new();
+        for (tag, r, draft, given) in ready {
+            let r = match (r, draft, &saved) {
+                (Ok(_), true, Err(f)) => Err(f.clone()),
+                (Ok(o), _, _) => {
+                    self.slot(o.padded.len());
+                    client
+                        .send(&o.queue, &o.padded)
+                        .map(|_| ())
+                        .map_err(Failure::from)
+                }
+                (Err(f), _, _) => Err(f),
+            };
+            if let (Ok(()), Some((id, chain_id, user))) = (&r, given) {
+                self.live(epoch, |s| s.mark_given(&id, chain_id, &[user]));
+            }
+            if let Some(tag) = tag {
+                out.push((tag, r));
+            }
+        }
+        out
+    }
+
+    /// Tags of the drafts that could not be sent.
+    pub(super) fn deliver_drafts(
+        &self,
+        epoch: u64,
+        client: &Client,
+        items: Vec<(String, Draft)>,
+    ) -> Vec<String> {
+        let items = items
+            .into_iter()
+            .map(|(t, d)| (t, Sendable::Draft(d)))
+            .collect();
+        self.deliver(epoch, client, items)
+            .into_iter()
+            .filter_map(|(t, r)| r.err().map(|_| t))
+            .collect()
+    }
+
+    /// Tops up the one-time prekeys on the server. At most two uploads per call.
+    fn refill_prekeys(&self, epoch: u64, client: &Client) {
+        {
+            let mut app = self.app();
+            if app.epoch != epoch || Instant::now() < app.prekeys_due {
+                return;
+            }
+            app.prekeys_due = Instant::now() + Duration::from_secs(60);
+        }
+        let mut hint: Option<usize> = None;
+        for _ in 0..2 {
+            let put = match self.live(epoch, |s| s.prekey_request(hint, now_s())) {
+                Some(Ok(p)) => p,
+                _ => return,
+            };
+            if self.flush().is_err() {
+                return;
+            }
+            let Ok(n) = client.prekeys_put(&put) else {
+                return;
+            };
+            if hint.is_some() || aegis_core::x3dh::opks_needed(n) == 0 {
+                break;
+            }
+            hint = Some(n);
+        }
+        self.app().prekeys_due = Instant::now() + PREKEY_EVERY;
+    }
+
+    /// Retries messages whose attachment could not be fetched earlier.
+    fn retry_deferred(&self, epoch: u64, client: &Client) -> bool {
+        let Some(list) = self.live(epoch, |s| s.take_deferred()) else {
+            return false;
+        };
+        let mut hit = false;
+        for (kind, contact, env) in list {
+            let h = match kind.as_str() {
+                "g" | "c" => self.process_chain_env(epoch, client, &contact, env).1,
+                _ => self.process_session_env(epoch, client, &contact, env).1,
+            };
+            hit |= h;
+        }
+        hit
+    }
+
+    /// Opens a type 0x03 frame and applies what the session layer asks for.
+    fn handle_session_frame(
+        &self,
+        epoch: u64,
+        client: &Client,
+        frame: &[u8],
+        may_lookup: bool,
+    ) -> (Flow, bool) {
+        let received = match self.live(epoch, |s| s.session_receive(frame, now_s())) {
+            None => return (Flow::Stop, false),
+            Some(Err(_)) => return (Flow::Next, false),
+            Some(Ok(r)) => r,
+        };
+        let mut hit = false;
+        let mut lookup: Option<[u8; 32]> = None;
+        for a in &received.actions {
+            match a {
+                Action::UndecryptableNotice { contact } => {
+                    let o = self.live(epoch, |s| s.note_undecryptable(contact, now_ms()));
+                    if let Some(o) = o {
+                        hit |= self.note_outcome(epoch, &o);
+                    }
+                }
+                Action::LookupSender { x_pk } => lookup = Some(*x_pk),
+                // The session is marked as needing a start; the next send takes prekeys.
+                Action::NeedsPrekeysFetch { .. } | Action::StartNewSession { .. } => {}
+            }
+        }
+        if let Some(x) = lookup {
+            if !may_lookup {
+                return (Flow::Next, hit);
+            }
+            return match self.resolve_sender(epoch, client, x, frame) {
+                Resolved::Known => {
+                    let (f, h) = self.handle_session_frame(epoch, client, frame, false);
+                    (f, h || hit)
+                }
+                Resolved::Held => (Flow::Next, true),
+                Resolved::Dropped => (Flow::Next, hit),
+                Resolved::Stop => (Flow::Stop, hit),
+            };
+        }
+        if let (Some(contact), Some(env)) = (received.contact, received.envelope) {
+            let (f, h) = self.process_session_env(epoch, client, &contact, env);
+            return (f, h || hit);
+        }
+        (Flow::Next, hit)
+    }
+
+    /// Finds out who wrote with an unknown key. The directory is asked about people we share
+    /// a group or channel with, and only a username whose published key is exactly this one
+    /// is accepted. Anything else waits as a request for the user to decide.
+    fn resolve_sender(&self, epoch: u64, client: &Client, x: [u8; 32], frame: &[u8]) -> Resolved {
+        let Some(cands) = self.live(epoch, |s| {
+            if s.is_blocked(&x) {
+                None
+            } else {
+                Some(s.sender_candidates(8))
+            }
+        }) else {
+            return Resolved::Stop;
+        };
+        let Some(cands) = cands else {
+            return Resolved::Dropped;
+        };
+        for u in cands {
+            if let Ok(Some(e)) = client.lookup(&u) {
+                if e.u == u && e.x == x {
+                    let added = self.live(epoch, |s| {
+                        if s.data.contacts.contains_key(&u) {
+                            false
+                        } else {
+                            s.add_contact(&e, now_ms());
+                            true
+                        }
+                    });
+                    return match added {
+                        None => Resolved::Stop,
+                        Some(true) => Resolved::Known,
+                        Some(false) => Resolved::Dropped,
+                    };
+                }
+            }
+        }
+        match self.live(epoch, |s| s.add_pending(x, frame, now_ms())) {
+            None => Resolved::Stop,
+            Some(()) => Resolved::Held,
+        }
+    }
+
+    /// A sender key from `contact`: store it, then open what was waiting for it.
+    fn process_skey(
+        &self,
+        epoch: u64,
+        client: &Client,
+        contact: &str,
+        env: Envelope,
+    ) -> (Flow, bool) {
+        let id = env.group_id.clone();
+        let Some(accepted) = self.live(epoch, |s| s.accept_skey(contact, &env, now_s()).is_ok())
+        else {
+            return (Flow::Stop, false);
+        };
+        if !accepted {
+            return (Flow::Next, false);
+        }
+        let held = self.live(epoch, |s| s.take_held(&id)).unwrap_or_default();
+        let mut hit = false;
+        for f in held {
+            let (flow, h) = self.handle_chain_frame(epoch, client, &id, &f);
+            hit |= h;
+            if matches!(flow, Flow::Stop) {
+                return (Flow::Stop, hit);
+            }
+        }
+        (Flow::Next, hit)
+    }
+
+    /// Opens a type 0x05 frame of a group or channel. A frame whose chain has not arrived
+    /// yet is kept until the sender key shows up.
+    fn handle_chain_frame(
+        &self,
+        epoch: u64,
+        client: &Client,
+        id: &str,
+        frame: &[u8],
+    ) -> (Flow, bool) {
+        let rx = self.live(epoch, |s| s.chain_decrypt(id, frame, now_s()));
+        match rx {
+            None => (Flow::Stop, false),
+            Some(ChainRx::Bad) => (Flow::Next, false),
+            Some(ChainRx::Unknown) => {
+                self.live(epoch, |s| s.hold_frame(id, frame));
+                (Flow::Next, false)
+            }
+            // The ratchet has moved: whatever happens next, this message must not be lost.
+            Some(ChainRx::Env(env)) => self.process_chain_env(epoch, client, id, *env),
+        }
+    }
+
+    /// Applies a message that was opened on a sender chain.
+    fn process_chain_env(
+        &self,
+        epoch: u64,
+        client: &Client,
+        id: &str,
+        env: Envelope,
+    ) -> (Flow, bool) {
+        let group = self.live(epoch, |s| {
+            if s.data.groups.contains_key(id) {
+                Some(true)
+            } else if s.data.channels.contains_key(id) {
+                Some(false)
+            } else {
+                None
+            }
+        });
+        let is_group = match group {
+            None => return (Flow::Stop, false),
+            Some(None) => return (Flow::Next, false),
+            Some(Some(g)) => g,
+        };
+        let (kind_ok, tag) = if is_group {
+            (matches!(env.kind, Kind::Gmsg | Kind::Gmf), "g")
+        } else {
+            (matches!(env.kind, Kind::Cmsg | Kind::Cmf), "c")
+        };
+        if !kind_ok || env.group_id != id {
+            return (Flow::Next, false);
+        }
+        let fresh = self.live(epoch, |s| {
+            !s.seen.contains(&env.msg_id)
+                && env.sender != s.data.username
+                && if is_group {
+                    s.group_plausible(&env, None)
+                        && s.data.groups.get(id).is_some_and(|g| g.members.contains(&env.sender))
+                } else {
+                    true
+                }
+        });
+        match fresh {
+            None => return (Flow::Stop, false),
+            Some(false) => return (Flow::Next, false),
+            Some(true) => {}
+        }
+        let kept = env.clone();
+        let (env, media) = match self.with_media(epoch, client, env) {
+            Ok(v) => v,
+            Err(Flow::Retry) => {
+                self.live(epoch, |s| s.defer_env(tag, id, &kept));
+                return (Flow::Next, false);
+            }
+            Err(f) => return (f, false),
+        };
+        let outcome = self.live(epoch, |s| {
+            if is_group {
+                s.accept_group_msg(id, env, None, media, now_ms())
+            } else {
+                s.accept_channel_post(id, env, media, now_ms())
+            }
+        });
+        match outcome {
+            None => (Flow::Stop, false),
+            Some(o) => (Flow::Next, self.note_outcome(epoch, &o)),
+        }
+    }
+
+    /// Applies a message that came through a session from a known contact.
+    fn process_session_env(
+        &self,
+        epoch: u64,
+        client: &Client,
+        contact: &str,
+        env: Envelope,
+    ) -> (Flow, bool) {
+        let cx = self.live(epoch, |s| s.data.contacts.get(contact).map(|c| c.x));
+        let cx = match cx {
+            None => return (Flow::Stop, false),
+            Some(None) => return (Flow::Next, false),
+            Some(Some(x)) => x,
+        };
+        if env.kind == Kind::Skey {
+            return self.process_skey(epoch, client, contact, env);
+        }
+        if env.sender != contact
+            || !matches!(
+                env.kind,
+                Kind::Dm | Kind::Dmf | Kind::Ginv | Kind::Cinv | Kind::Prof
+            )
+        {
+            return (Flow::Next, false);
+        }
+        let mut env = env;
+        let mut media = None;
+        if env.kind == Kind::Dmf {
+            match self.live(epoch, |s| s.inbox_plausible(&env, cx, None)) {
+                None => return (Flow::Stop, false),
+                Some(false) => return (Flow::Next, false),
+                Some(true) => {}
+            }
+            let kept = env.clone();
+            match self.with_media(epoch, client, env) {
+                Ok((e, m)) => {
+                    env = e;
+                    media = m;
+                }
+                Err(Flow::Retry) => {
+                    self.live(epoch, |s| s.defer_env("", contact, &kept));
+                    return (Flow::Next, false);
+                }
+                Err(f) => return (f, false),
+            }
+        }
+        let outcome = self.live(epoch, |s| s.accept_inbox(env, cx, None, media, now_ms()));
+        match outcome {
+            None => (Flow::Stop, false),
+            Some(o) => (Flow::Next, self.note_outcome(epoch, &o)),
+        }
+    }
+
+    /// The user accepted a waiting request as `username`; the directory must agree.
+    pub fn accept_request(&self, x_hex: &str, username: &str) -> Result<(), Failure> {
+        let x: [u8; 32] =
+            aegis_core::hex::decode_array(x_hex).map_err(|_| Failure::new("err.generic"))?;
+        let u = normalize_username(username)?;
+        let (epoch, client) = {
+            let app = self.app();
+            let s = app.session.as_ref().ok_or(Failure::new("err.locked"))?;
+            (app.epoch, self.client_for(&s.data.settings)?)
+        };
+        let e = client.lookup(&u)?.ok_or(Failure::new("err.not_found"))?;
+        if e.u != u || e.x != x {
+            return Err(Failure::new("err.request_mismatch"));
+        }
+        let pend = self
+            .live(epoch, |s| {
+                if s.data.contacts.contains_key(&u) {
+                    return Err(Failure::new("err.request_mismatch"));
+                }
+                s.add_contact(&e, now_ms());
+                Ok(s.take_pending(&x))
+            })
+            .ok_or(Failure::new("err.locked"))??;
+        if let Some(p) = pend {
+            for h in p.frames {
+                if let Ok(f) = aegis_core::hex::decode(&h) {
+                    let _ = self.handle_session_frame(epoch, &client, &f, false);
+                }
+            }
+        }
+        self.live(epoch, |s| s.dirty = true);
+        self.changed();
+        Ok(())
+    }
+
+    /// The user blocked a waiting request: its frames are dropped and the key is ignored.
+    pub fn block_request(&self, x_hex: &str) -> Result<(), Failure> {
+        let x: [u8; 32] =
+            aegis_core::hex::decode_array(x_hex).map_err(|_| Failure::new("err.generic"))?;
+        self.mutate(|s| s.block_key(x))
+            .ok_or(Failure::new("err.locked"))?;
+        self.changed();
+        Ok(())
     }
 
     fn handle_group_frame(
@@ -761,11 +1545,14 @@ impl Engine {
         let Ok(frame) = pad::unpad(padded) else {
             return (Flow::Next, false);
         };
+        if frame.first() == Some(&0x05) {
+            return self.handle_chain_frame(epoch, client, gid, &frame);
+        }
         let decoded = self.live(epoch, |s| {
             let g = s.data.groups.get(gid)?;
             let env = group_decrypt(&g.key, &frame).ok()?;
             if env.group_id != g.id
-                || env.kind != Kind::Gmsg
+                || !matches!(env.kind, Kind::Gmsg | Kind::Gmf)
                 || env.sender == s.data.username
                 || !g.members.contains(&env.sender)
                 || s.seen.contains(&env.msg_id)
@@ -788,8 +1575,25 @@ impl Engine {
                 Ok(Some(e)) => Some(e),
             }
         };
+        let mut media = None;
+        let mut env = env;
+        if env.kind == Kind::Gmf {
+            let ok = self.live(epoch, |s| s.group_plausible(&env, entry.as_ref()));
+            match ok {
+                None => return (Flow::Stop, false),
+                Some(false) => return (Flow::Next, false),
+                Some(true) => {}
+            }
+            match self.with_media(epoch, client, env) {
+                Ok((e, m)) => {
+                    env = e;
+                    media = m;
+                }
+                Err(f) => return (f, false),
+            }
+        }
         let outcome = self.live(epoch, |s| {
-            s.accept_group_msg(gid, env, entry.as_ref(), now_ms())
+            s.accept_group_msg(gid, env, entry.as_ref(), media, now_ms())
         });
         match outcome {
             None => (Flow::Stop, false),
@@ -800,6 +1604,12 @@ impl Engine {
     /// Fetches new frames from the inbox and every group queue. Returns the
     /// number of frames that changed local state.
     pub fn poll_once(&self) -> usize {
+        if self.key_alert.load(Ordering::SeqCst) {
+            return 0;
+        }
+        if self.key_check_due() {
+            self.verify_server_key();
+        }
         let (epoch, client, inbox, mut cursor, groups) = {
             let app = self.app();
             let Some(s) = app.session.as_ref() else {
@@ -818,6 +1628,10 @@ impl Engine {
         };
         let mut applied = 0usize;
         let mut reached = true;
+        self.refill_prekeys(epoch, &client);
+        if self.retry_deferred(epoch, &client) {
+            applied += 1;
+        }
 
         'inbox: for _ in 0..POLL_PAGES {
             let page = match client.poll(&inbox, cursor) {
@@ -884,7 +1698,12 @@ impl Engine {
             }
         }
 
+        if !self.poll_channels(epoch, &client, &mut reached, &mut applied) {
+            return applied;
+        }
+
         self.live(epoch, |s| s.sweep(now_ms()));
+        self.gc_media(epoch);
         self.app().net_ok = Some(reached);
         let _ = self.flush();
         self.changed();
@@ -946,11 +1765,22 @@ impl Engine {
             Job::Unlock { username, password } => {
                 self.set_busy(Some("busy.unlock"));
                 let r = self.unlock(&username, &password);
+                if r.is_ok() {
+                    self.verify_server_key();
+                }
                 self.finish(r.map(|()| None));
             }
             Job::Import { path, password } => {
                 self.set_busy(Some("busy.unlock"));
                 let r = self.import_vault(&path, &password);
+                if r.is_ok() {
+                    self.verify_server_key();
+                }
+                self.finish(r.map(|()| None));
+            }
+            Job::AcceptRequest { x, username } => {
+                self.set_busy(Some("busy.lookup"));
+                let r = self.accept_request(&x, &username);
                 self.finish(r.map(|()| None));
             }
             Job::AddContact(u) => {
@@ -966,6 +1796,37 @@ impl Engine {
                 let r = self.retry(&chat, &id);
                 self.finish(r.map(|()| None));
             }
+            Job::PickMedia(chat) => {
+                let r = self.pick_and_send(&chat);
+                self.finish(r.map(|()| None));
+            }
+            Job::SendMedia { chat, path } => {
+                let r = self.send_media(&chat, &path);
+                self.finish(r.map(|()| None));
+            }
+            Job::CreateChannel {
+                title,
+                about,
+                members,
+            } => {
+                self.set_busy(Some("busy.group"));
+                let r = self.create_channel(&title, &about, &members);
+                self.kick_poll();
+                self.finish(r.map(|()| None));
+            }
+            Job::InviteChannel { channel, members } => {
+                let r = self.invite_channel(&channel, &members);
+                self.finish(r.map(|()| Some(("ok.invite_sent", String::new()))));
+            }
+            Job::SaveProfile {
+                display,
+                about,
+                particles,
+            } => {
+                self.set_busy(Some("busy.profile"));
+                let r = self.save_profile(&display, &about, &particles);
+                self.finish(r.map(|()| Some(("ok.saved", String::new()))));
+            }
             Job::CreateGroup { title, members } => {
                 self.set_busy(Some("busy.group"));
                 let r = self.create_group(&title, &members);
@@ -975,10 +1836,18 @@ impl Engine {
                 let r = self.resend_invite(&group, &member);
                 self.finish(r.map(|()| Some(("ok.invite_sent", format!("@{member}")))));
             }
-            Job::TestConnection { endpoint, socks5 } => {
+            Job::TestConnection {
+                endpoint,
+                socks5,
+                tor,
+            } => {
                 self.app().conn = Some(ConnTest::Running);
                 self.changed();
-                let r = self.test_connection(endpoint.trim().trim_end_matches('/'), socks5.trim());
+                let r = self.test_connection(
+                    endpoint.trim().trim_end_matches('/'),
+                    socks5.trim(),
+                    tor,
+                );
                 self.app().conn = Some(match r {
                     Ok(()) => ConnTest::Reachable,
                     Err(f) => ConnTest::Failed(f),
@@ -989,6 +1858,25 @@ impl Engine {
                 self.set_busy(Some("busy.profile"));
                 let r = self.update_display(&name);
                 self.finish(r.map(|()| Some(("ok.saved", String::new()))));
+            }
+            Job::PinSet { pin, confirm } => {
+                self.set_busy(Some("busy.pin"));
+                let r = self.pin_set(&pin, &confirm);
+                self.finish(r.map(|()| Some(("ok.pin_set", String::new()))));
+            }
+            Job::PinRemove(pin) => {
+                self.set_busy(Some("busy.pin"));
+                let r = self.pin_remove(&pin);
+                self.finish(r.map(|()| Some(("ok.pin_removed", String::new()))));
+            }
+            Job::DuressSet { pin, duress } => {
+                self.set_busy(Some("busy.pin"));
+                let r = self.duress_set(&pin, &duress);
+                self.finish(r.map(|()| Some(("ok.duress_set", String::new()))));
+            }
+            Job::DuressClear => {
+                let r = self.duress_clear();
+                self.finish(r.map(|()| Some(("ok.duress_cleared", String::new()))));
             }
             Job::Export(path) => {
                 let r = self.export_vault(&path);
@@ -1009,12 +1897,6 @@ impl Engine {
     }
 }
 
-fn send_all(client: &Client, items: Vec<(String, Outbound)>) -> Vec<String> {
-    items
-        .into_iter()
-        .filter_map(|(member, out)| client.send(&out.queue, &out.padded).err().map(|_| member))
-        .collect()
-}
 
 fn read_vault_file(path: &Path) -> Result<Vec<u8>, Failure> {
     let meta = std::fs::metadata(path).map_err(|e| {
@@ -1043,5 +1925,55 @@ fn decode_vault(password: &str, bytes: &[u8]) -> Result<Data, Failure> {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socks_addresses() {
+        assert!(valid_socks("127.0.0.1:9050"));
+        assert!(valid_socks("localhost:9150"));
+        assert!(!valid_socks("127.0.0.1"));
+        assert!(!valid_socks("127.0.0.1:0"));
+        assert!(!valid_socks("bad host:9050"));
+    }
+
+    #[test]
+    fn cover_levels() {
+        assert_eq!(cover_level("off"), 0);
+        assert_eq!(cover_level("std"), 1);
+        assert_eq!(cover_level("high"), 2);
+        assert_eq!(cover_level("anything"), 1);
+    }
+
+    #[test]
+    fn pinned_key_belongs_to_its_endpoint() {
+        let mut st = Settings::new(Lang::En);
+        assert!(st.pinned_key().is_none());
+        st.server_key = Some([3; 32]);
+        st.server_key_for = "https://a.example".into();
+        st.endpoint = "https://a.example".into();
+        assert_eq!(st.pinned_key(), Some([3; 32]));
+        st.endpoint = "https://b.example".into();
+        assert!(st.pinned_key().is_none());
+    }
+
+    #[test]
+    fn client_needs_a_pinned_key_and_tor_needs_a_proxy() {
+        let e = Engine::new(Config::production(std::env::temp_dir()), || {});
+        let mut st = Settings::new(Lang::En);
+        st.endpoint = "http://127.0.0.1:9".into();
+        assert_eq!(e.client_for(&st).err().map(|f| f.key), Some("err.server_key_unset"));
+        st.server_key = Some([1; 32]);
+        st.server_key_for = st.endpoint.clone();
+        assert!(e.client_for(&st).is_ok());
+        st.tor = true;
+        assert_eq!(e.client_for(&st).err().map(|f| f.key), Some("err.tor_down"));
+        st.tor = false;
+        e.key_alert.store(true, Ordering::SeqCst);
+        assert_eq!(e.client_for(&st).err().map(|f| f.key), Some("err.server_key_changed"));
     }
 }

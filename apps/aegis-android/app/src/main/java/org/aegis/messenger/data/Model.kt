@@ -3,6 +3,8 @@ package org.aegis.messenger.data
 import org.aegis.messenger.core.AegisException
 import org.aegis.messenger.core.Hex
 import org.aegis.messenger.core.Json
+import org.aegis.messenger.core.MediaKind
+import org.aegis.messenger.core.Particles
 import org.aegis.messenger.core.QueueIds
 import org.aegis.messenger.core.Text
 
@@ -13,7 +15,10 @@ object Status {
     const val FAILED = 2
 }
 
-class Message(
+/** A stored attachment: [file] is the name under the encrypted media directory. */
+class Media(val file: String, val kind: MediaKind, val width: Long, val height: Long, val durationMs: Long, val desc: String = "")
+
+data class Message(
     val id: String,
     val outgoing: Boolean,
     val sender: String,
@@ -24,9 +29,10 @@ class Message(
     val ttlS: Long,
     val body: String,
     val status: Int = Status.SENT,
+    val media: Media? = null,
 )
 
-class Contact(
+data class Contact(
     val username: String,
     val title: String,
     val x: ByteArray,
@@ -37,24 +43,47 @@ class Contact(
     val pendingX: ByteArray? = null,
     val pendingEd: ByteArray? = null,
     val ttlS: Long = 0,
+    /** Profile card received from the contact (spec section 22). */
+    val about: String = "",
+    val particles: Particles = Particles.None,
+    val cardName: String = "",
+    val cardTs: Long = 0,
 )
 
-class Group(
+data class Group(
     val id: String,
     val secret: ByteArray,
     val name: String,
     val members: List<String>,
     val ttlS: Long = 0,
+    /** Who made the group; only this member can remove others. Empty for groups saved before this field. */
+    val creator: String = "",
 ) {
     val queueHex: String get() = Hex.encode(QueueIds.group(secret))
 }
 
-class Chat(
+/** A channel (spec section 15). [official] marks the built-in channel of section 19. */
+class Channel(
+    val id: String,
+    val secret: ByteArray,
+    val name: String,
+    val owner: String,
+    val ownerEd: ByteArray,
+    val official: Boolean = false,
+) {
+    fun mine(me: String) = !official && owner == me
+}
+
+class ChatPrefs(val pinned: Boolean = false, val muted: Boolean = false)
+
+class OwnProfile(val name: String = "", val about: String = "", val particles: Particles = Particles.None)
+
+data class Chat(
     val messages: List<Message> = emptyList(),
     val unread: Int = 0,
 )
 
-class Settings(
+data class Settings(
     val endpoint: String = org.aegis.messenger.net.Endpoint.DEFAULT,
     /** "host:port" of a SOCKS5 proxy, empty for a direct connection. */
     val proxy: String = "",
@@ -72,19 +101,28 @@ class VaultData(
     val registered: Boolean = false,
     val contacts: List<Contact> = emptyList(),
     val groups: List<Group> = emptyList(),
-    /** Keys are "dm:<username>" or "g:<group id>". */
+    /** Keys are "dm:<username>", "g:<group id>" or "c:<channel id>". */
     val chats: Map<String, Chat> = emptyMap(),
     val seen: List<String> = emptyList(),
     /** Last polled sequence per queue hex. */
     val cursors: Map<String, Long> = emptyMap(),
     val settings: Settings = Settings(),
+    val channels: List<Channel> = emptyList(),
+    val prefs: Map<String, ChatPrefs> = emptyMap(),
+    val profile: OwnProfile = OwnProfile(),
+    /** Key for attachments at rest (spec section 13). */
+    val mediaKey: ByteArray = org.aegis.messenger.core.Crypto.randomBytes(32),
+    /** Pinned owner key of the official channel; null until first seen (spec section 19). */
+    val officialOwnerEd: ByteArray? = null,
+    val fs: FsState = FsState(),
 ) {
     fun contact(u: String): Contact? = contacts.firstOrNull { it.username == u }
     fun group(id: String): Group? = groups.firstOrNull { it.id == id }
+    fun channel(id: String): Channel? = channels.firstOrNull { it.id == id }
     fun chat(key: String): Chat = chats[key] ?: Chat()
+    fun pref(key: String): ChatPrefs = prefs[key] ?: ChatPrefs()
 
-    fun withContact(c: Contact): VaultData =
-        VaultData(username, xSk, edSk, registered, contacts.filter { it.username != c.username } + c, groups, chats, seen, cursors, settings)
+    fun withContact(c: Contact): VaultData = copy(contacts = contacts.filter { it.username != c.username } + c)
 
     fun copy(
         registered: Boolean = this.registered,
@@ -94,19 +132,29 @@ class VaultData(
         seen: List<String> = this.seen,
         cursors: Map<String, Long> = this.cursors,
         settings: Settings = this.settings,
-    ) = VaultData(username, xSk, edSk, registered, contacts, groups, chats, seen, cursors, settings)
+        channels: List<Channel> = this.channels,
+        prefs: Map<String, ChatPrefs> = this.prefs,
+        profile: OwnProfile = this.profile,
+        officialOwnerEd: ByteArray? = this.officialOwnerEd,
+    ) = VaultData(
+        username, xSk, edSk, registered, contacts, groups, chats, seen, cursors, settings,
+        channels, prefs, profile, mediaKey, officialOwnerEd, fs,
+    )
 
     fun withChat(key: String, c: Chat): VaultData = copy(chats = chats + (key to c))
 
     fun wipe() {
         xSk.fill(0)
         edSk.fill(0)
+        mediaKey.fill(0)
         groups.forEach { it.secret.fill(0) }
+        channels.forEach { it.secret.fill(0) }
     }
 }
 
 fun dmKey(username: String) = "dm:$username"
 fun groupKey(id: String) = "g:$id"
+fun channelKey(id: String) = "c:$id"
 
 /** JSON (de)serialisation of the vault payload. */
 object VaultCodec {
@@ -125,10 +173,11 @@ object VaultCodec {
                 "verified" to c.verified, "key_changed" to c.keyChanged,
                 "px" to c.pendingX?.let { Hex.encode(it) }, "ped" to c.pendingEd?.let { Hex.encode(it) },
                 "ttl" to c.ttlS,
+                "about" to c.about, "particles" to c.particles.wire, "card_name" to c.cardName, "card_ts" to c.cardTs,
             )
         }
         m["groups"] = v.groups.map { g ->
-            mapOf("id" to g.id, "key" to Hex.encode(g.secret), "name" to g.name, "members" to g.members, "ttl" to g.ttlS)
+            mapOf("id" to g.id, "key" to Hex.encode(g.secret), "name" to g.name, "members" to g.members, "ttl" to g.ttlS, "creator" to g.creator)
         }
         m["chats"] = v.chats.mapValues { (_, c) ->
             mapOf(
@@ -137,6 +186,12 @@ object VaultCodec {
                     mapOf(
                         "id" to x.id, "out" to x.outgoing, "s" to x.sender, "sn" to x.senderName, "ts" to x.tsMs,
                         "base" to x.baseMs, "ttl" to x.ttlS, "b" to x.body, "st" to x.status.toLong(),
+                        "media" to x.media?.let { md ->
+                            mapOf(
+                                "file" to md.file, "kind" to md.kind.wire, "w" to md.width, "h" to md.height,
+                                "dur" to md.durationMs, "desc" to md.desc,
+                            )
+                        },
                     )
                 },
             )
@@ -149,6 +204,17 @@ object VaultCodec {
             "idle" to s.idleLockMin.toLong(), "bg" to s.backgroundLockMin.toLong(),
             "poll" to s.pollSeconds.toLong(), "notify" to s.notifications,
         )
+        m["channels"] = v.channels.map { c ->
+            mapOf(
+                "id" to c.id, "key" to Hex.encode(c.secret), "name" to c.name, "owner" to c.owner,
+                "owner_ed" to Hex.encode(c.ownerEd), "official" to c.official,
+            )
+        }
+        m["prefs"] = v.prefs.mapValues { (_, p) -> mapOf("pin" to p.pinned, "mute" to p.muted) }
+        m["profile"] = mapOf("name" to v.profile.name, "about" to v.profile.about, "particles" to v.profile.particles.wire)
+        m["media_key"] = Hex.encode(v.mediaKey)
+        m["official_owner_ed"] = v.officialOwnerEd?.let { Hex.encode(it) }
+        m["fs"] = v.fs.toJson()
         return Text.utf8(Json.write(m))
     }
 
@@ -168,10 +234,14 @@ object VaultCodec {
                     (it["px"] as String?)?.let { h -> Hex.decodeFixed(h, 32) },
                     (it["ped"] as String?)?.let { h -> Hex.decodeFixed(h, 32) },
                     lng(it, "ttl"),
+                    (it["about"] as String?) ?: "",
+                    (it["particles"] as String?)?.let { p -> Particles.parse(p) } ?: Particles.None,
+                    (it["card_name"] as String?) ?: "",
+                    (it["card_ts"] as Long?) ?: 0,
                 )
             }
             val groups = list(m, "groups").map {
-                Group(str(it, "id"), Hex.decodeFixed(str(it, "key"), 32), str(it, "name"), (it["members"] as List<String>), lng(it, "ttl"))
+                Group(str(it, "id"), Hex.decodeFixed(str(it, "key"), 32), str(it, "name"), (it["members"] as List<String>), lng(it, "ttl"), (it["creator"] as String?) ?: "")
             }
             val chats = (m["chats"] as Map<String, Map<String, Any?>>).mapValues { (_, c) ->
                 Chat(
@@ -179,6 +249,12 @@ object VaultCodec {
                         Message(
                             str(it, "id"), bool(it, "out"), str(it, "s"), str(it, "sn"), lng(it, "ts"), lng(it, "base"),
                             lng(it, "ttl"), str(it, "b"), lng(it, "st").toInt(),
+                            (it["media"] as Map<String, Any?>?)?.let { md ->
+                                Media(
+                                    str(md, "file"), MediaKind.parse(str(md, "kind")), lng(md, "w"), lng(md, "h"),
+                                    lng(md, "dur"), (md["desc"] as String?) ?: "",
+                                )
+                            },
                         )
                     },
                     lng(c, "unread").toInt(),
@@ -189,10 +265,25 @@ object VaultCodec {
                 str(st, "endpoint"), str(st, "proxy"), str(st, "name"), lng(st, "idle").toInt(), lng(st, "bg").toInt(),
                 lng(st, "poll").toInt(), bool(st, "notify"),
             )
+            val channels = ((m["channels"] as List<Map<String, Any?>>?) ?: emptyList()).map {
+                Channel(
+                    str(it, "id"), Hex.decodeFixed(str(it, "key"), 32), str(it, "name"), str(it, "owner"),
+                    Hex.decodeFixed(str(it, "owner_ed"), 32), bool(it, "official"),
+                )
+            }
+            val prefs = ((m["prefs"] as Map<String, Map<String, Any?>>?) ?: emptyMap())
+                .mapValues { (_, p) -> ChatPrefs(bool(p, "pin"), bool(p, "mute")) }
+            val pr = (m["profile"] as Map<String, Any?>?)?.let {
+                OwnProfile(str(it, "name"), str(it, "about"), Particles.parse(str(it, "particles")))
+            } ?: OwnProfile()
+            val mediaKey = (m["media_key"] as String?)?.let { Hex.decodeFixed(it, 32) }
+                ?: org.aegis.messenger.core.Crypto.randomBytes(32)
+            val officialEd = (m["official_owner_ed"] as String?)?.let { Hex.decodeFixed(it, 32) }
             return VaultData(
                 str(m, "username"), Hex.decodeFixed(str(m, "x_sk"), 32), Hex.decodeFixed(str(m, "ed_sk"), 32),
                 bool(m, "registered"), contacts, groups, chats, (m["seen"] as List<String>),
                 (m["cursors"] as Map<String, Long>), settings,
+                channels, prefs, pr, mediaKey, officialEd, FsState.fromJson(m["fs"] as Map<String, Any?>?),
             )
         } catch (e: AegisException) {
             throw e

@@ -1,12 +1,34 @@
 package org.aegis.messenger.core
 
 enum class Kind(val wire: String) {
-    Dm("dm"), Ginv("ginv"), Gmsg("gmsg");
+    Dm("dm"), Ginv("ginv"), Gmsg("gmsg"), Dmf("dmf"), Gmf("gmf"),
+    Cinv("cinv"), Cmsg("cmsg"), Cmf("cmf"), Prof("prof"), Skey("skey");
+
+    /** Frame type that carries this kind: 0x01 sealed, 0x02 group or channel queue. */
+    val frameType: Byte
+        get() = when (this) {
+            Dm, Ginv, Dmf, Cinv, Prof, Skey -> 0x01
+            Gmsg, Gmf, Cmsg, Cmf -> 0x02
+        }
 
     companion object {
         fun parse(s: String): Kind = values().firstOrNull { it.wire == s }
             ?: throw AegisException.InvalidEnvelope("type")
     }
+}
+
+/** Parses the skey body hex(chain_id) ":" n (spec section 28). */
+fun parseSkeyBody(body: String): Pair<ByteArray, Long> {
+    val i = body.indexOf(':')
+    if (i < 0) throw AegisException.InvalidEnvelope("skey body")
+    val id = body.substring(0, i)
+    val n = body.substring(i + 1)
+    if (!Hex.isHexLen(id, 16) || n.isEmpty() || n.length > 10 || (n.length > 1 && n[0] == '0') || !n.all { it in '0'..'9' }) {
+        throw AegisException.InvalidEnvelope("skey body")
+    }
+    val v = n.toLong()
+    if (v > 0xFFFFFFFFL) throw AegisException.InvalidEnvelope("skey body")
+    return Hex.decode(id) to v
 }
 
 /** The plaintext inside every frame (spec section 5). */
@@ -31,14 +53,27 @@ class Envelope(
         if (senderEd.size != 32) throw AegisException.InvalidEnvelope("sender_ed")
         if (tsMs < 0 || ttlS < 0) throw AegisException.InvalidEnvelope("number")
         when (kind) {
-            Kind.Dm -> if (groupId.isNotEmpty() || groupKey != null || members.isNotEmpty()) {
+            Kind.Dm, Kind.Dmf, Kind.Prof -> if (groupId.isNotEmpty() || groupKey != null || members.isNotEmpty()) {
                 throw AegisException.InvalidEnvelope("dm carries group fields")
             }
-            Kind.Gmsg -> {
+            Kind.Gmsg, Kind.Gmf, Kind.Cmsg, Kind.Cmf -> {
                 if (!Hex.isHexLen(groupId, 32)) throw AegisException.InvalidEnvelope("group_id")
                 if (groupKey != null || members.isNotEmpty()) {
                     throw AegisException.InvalidEnvelope("gmsg carries invite fields")
                 }
+            }
+            Kind.Skey -> {
+                if (!Hex.isHexLen(groupId, 32) || groupKey?.size != 32 || members.isNotEmpty()) {
+                    throw AegisException.InvalidEnvelope("skey fields")
+                }
+                parseSkeyBody(body)
+            }
+            Kind.Cinv -> {
+                val key = groupKey ?: throw AegisException.InvalidEnvelope("group_key")
+                if (key.size != 32 || groupId != Channel.channelId(key)) {
+                    throw AegisException.InvalidEnvelope("group_id does not match group_key")
+                }
+                if (members.isNotEmpty()) throw AegisException.InvalidEnvelope("cinv carries members")
             }
             Kind.Ginv -> {
                 val key = groupKey ?: throw AegisException.InvalidEnvelope("group_key")
@@ -65,7 +100,7 @@ class Envelope(
     }
 
     companion object {
-        const val MAX_MEMBERS = 20
+        const val MAX_MEMBERS = 100
         private const val FIELDS = 12
 
         private fun dec(s: String): Long {

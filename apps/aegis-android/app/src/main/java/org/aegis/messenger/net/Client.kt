@@ -1,21 +1,36 @@
 package org.aegis.messenger.net
 
 import org.aegis.messenger.core.AegisException
+import org.aegis.messenger.core.Cover
 import org.aegis.messenger.core.Hex
 import org.aegis.messenger.core.Json
 import org.aegis.messenger.core.Pad
+import org.aegis.messenger.core.Pin
 import org.aegis.messenger.core.Pow
+import org.aegis.messenger.core.Prekeys
 import org.aegis.messenger.core.Registration
 import org.aegis.messenger.core.Text
+import org.aegis.messenger.core.X3dh
 
 class DirEntry(val u: String, val title: String, val x: ByteArray, val ed: ByteArray)
 
-class Polled(val frames: List<Pair<Long, ByteArray>>, val next: Long)
+class Polled(val frames: List<Pair<Long, ByteArray>>, val next: Long, val hasMore: Boolean = false)
+
+sealed class PinOpen {
+    class Ok(val s: ByteArray) : PinOpen()
+    class Wrong(val left: Int) : PinOpen()
+    object Gone : PinOpen()
+    object Throttled : PinOpen()
+}
 
 /** Blocking protocol v2 client. Call from a background thread only. */
 class Client(private val ep: Endpoint, private val transport: Transport) {
+    /** Called with (request body size, response body size) of real sends and polls; request size is -1 when there is none. */
+    @Volatile var observe: ((Int, Int) -> Unit)? = null
+
     companion object {
         const val POW_BITS = 18
+        const val MAX_POW_BITS = 28
         const val MAX_POLL = 100
         private const val FORM = "application/x-www-form-urlencoded"
         private const val PLAIN = "text/plain"
@@ -61,19 +76,112 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
         if (r.code != 200) throw AegisException.Http(r.code)
     }
 
+    /** The bits asked for by a 429 answer, within the allowed range, or null. */
+    private fun bitsWanted(r: Response): Int? {
+        if (r.code != 429) return null
+        return try {
+            val b = (Json.parseObject(String(r.body, Charsets.UTF_8))["bits"] as? Long)?.toInt()
+            b?.takeIf { it in POW_BITS + 1..MAX_POW_BITS }
+        } catch (e: Json.ParseException) {
+            null
+        } catch (e: ClassCastException) {
+            null
+        }
+    }
+
     fun send(queue: ByteArray, frame: ByteArray): Long {
         val body = Text.utf8(Hex.encode(Pad.pad(frame)))
         val q = Hex.encode(queue)
-        val ts = System.currentTimeMillis() / 1000
-        val pow = Pow.mine(q, ts, Pow.bodyHashHex(body), POW_BITS)
-        val r = transport.request(ep, "POST", "/api/v2/queue/send?q=$q&ts=$ts&pow=$pow", body, PLAIN)
+        var bits = POW_BITS
+        var r: Response
+        var tries = 0
+        do {
+            val ts = System.currentTimeMillis() / 1000
+            val pow = Pow.mine(q, ts, Pow.bodyHashHex(body), bits)
+            r = transport.request(ep, "POST", "/api/v2/queue/send?q=$q&ts=$ts&pow=$pow", body, PLAIN)
+            val more = if (tries == 0) bitsWanted(r) else null
+            if (more == null) break
+            bits = more
+            tries++
+        } while (true)
         if (r.code != 200) throw AegisException.Http(r.code)
+        observe?.invoke(body.size, r.body.size)
         return (obj(r)["seq"] as? Long) ?: throw AegisException.BadResponse()
+    }
+
+    /** Publishes prekeys (spec 27.1). Returns the number of one-time prekeys the server now holds. */
+    fun prekeysPut(form: String): Int {
+        val r = transport.request(ep, "POST", "/api/v2/prekeys/put", Text.utf8(form), FORM)
+        if (r.code != 200) throw AegisException.Http(r.code)
+        return ((obj(r)["opks"] as? Long) ?: throw AegisException.BadResponse()).toInt()
+    }
+
+    /** Fetches and consumes a prekey bundle. Null means the contact has none (they need to update). */
+    fun prekeysTake(u: String): X3dh.Bundle? {
+        val ts = System.currentTimeMillis() / 1000
+        val pow = Pow.mine(Prekeys.takeScope(u), ts, Prekeys.takeBodyHash(u, ts), POW_BITS)
+        val r = transport.request(ep, "POST", "/api/v2/prekeys/take", Text.utf8(Prekeys.takeForm(u, ts, pow)), FORM)
+        if (r.code == 404) return null
+        if (r.code != 200) throw AegisException.Http(r.code)
+        return X3dh.Bundle.fromJson(r.body)
+    }
+
+    /** Dummy request for cover traffic (spec section 26). The answer is ignored. */
+    fun nop(reqLen: Int, respLen: Int): Int {
+        val body = Cover.nopBody(reqLen, respLen)
+        val r = transport.request(ep, "POST", "/api/v2/nop", body, "application/octet-stream")
+        if (r.code != 200) throw AegisException.Http(r.code)
+        return r.body.size
+    }
+
+    private fun pinPost(path: String, slotHex: String, hashInput: String, fields: String): Response {
+        val ts = System.currentTimeMillis() / 1000
+        val pow = Pow.mine(Pin.powScope(slotHex), ts, Pow.bodyHashHex(Text.utf8(hashInput)), POW_BITS)
+        return transport.request(ep, "POST", path, Text.utf8("$fields&ts=$ts&pow=$pow"), FORM)
+    }
+
+    /** Stores S for a new PIN slot. An existing slot surfaces as Http(409). */
+    fun pinCreate(slot: ByteArray, verifier: ByteArray, s: ByteArray) {
+        val sl = Hex.encode(slot)
+        val v = Hex.encode(verifier)
+        val sh = Hex.encode(s)
+        val r = pinPost("/api/v2/pin/create", sl, Pin.createHashInput(sl, v, sh), "slot=$sl&v=$v&s=$sh")
+        if (r.code != 200) throw AegisException.Http(r.code)
+    }
+
+    fun pinOpen(slot: ByteArray, verifier: ByteArray): PinOpen {
+        val sl = Hex.encode(slot)
+        val v = Hex.encode(verifier)
+        var throttled = 0
+        while (true) {
+            val r = pinPost("/api/v2/pin/open", sl, Pin.openHashInput(sl, v), "slot=$sl&v=$v")
+            when (r.code) {
+                200 -> {
+                    val sHex = obj(r)["s"] as? String ?: throw AegisException.BadResponse()
+                    return try { PinOpen.Ok(Hex.decodeFixed(sHex, 32)) } catch (e: AegisException.InvalidHex) { throw AegisException.BadResponse() }
+                }
+                403 -> return PinOpen.Wrong(((obj(r)["left"] as? Long) ?: throw AegisException.BadResponse()).toInt())
+                404 -> return PinOpen.Gone
+                429 -> {
+                    if (++throttled > 2) return PinOpen.Throttled
+                    try { Thread.sleep(1100) } catch (e: InterruptedException) { return PinOpen.Throttled }
+                }
+                else -> throw AegisException.Http(r.code)
+            }
+        }
+    }
+
+    fun pinDelete(slot: ByteArray, verifier: ByteArray) {
+        val sl = Hex.encode(slot)
+        val v = Hex.encode(verifier)
+        val r = pinPost("/api/v2/pin/delete", sl, Pin.openHashInput(sl, v), "slot=$sl&v=$v")
+        if (r.code != 200 && r.code != 404) throw AegisException.Http(r.code)
     }
 
     fun poll(queue: ByteArray, after: Long): Polled {
         val r = transport.request(ep, "GET", "/api/v2/queue/poll?q=${Hex.encode(queue)}&after=$after", null, null)
         if (r.code != 200) throw AegisException.Http(r.code)
+        observe?.invoke(-1, r.body.size)
         val o = obj(r)
         val list = o["frames"] as? List<*> ?: throw AegisException.BadResponse()
         val next = o["next"] as? Long ?: throw AegisException.BadResponse()
@@ -90,6 +198,23 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
             out.add(seq to padded)
         }
         if (next != last) throw AegisException.BadResponse()
-        return Polled(out, next)
+        return Polled(out, next, o["has_more"] == true)
+    }
+
+    /** Uploads one encrypted chunk (spec section 14). A taken id surfaces as Http(409). */
+    fun blobPut(id: ByteArray, chunk: ByteArray) {
+        val hex = Hex.encode(id)
+        val ts = System.currentTimeMillis() / 1000
+        val pow = Pow.mine("blob:$hex", ts, Pow.bodyHashHex(chunk), POW_BITS)
+        val r = transport.request(ep, "POST", "/api/v2/blob/put?id=$hex&ts=$ts&pow=$pow", chunk, "application/octet-stream")
+        if (r.code != 200) throw AegisException.Http(r.code)
+    }
+
+    /** Returns null when the blob is unknown or expired. */
+    fun blobGet(id: ByteArray): ByteArray? {
+        val r = transport.request(ep, "GET", "/api/v2/blob/get?id=" + Hex.encode(id), null, null)
+        if (r.code == 404) return null
+        if (r.code != 200) throw AegisException.Http(r.code)
+        return r.body
     }
 }

@@ -1,6 +1,10 @@
 package org.aegis.messenger.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -124,9 +128,11 @@ fun ContactScreen(session: Session, d: VaultData, user: String, onBack: () -> Un
     var confirmClear by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<Int?>(null) }
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
-        TopBar("@" + c.username, c.title.ifBlank { null }, onBack = onBack)
-        Divider()
+        TopBar(stringResource(R.string.profile_title), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState())) {
+            ProfileHeader(c.ed, c.cardName.ifBlank { c.title.ifBlank { "@" + c.username } }, "@" + c.username, c.about, c.particles)
+            SharedMedia(session, d.chat(dmKey(c.username)).messages)
+            Divider()
             if (c.keyChanged) {
                 Banner(stringResource(R.string.key_changed_detail, c.username), Ui.warning) {
                     Row {
@@ -167,13 +173,20 @@ fun GroupInfoScreen(session: Session, d: VaultData, id: String, onBack: () -> Un
     if (g == null) { androidx.compose.runtime.LaunchedEffect(Unit) { onBack() }; return }
     var confirmLeave by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
+    var removing by remember { mutableStateOf<String?>(null) }
+    val mine = g.creator == d.username
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
-        TopBar(g.name, stringResource(R.string.members_count, g.members.size), onBack = onBack)
-        Divider()
+        TopBar(stringResource(R.string.profile_title), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState())) {
+            ProfileHeader(seedOf("g:" + g.id), g.name, stringResource(R.string.members_count, g.members.size), "", org.aegis.messenger.core.Particles.None)
+            SharedMedia(session, d.chat(groupKey(g.id)).messages)
+            Divider()
             Section(stringResource(R.string.members)) {
                 g.members.forEach { m ->
-                    Text(if (m == d.username) "@$m  (" + stringResource(R.string.you) + ")" else "@$m", color = Ui.text, fontFamily = GeistMono, modifier = Modifier.padding(vertical = 4.dp))
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (m == d.username) "@$m  (" + stringResource(R.string.you) + ")" else "@$m", color = Ui.text, fontFamily = GeistMono, modifier = Modifier.weight(1f).padding(vertical = 4.dp))
+                        if (mine && m != d.username && g.members.size > 2) TextButton({ removing = m }) { Text(stringResource(R.string.remove_member), color = Ui.danger) }
+                    }
                 }
                 Note(stringResource(R.string.group_trust_note))
             }
@@ -181,7 +194,7 @@ fun GroupInfoScreen(session: Session, d: VaultData, id: String, onBack: () -> Un
             TtlPicker(g.ttlS) { session.setChatTtl(groupKey(g.id), it) }
             Divider()
             Section(stringResource(R.string.group_actions)) {
-                Secondary(stringResource(R.string.resend_invites)) { session.resendInvites(g.id) }
+                if (mine || g.creator.isEmpty()) Secondary(stringResource(R.string.resend_invites)) { session.resendInvites(g.id) }
                 Secondary(stringResource(R.string.clear_history), danger = true) { confirmClear = true }
                 Secondary(stringResource(R.string.leave_group), danger = true) { confirmLeave = true }
                 Note(stringResource(R.string.leave_note))
@@ -192,8 +205,127 @@ fun GroupInfoScreen(session: Session, d: VaultData, id: String, onBack: () -> Un
         stringResource(R.string.clear_history), stringResource(R.string.clear_history_body), stringResource(R.string.delete),
         { session.deleteChatHistory(groupKey(g.id)); confirmClear = false }, { confirmClear = false },
     )
+    removing?.let { u ->
+        Confirm(
+            stringResource(R.string.remove_member_title, u), stringResource(R.string.remove_member_body), stringResource(R.string.remove),
+            { removing = null; session.removeMember(g.id, u) }, { removing = null },
+        )
+    }
     if (confirmLeave) Confirm(
         stringResource(R.string.leave_group), stringResource(R.string.leave_body), stringResource(R.string.leave),
         { confirmLeave = false; session.leaveGroup(g.id); onLeft() }, { confirmLeave = false },
+    )
+}
+
+@Composable
+fun ProfileHeader(seed: ByteArray, name: String, handle: String, about: String, particles: org.aegis.messenger.core.Particles) {
+    Box(Modifier.fillMaxWidth().height(200.dp).background(Ui.surface2)) {
+        ParticlesLayer(particles, Modifier.fillMaxSize())
+        Column(Modifier.align(Alignment.BottomStart).padding(16.dp)) {
+            AvatarView(seed, 88)
+            androidx.compose.foundation.layout.Spacer(Modifier.height(10.dp))
+            Text(name, style = MaterialTheme.typography.titleLarge, color = Ui.text)
+            Text(handle, style = MaterialTheme.typography.bodySmall.copy(fontFamily = GeistMono), color = Ui.muted)
+        }
+    }
+    if (about.isNotBlank()) Section(stringResource(R.string.field_about)) { Text(about, style = MaterialTheme.typography.bodyLarge, color = Ui.text) }
+}
+
+@Composable
+fun SharedMedia(session: Session, messages: List<org.aegis.messenger.data.Message>) {
+    val items = messages.filter { it.media != null }.takeLast(30).reversed()
+    if (items.isEmpty()) return
+    var open by remember { mutableStateOf<org.aegis.messenger.data.Media?>(null) }
+    Section(stringResource(R.string.shared_media)) {
+        items.chunked(3).forEach { row ->
+            Row(Modifier.fillMaxWidth().padding(bottom = 2.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                row.forEach { m -> MediaThumb(session, m.media!!, Modifier.weight(1f), square = true) { open = m.media } }
+                repeat(3 - row.size) { androidx.compose.foundation.layout.Spacer(Modifier.weight(1f)) }
+            }
+        }
+    }
+    open?.let { MediaViewer(session, it) { open = null } }
+}
+
+@Composable
+fun ContactsScreen(d: VaultData, onBack: () -> Unit, onOpen: (String) -> Unit) {
+    val sorted = d.contacts.sortedBy { it.username }
+    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        TopBar(stringResource(R.string.contacts), onBack = onBack)
+        Divider()
+        androidx.compose.foundation.lazy.LazyColumn {
+            items(sorted, key = { it.username }) { c ->
+                Row(Modifier.fillMaxWidth().clickable { onOpen(dmKey(c.username)) }.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AvatarView(c.ed, 44)
+                    Column(Modifier.padding(start = 12.dp)) {
+                        Text(c.title.ifBlank { "@" + c.username }, style = MaterialTheme.typography.titleMedium, color = Ui.text)
+                        Text("@" + c.username, style = MaterialTheme.typography.bodySmall.copy(fontFamily = GeistMono), color = Ui.muted)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun NewChannelScreen(session: Session, d: VaultData, onBack: () -> Unit, onOpen: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    val picked = remember { mutableStateListOf<String>() }
+    var error by remember { mutableStateOf<Int?>(null) }
+    val eligible = d.contacts.filter { !it.keyChanged }
+    Column(Modifier.fillMaxSize().imePadding().navigationBarsPadding()) {
+        TopBar(stringResource(R.string.new_channel), onBack = onBack)
+        Divider()
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
+            Field(name, { name = it; error = null }, stringResource(R.string.field_channel_name))
+            Text(stringResource(R.string.channel_pick, picked.size), style = MaterialTheme.typography.labelMedium, color = Ui.muted, modifier = Modifier.padding(top = 12.dp))
+            eligible.forEach { c ->
+                val on = c.username in picked
+                Row(
+                    Modifier.fillMaxWidth().clickable { if (on) picked.remove(c.username) else picked.add(c.username) }.padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(on, null, colors = CheckboxDefaults.colors(checkedColor = Ui.accent, uncheckedColor = Ui.muted, checkmarkColor = Ui.onAccent))
+                    Text("@" + c.username + if (c.title.isNotBlank()) "  " + c.title else "", color = Ui.text, fontFamily = GeistMono, modifier = Modifier.padding(start = 12.dp))
+                }
+            }
+            Note(stringResource(R.string.channel_note))
+            error?.let { Note(stringResource(it), Ui.danger) }
+            Primary(stringResource(R.string.channel_create), enabled = name.isNotBlank() && !session.busy) {
+                session.createChannel(name, picked.toList()) { id, e -> error = e; if (id != null) onOpen(org.aegis.messenger.data.channelKey(id)) }
+            }
+        }
+    }
+}
+
+@Composable
+fun ChannelInfoScreen(session: Session, d: VaultData, id: String, onBack: () -> Unit, onLeft: () -> Unit) {
+    val ch = d.channel(id)
+    if (ch == null) { androidx.compose.runtime.LaunchedEffect(Unit) { onBack() }; return }
+    val key = org.aegis.messenger.data.channelKey(ch.id)
+    var confirmLeave by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        TopBar(stringResource(R.string.profile_title), onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            ProfileHeader(
+                if (ch.official) ch.ownerEd else seedOf("c:" + ch.id), ch.name,
+                stringResource(if (ch.official) R.string.official_status else R.string.channel_status), "", org.aegis.messenger.core.Particles.None,
+            )
+            SharedMedia(session, d.chat(key).messages)
+            Divider()
+            Section(stringResource(R.string.group_actions)) {
+                Secondary(stringResource(R.string.clear_history), danger = true) { confirmClear = true }
+                if (!ch.official) Secondary(stringResource(R.string.delete), danger = true) { confirmLeave = true }
+            }
+        }
+    }
+    if (confirmClear) Confirm(
+        stringResource(R.string.clear_history), stringResource(R.string.clear_history_body), stringResource(R.string.delete),
+        { session.deleteChatHistory(key); confirmClear = false }, { confirmClear = false },
+    )
+    if (confirmLeave) Confirm(
+        stringResource(R.string.delete_chats_title), stringResource(R.string.delete_chats_body), stringResource(R.string.delete),
+        { confirmLeave = false; session.deleteChannel(ch.id); onLeft() }, { confirmLeave = false },
     )
 }

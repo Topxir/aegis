@@ -40,6 +40,24 @@ object Crypto {
         return out
     }
 
+    /** HKDF-SHA256 to [len] bytes; an empty [salt] means no salt. */
+    fun hkdfN(ikm: ByteArray, salt: ByteArray, info: ByteArray, len: Int): ByteArray {
+        val g = HKDFBytesGenerator(SHA256Digest())
+        g.init(HKDFParameters(ikm, if (salt.isEmpty()) null else salt, info))
+        val out = ByteArray(len)
+        g.generateBytes(out, 0, len)
+        return out
+    }
+
+    fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
+        val m = org.bouncycastle.crypto.macs.HMac(SHA256Digest())
+        m.init(KeyParameter(key))
+        m.update(data, 0, data.size)
+        val out = ByteArray(32)
+        m.doFinal(out, 0)
+        return out
+    }
+
     fun aeadSeal(key: ByteArray, nonce: ByteArray, aad: ByteArray, pt: ByteArray): ByteArray {
         val c = ChaCha20Poly1305()
         c.init(true, AEADParameters(KeyParameter(key), 128, nonce, aad))
@@ -94,8 +112,31 @@ object Crypto {
         return s.generateSignature()
     }
 
+    private val P25519 = java.math.BigInteger.ONE.shiftLeft(255).subtract(java.math.BigInteger.valueOf(19))
+    private val GROUP_L = java.math.BigInteger("7237005577332262213973186563042994240857116359379907606001950938285454250989")
+    private val ORDER8_Y = java.math.BigInteger("7a03ac9277fdc74ec6cc392cfa53202a0f67100d760b3cba4fd84d3d706a17c7", 16)
+    private val SMALL_ORDER_Y = setOf(
+        java.math.BigInteger.ZERO, java.math.BigInteger.ONE, P25519.subtract(java.math.BigInteger.ONE),
+        ORDER8_Y, P25519.subtract(ORDER8_Y),
+    )
+
+    private fun leToBig(b: ByteArray, off: Int, len: Int): java.math.BigInteger {
+        val r = ByteArray(len)
+        for (i in 0 until len) r[len - 1 - i] = b[off + i]
+        return java.math.BigInteger(1, r)
+    }
+
+    /** True for the eight points of order dividing 8, in any encoding (sign bit ignored, y reduced mod p). */
+    fun isSmallOrder(enc: ByteArray, off: Int = 0): Boolean {
+        val y = leToBig(enc, off, 32).clearBit(255).mod(P25519)
+        return y in SMALL_ORDER_Y
+    }
+
+    /** Ed25519 with the strictness of Rust verify_strict: S canonical, A and R not small order. */
     fun ed25519Verify(pk: ByteArray, msg: ByteArray, sig: ByteArray): Boolean {
         if (pk.size != 32 || sig.size != 64) return false
+        if (isSmallOrder(pk) || isSmallOrder(sig, 0)) return false
+        if (leToBig(sig, 32, 32) >= GROUP_L) return false
         return try {
             val s = Ed25519Signer()
             s.init(false, Ed25519PublicKeyParameters(pk, 0))

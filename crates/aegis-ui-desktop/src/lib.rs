@@ -7,6 +7,7 @@ pub mod controller;
 pub mod engine;
 pub mod i18n;
 pub mod ipc;
+pub mod media;
 pub mod model;
 pub mod render;
 pub mod session;

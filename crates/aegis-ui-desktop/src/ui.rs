@@ -4,8 +4,10 @@
 use crate::assets::{lookup, CSP};
 use crate::config::Config;
 use crate::controller::Controller;
-use crate::engine::{Engine, Job};
+use crate::engine::cover;
+use crate::engine::{Engine, Job, Route};
 use crate::ipc;
+use crate::media;
 use crate::render;
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,7 +47,47 @@ fn respond(
         .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..])))
 }
 
-fn serve(req: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
+/// Answers `/media/<id>` for photos and videos kept in the encrypted store.
+fn media_response(r: media::Reply) -> Response<Cow<'static, [u8]>> {
+    let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::NOT_FOUND);
+    let mut b = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, r.mime)
+        .header("Content-Security-Policy", CSP)
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Referrer-Policy", "no-referrer")
+        .header("Cache-Control", "no-store")
+        .header("Accept-Ranges", "bytes");
+    if let Some(cr) = r.content_range {
+        b = b.header("Content-Range", cr);
+    }
+    b.body(Cow::Owned(r.body))
+        .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..])))
+}
+
+pub fn serve_media(
+    engine: &Engine,
+    req: &Request<Vec<u8>>,
+) -> Option<Response<Cow<'static, [u8]>>> {
+    let sid = req.uri().path().strip_prefix("/media/")?;
+    if req.method() != wry::http::Method::GET {
+        return Some(respond(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "text/plain",
+            Cow::Borrowed(b""),
+        ));
+    }
+    let range = req
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok());
+    Some(media_response(engine.media_reply(sid, range)))
+}
+
+fn serve(engine: &Engine, req: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
+    if let Some(r) = serve_media(engine, req) {
+        return r;
+    }
     if req.method() != wry::http::Method::GET {
         return respond(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -97,21 +139,43 @@ pub fn run(cfg: Config) -> Result<(), String> {
     let poll_engine = Arc::clone(&engine);
     let poll_ctl = ctl.clone();
     std::thread::spawn(move || {
+        let t0 = Instant::now();
+        let ms = move || u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut cover = cover::Driver::new();
         let mut next = Instant::now() + Duration::from_secs(5);
         loop {
-            match kick_rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(()) => next = Instant::now(),
-                Err(RecvTimeoutError::Timeout) => {}
+            let kicked = match kick_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(()) => true,
+                Err(RecvTimeoutError::Timeout) => false,
                 Err(RecvTimeoutError::Disconnected) => break,
-            }
+            };
             if poll_engine.idle_expired() {
                 poll_ctl.lock();
             }
-            if Instant::now() >= next {
-                poll_engine.poll_once();
-                next = Instant::now() + Duration::from_millis(5000 + jitter_ms());
-            } else {
-                poll_engine.sweep();
+            // While cover traffic runs, its slots decide when to poll and when to send a dummy.
+            let active = poll_engine.cover_active();
+            poll_engine.gate.set_on(active.is_some_and(|l| l > 0));
+            let queued = poll_engine.gate.queued();
+            let sizes = poll_engine.gate.take_sizes();
+            match cover.step(ms(), active.is_some(), active.unwrap_or(0), queued, &sizes) {
+                cover::Step::Plain => {
+                    if kicked {
+                        next = Instant::now();
+                    }
+                    if Instant::now() >= next {
+                        poll_engine.poll_once();
+                        next = Instant::now() + Duration::from_millis(5000 + jitter_ms());
+                    } else {
+                        poll_engine.sweep();
+                    }
+                }
+                cover::Step::Wait => poll_engine.sweep(),
+                cover::Step::Real => poll_engine.gate.grant(),
+                cover::Step::Poll => {
+                    poll_engine.poll_once();
+                    next = Instant::now() + Duration::from_millis(5000 + jitter_ms());
+                }
+                cover::Step::Dummy { req_len, resp_len } => poll_engine.send_dummy(req_len, resp_len),
             }
         }
     });
@@ -122,16 +186,37 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .with_min_inner_size(LogicalSize::new(560.0, 420.0))
         .build(&event_loop)
         .map_err(|e| format!("window: {e}"))?;
+    window.set_content_protection(true);
 
     let mut context = WebContext::new(Some(web_dir));
     let ipc_ctl = ctl.clone();
+    let media_engine = Arc::clone(&engine);
+    let drop_engine = Arc::clone(&engine);
+    let drop_jobs = jobs_tx.clone();
     let builder = WebViewBuilder::new_with_web_context(&mut context)
         .with_https_scheme(true)
         .with_incognito(true)
         .with_devtools(cfg!(debug_assertions))
         .with_browser_accelerator_keys(false)
         .with_default_context_menus(false)
-        .with_custom_protocol("aegis".into(), |_, req| serve(&req))
+        .with_custom_protocol("aegis".into(), move |_, req| serve(&media_engine, &req))
+        .with_drag_drop_handler(move |ev| {
+            if let wry::DragDropEvent::Drop { paths, .. } = ev {
+                let chat = match &drop_engine.app().route {
+                    Route::Chat(r) => Some(r.clone()),
+                    _ => None,
+                };
+                if let Some(chat) = chat {
+                    for path in paths.into_iter().take(4) {
+                        let _ = drop_jobs.send(Job::SendMedia {
+                            chat: chat.clone(),
+                            path,
+                        });
+                    }
+                }
+            }
+            true
+        })
         .with_ipc_handler(move |req| {
             let origin = req.uri().to_string();
             if let Ok(cmd) = ipc::parse(&origin, req.body()) {
@@ -148,18 +233,31 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .map_err(|e| format!("webview: {e}"))?;
 
     let flush_engine = Arc::clone(&engine);
+    let mut protected: Option<bool> = None;
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(UiEvent::Refresh) => {
                 pending.store(false, Ordering::Release);
-                let json = render::view(&engine.app()).to_string();
+                let (json, protect) = {
+                    let app = engine.app();
+                    let protect = app.session.as_ref().is_none_or(|s| s.data.settings.protect);
+                    (render::view(&app).to_string(), protect)
+                };
+                if protected != Some(protect) {
+                    window.set_content_protection(protect);
+                    protected = Some(protect);
+                }
                 let _ =
                     webview.evaluate_script(&format!("window.aegis&&window.aegis.render({json})"));
                 if engine.take_attention() && !window.is_focused() {
                     window.request_user_attention(Some(UserAttentionType::Informational));
                 }
             }
+            Event::WindowEvent {
+                event: WindowEvent::Resized(_) | WindowEvent::Focused(_),
+                ..
+            } => engine.set_visible(!window.is_minimized()),
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..

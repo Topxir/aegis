@@ -37,6 +37,7 @@ fn start_server() -> Server {
     let addr = listener.local_addr().unwrap();
     let state = Arc::new(Mutex::new(ServerState::ephemeral(ServerConfig {
         pow_bits: BITS,
+        pin_min_interval_secs: 0,
         ..ServerConfig::default()
     })));
     let stop = Arc::new(AtomicBool::new(false));
@@ -165,6 +166,11 @@ fn messages_groups_tamper_and_replay() {
     c.add_contact("bob").unwrap();
     assert!(a.add_contact("nobody-here").is_err());
 
+    // Everyone publishes prekeys on the first poll; a session needs them.
+    a.poll_once();
+    b.poll_once();
+    c.poll_once();
+
     // Direct message, then the same frames fetched again.
     a.send_message(&ChatRef::Dm("bob".into()), "hello bob", None)
         .unwrap();
@@ -229,4 +235,65 @@ fn messages_groups_tamper_and_replay() {
     c.poll_once();
     assert_eq!(texts(&a, &chat).len(), 1);
     assert_eq!(texts(&c, &chat).len(), 1);
+}
+
+#[test]
+fn pin_unlock_wrong_pin_password_fallback_and_duress() {
+    let dir = TempDir::new("pin");
+    let srv = start_server();
+    let e = engine(&dir, &srv);
+    e.create_account("alice", "Alice", PW, PW).unwrap();
+    assert!(e.pin_set("12", "12").is_err());
+    assert_eq!(e.pin_set("1234", "4321").unwrap_err().key, "err.pin_mismatch");
+    e.pin_set("1234", "1234").unwrap();
+    assert!(e.app().pin_on);
+    assert_eq!(e.pin_set("1234", "1234").unwrap_err().key, "err.pin_exists");
+    assert_eq!(e.duress_set("1234", "1234").unwrap_err().key, "err.duress_same");
+    e.duress_set("1234", "9999").unwrap();
+    assert!(e.app().duress_on);
+
+    let lock = |e: &Engine| {
+        let s = e.detach().unwrap();
+        e.persist(s);
+    };
+    lock(&e);
+    let f = e.unlock("alice", "4321").unwrap_err();
+    assert_eq!(f.key, "err.pin_wrong");
+    assert!(f.detail.parse::<u32>().is_ok(), "tries left: {}", f.detail);
+    assert!(e.app().session.is_none());
+    e.unlock("alice", "1234").unwrap();
+    assert_eq!(e.app().session.as_ref().unwrap().data.username, "alice");
+    lock(&e);
+
+    // The password always works.
+    e.unlock("alice", PW).unwrap();
+    assert!(e.app().pin_on);
+    lock(&e);
+
+    // The duress PIN wipes the account and looks exactly like a wrong PIN.
+    let f = e.unlock("alice", "9999").unwrap_err();
+    assert_eq!(f.key, "err.pin_wrong");
+    assert!(f.detail.parse::<u32>().is_ok(), "tries left: {}", f.detail);
+    assert!(e.app().session.is_none());
+    assert!(!e.vault_path("alice").exists());
+    for ext in ["pin", "pinpw", "pinmeta", "duress"] {
+        let mut n = e.vault_path("alice").file_name().unwrap().to_os_string();
+        n.push(".");
+        n.push(ext);
+        assert!(!e.vault_path("alice").with_file_name(n).exists(), "{ext}");
+    }
+    assert_eq!(e.unlock("alice", PW).unwrap_err().key, "err.no_account");
+}
+
+#[test]
+fn removing_the_pin_needs_the_pin() {
+    let dir = TempDir::new("pinrm");
+    let srv = start_server();
+    let e = engine(&dir, &srv);
+    e.create_account("alice", "Alice", PW, PW).unwrap();
+    e.pin_set("123456", "123456").unwrap();
+    assert_eq!(e.pin_remove("654321").unwrap_err().key, "err.pin_wrong");
+    e.pin_remove("123456").unwrap();
+    assert!(!e.app().pin_on);
+    e.pin_set("1234", "1234").unwrap();
 }

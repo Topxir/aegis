@@ -118,6 +118,68 @@ object AegisIcons {
             curveTo(19.1f, 14.6f, 20.5f, 16.3f, 20.5f, 19f)
         }
     }
+
+    val Menu: ImageVector = lineIcon("Menu") {
+        line { moveTo(4f, 7f); horizontalLineTo(20f); moveTo(4f, 12f); horizontalLineTo(20f); moveTo(4f, 17f); horizontalLineTo(20f) }
+    }
+
+    val Search: ImageVector = lineIcon("Search") {
+        line { circle(11f, 11f, 6f); moveTo(16f, 16f); lineTo(20f, 20f) }
+    }
+
+    val Pencil: ImageVector = lineIcon("Pencil") {
+        line { moveTo(4f, 20f); lineTo(5f, 15f); lineTo(16f, 4f); lineTo(20f, 8f); lineTo(9f, 19f); close() }
+    }
+
+    val Clip: ImageVector = lineIcon("Clip") {
+        line {
+            moveTo(19f, 11f); lineTo(11f, 19f); curveTo(8.5f, 21.5f, 5f, 18f, 7.5f, 15.5f)
+            lineTo(15.5f, 7.5f); curveTo(17f, 6f, 19.5f, 8.5f, 18f, 10f); lineTo(10f, 18f)
+        }
+    }
+
+    val Play: ImageVector = lineIcon("Play") {
+        line { moveTo(8f, 5f); lineTo(19f, 12f); lineTo(8f, 19f); close() }
+    }
+
+    val Check: ImageVector = lineIcon("Check") {
+        line { moveTo(5f, 12.5f); lineTo(10f, 17f); lineTo(19f, 7f) }
+    }
+
+    val Close: ImageVector = lineIcon("Close") {
+        line { moveTo(6f, 6f); lineTo(18f, 18f); moveTo(18f, 6f); lineTo(6f, 18f) }
+    }
+
+    val Pin: ImageVector = lineIcon("Pin") {
+        line { moveTo(9f, 4f); horizontalLineTo(15f); lineTo(14f, 10f); lineTo(17f, 13f); horizontalLineTo(7f); lineTo(10f, 10f); close(); moveTo(12f, 13f); verticalLineTo(20f) }
+    }
+
+    val Mute: ImageVector = lineIcon("Mute") {
+        line {
+            moveTo(6f, 16f); verticalLineTo(11f); curveTo(6f, 7f, 18f, 7f, 18f, 11f); verticalLineTo(16f); lineTo(20f, 18f); horizontalLineTo(4f); close()
+            moveTo(4f, 4f); lineTo(20f, 20f)
+        }
+    }
+
+    val Trash: ImageVector = lineIcon("Trash") {
+        line { moveTo(5f, 7f); horizontalLineTo(19f); moveTo(9f, 7f); verticalLineTo(4f); horizontalLineTo(15f); verticalLineTo(7f); moveTo(7f, 7f); lineTo(8f, 20f); horizontalLineTo(16f); lineTo(17f, 7f) }
+    }
+
+    val Megaphone: ImageVector = lineIcon("Megaphone") {
+        line { moveTo(4f, 10f); verticalLineTo(14f); horizontalLineTo(8f); lineTo(18f, 19f); verticalLineTo(5f); lineTo(8f, 10f); close() }
+    }
+
+    val User: ImageVector = lineIcon("User") {
+        line { circle(12f, 8f, 4f); moveTo(4f, 20f); curveTo(4f, 14f, 20f, 14f, 20f, 20f) }
+    }
+
+    val Backspace: ImageVector = lineIcon("Backspace") {
+        line { moveTo(9f, 6f); horizontalLineTo(20f); verticalLineTo(18f); horizontalLineTo(9f); lineTo(3f, 12f); close(); moveTo(12f, 9f); lineTo(17f, 15f); moveTo(17f, 9f); lineTo(12f, 15f) }
+    }
+
+    val More: ImageVector = lineIcon("More") {
+        line { circle(12f, 5f, 0.6f); circle(12f, 12f, 0.6f); circle(12f, 19f, 0.6f) }
+    }
 }
 
 private fun lineIcon(name: String, build: ImageVector.Builder.() -> Unit): ImageVector =

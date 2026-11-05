@@ -3,8 +3,10 @@
 
 use crate::engine::{App, AuthTab, ConnTest, Dialog, Route};
 use crate::i18n::{tr, Lang};
-use crate::model::{clean_text, Chat, Contact, Msg, MsgState};
+use crate::media;
+use crate::model::{clean_text, Channel, Chat, Contact, Msg, MsgState, Pending, UNDECRYPTABLE};
 use crate::session::{ChatRef, Session, TTL_CHOICES};
+use aegis_core::official;
 use aegis_core::text::sanitize_display_text;
 use serde_json::{json, Value};
 
@@ -52,6 +54,30 @@ fn icon(name: &str) -> &'static str {
         }
         "clock" => {
             r#"<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>"#
+        }
+        "burger" => {
+            r#"<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>"#
+        }
+        "search" => {
+            r#"<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>"#
+        }
+        "clip" => {
+            r#"<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9.5 17.3a1.7 1.7 0 0 1-2.4-2.4L15 7"/></svg>"#
+        }
+        "dots" => {
+            r#"<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5.5" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="12" cy="18.5" r="1.2"/></svg>"#
+        }
+        "check" => {
+            r#"<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.2 4.2L19 7"/></svg>"#
+        }
+        "pin" => {
+            r#"<svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6l-1 6 3 3H7l3-3zM12 13v7"/></svg>"#
+        }
+        "user" => {
+            r#"<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.9 3.1-7 7-7s7 3.1 7 7"/></svg>"#
+        }
+        "mega" => {
+            r#"<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h3l7 4V6L7 10zM17 9.5a3.5 3.5 0 0 1 0 5"/></svg>"#
         }
         "back" => {
             r#"<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>"#
@@ -169,7 +195,7 @@ pub fn auth(app: &App) -> String {
                 "text",
                 r#"class="mono" maxlength="32" autofocus"#,
             ));
-            h.push_str(&field(l, "password", "f.password", "password", ""));
+            h.push_str(&field(l, "password", "f.secret", "password", ""));
             h.push_str(&format!(
                 r#"<button type="button" class="btn primary" data-act="unlock" data-primary{dis}>{}</button>"#,
                 esc(tr(l, "auth.unlock"))
@@ -251,42 +277,279 @@ fn flash_html(app: &App, l: Lang) -> String {
     )
 }
 
+// ---- avatars and small helpers ----------------------------------------------------
+
+/// Key that gives groups and channels a stable avatar.
+fn id_key(id: &str) -> [u8; 32] {
+    aegis_core::sha256(&[b"aegis ui avatar", id.as_bytes()])
+}
+
+/// Default avatar (spec section 17): a 5x5 grayscale grid in a circle with a one-cell margin.
+fn avatar(key: &[u8; 32], cls: &str) -> String {
+    let a = aegis_core::avatar::Avatar::from_ed_pk(key);
+    let mut d = String::new();
+    for (r, row) in a.cells.iter().enumerate() {
+        for (c, on) in row.iter().enumerate() {
+            if *on {
+                d.push_str(&format!("M{} {}h1v1h-1z", c + 1, r + 1));
+            }
+        }
+    }
+    format!(
+        r##"<svg class="av {cls}" viewBox="0 0 7 7" aria-hidden="true"><circle cx="3.5" cy="3.5" r="3.5" fill="#{bg:02x}{bg:02x}{bg:02x}"/><path fill="#{fg:02x}{fg:02x}{fg:02x}" d="{d}"/></svg>"##,
+        bg = a.bg,
+        fg = a.fg
+    )
+}
+
+fn contact_key(s: &Session, u: &str) -> [u8; 32] {
+    s.data.contacts.get(u).map_or_else(|| id_key(u), |c| c.ed)
+}
+
+/// Only the fixed set of effect names ever reaches markup.
+fn pfx(s: &str) -> &'static str {
+    match s {
+        "dust" => "dust",
+        "snow" => "snow",
+        "embers" => "embers",
+        "orbit" => "orbit",
+        "rain" => "rain",
+        _ => "none",
+    }
+}
+
+fn pbanner(p: &str, live: bool) -> String {
+    format!(
+        r#"<div class="pbanner{}" data-particles="{}"></div>"#,
+        if live { " live" } else { "" },
+        pfx(p)
+    )
+}
+
+fn fmt_dur(ms: u64) -> String {
+    let s = ms / 1000;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Placeholder that the page fills with an image or a video from `/media/<id>`.
+fn media_div(app: &App, m: &crate::model::MediaRef, cls: &str) -> String {
+    let sid = media::session_id(&app.media_secret, &m.file);
+    let extra = if m.video {
+        format!(
+            r#"<span class="play"></span><span class="dur">{}</span>"#,
+            fmt_dur(m.dur_ms)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<div class="{cls}" data-media="/media/{sid}" data-w="{}" data-h="{}"{}>{extra}</div>"#,
+        m.w,
+        m.h,
+        if m.video { r#" data-video="1""# } else { "" }
+    )
+}
+
+fn chan_title(ch: &Channel) -> String {
+    sanitize_display_text(&ch.title)
+}
+
+fn chan_status(l: Lang, ch: &Channel) -> String {
+    if ch.official && official::OFFICIAL_OWNER_ED_PK.is_none() {
+        tr(l, "chan.official_off").to_owned()
+    } else if ch.official {
+        tr(l, "chan.official").to_owned()
+    } else if ch.mine {
+        format!("{} {}", ch.subs.len(), tr(l, "chan.subs_n"))
+    } else {
+        tr(l, "chan.channel").to_owned()
+    }
+}
+
 // ---- sidebar ------------------------------------------------------------------
 
-pub fn sidetop(app: &App) -> String {
+struct Row {
+    last: u64,
+    kind: &'static str,
+    id: String,
+    title: String,
+    key: [u8; 32],
+    pinned: bool,
+    official: bool,
+    muted: bool,
+    unread: u32,
+    chat: ChatRef,
+    prev: String,
+}
+
+fn preview(s: &Session, l: Lang, chat: &Chat, group: bool) -> String {
+    let Some(m) = chat.msgs.last() else {
+        return String::new();
+    };
+    let mut t = if m.text == UNDECRYPTABLE {
+        tr(l, "chat.undecryptable").to_owned()
+    } else {
+        clean_text(&m.text).replace('\n', " ")
+    };
+    if let Some(mr) = &m.media {
+        let label = tr(
+            l,
+            if mr.video {
+                "media.video"
+            } else {
+                "media.photo"
+            },
+        );
+        t = if t.is_empty() {
+            label.to_owned()
+        } else {
+            format!("{label}, {t}")
+        };
+    }
+    let t: String = t.chars().take(60).collect();
+    if m.out {
+        format!("{} {t}", tr(l, "list.you"))
+    } else if group {
+        format!("{}: {t}", sanitize_display_text(&who(s, &m.from)))
+    } else {
+        t
+    }
+}
+
+fn rows(app: &App) -> Vec<Row> {
+    let (Some(s), l) = (&app.session, app.lang()) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<Row> = Vec::new();
+    for (u, chat) in &s.data.dms {
+        if let Some(c) = s.data.contacts.get(u) {
+            let r = ChatRef::Dm(u.clone());
+            rows.push(Row {
+                last: chat.last_ms(),
+                kind: "dm",
+                id: u.clone(),
+                title: contact_name(c),
+                key: c.ed,
+                pinned: s.is_pinned(&r),
+                official: false,
+                muted: s.is_muted(&r),
+                unread: chat.unread,
+                prev: preview(s, l, chat, false),
+                chat: r,
+            });
+        }
+    }
+    for (id, g) in &s.data.groups {
+        let r = ChatRef::Group(id.clone());
+        rows.push(Row {
+            last: g.chat.last_ms(),
+            kind: "group",
+            id: id.clone(),
+            title: sanitize_display_text(&g.title),
+            key: id_key(id),
+            pinned: s.is_pinned(&r),
+            official: false,
+            muted: s.is_muted(&r),
+            unread: g.chat.unread,
+            prev: preview(s, l, &g.chat, true),
+            chat: r,
+        });
+    }
+    for (id, ch) in &s.data.channels {
+        let r = ChatRef::Channel(id.clone());
+        rows.push(Row {
+            last: ch.chat.last_ms(),
+            kind: "channel",
+            id: id.clone(),
+            title: chan_title(ch),
+            key: id_key(id),
+            pinned: s.is_pinned(&r),
+            official: ch.official,
+            muted: s.is_muted(&r),
+            unread: ch.chat.unread,
+            prev: preview(s, l, &ch.chat, false),
+            chat: r,
+        });
+    }
+    rows.sort_by(|a, b| {
+        b.official
+            .cmp(&a.official)
+            .then_with(|| b.pinned.cmp(&a.pinned))
+            .then_with(|| b.last.cmp(&a.last))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    rows
+}
+
+/// Drawer opened by the menu button next to the search field.
+pub fn drawer(app: &App) -> String {
+    let l = app.lang();
+    let Some(s) = &app.session else {
+        return String::new();
+    };
+    let mut h = format!(
+        r#"<div class="dr-head">{}<div class="dr-name">{}</div><div class="dr-u mono muted">@{}</div></div><div class="dr-items">"#,
+        avatar(&s.ed_public(), "a56"),
+        disp(&s.data.display),
+        esc(&s.data.username)
+    );
+    for (to, id, ic, key) in [
+        ("account", "profile", "user", "drawer.account"),
+        ("new_group", "", "users", "nav.new_group"),
+        ("new_channel", "", "mega", "nav.new_channel"),
+        ("new_chat", "", "edit", "nav.new_chat"),
+        ("contacts", "", "users", "nav.contacts"),
+    ] {
+        let id = if id.is_empty() {
+            String::new()
+        } else {
+            format!(r#" data-id="{id}""#)
+        };
+        h.push_str(&format!(
+            r#"<button type="button" class="dr-item" data-act="nav" data-to="{to}"{id}>{}<span>{}</span></button>"#,
+            icon(ic),
+            esc(tr(l, key))
+        ));
+    }
+    h.push_str(&format!(
+        r#"<button type="button" class="dr-item" data-act="lock">{}<span>{}</span></button></div>"#,
+        icon("lock"),
+        esc(tr(l, "nav.lock"))
+    ));
+    h
+}
+
+/// All / Groups / Channels with unread counts. The page draws the sliding underline.
+pub fn tabs(app: &App) -> String {
     let l = app.lang();
     if app.session.is_none() {
         return String::new();
     }
-    let mut h = format!(
-        r#"<div class="brandrow">{}<span class="brand">AEGIS</span></div><div class="tools">"#,
-        icon("shield")
-    );
-    for (to, ic, key) in [
-        ("new_chat", "edit", "nav.new_chat"),
-        ("new_group", "users", "nav.new_group"),
-        ("settings", "settings", "nav.settings"),
+    let rs = rows(app);
+    let count = |kind: Option<&str>| -> u32 {
+        rs.iter()
+            .filter(|r| kind.is_none_or(|k| r.kind == k) && !r.muted)
+            .map(|r| r.unread)
+            .sum()
+    };
+    let mut h = String::new();
+    for (id, key, n) in [
+        ("all", "tab.all", count(None)),
+        ("group", "tab.groups", count(Some("group"))),
+        ("channel", "tab.channels", count(Some("channel"))),
     ] {
+        let c = if n > 0 {
+            format!(r#"<span class="cnt">{}</span>"#, n.min(99))
+        } else {
+            String::new()
+        };
         h.push_str(&format!(
-            r#"<button type="button" class="ib" data-act="nav" data-to="{to}" title="{0}" aria-label="{0}">{1}</button>"#,
-            esc(tr(l, key)),
-            icon(ic)
+            r#"<button type="button" class="tb" data-ui="tab" data-tab="{id}"><span>{}</span>{c}</button>"#,
+            esc(tr(l, key))
         ));
     }
-    h.push_str("</div>");
+    h.push_str(r#"<span class="ul"></span>"#);
     h
-}
-
-/// Signed-in user line under the logo.
-pub fn sideme(app: &App) -> String {
-    let Some(s) = &app.session else {
-        return String::new();
-    };
-    format!(
-        r#"<div class="me-name">{}</div><div class="me-u mono muted">@{}</div>"#,
-        disp(&s.data.display),
-        esc(&s.data.username)
-    )
 }
 
 /// Connection row at the bottom of the sidebar. The dot pulses only while connected.
@@ -301,96 +564,138 @@ pub fn sidefoot(app: &App) -> String {
         None => ("idle", "status.connecting"),
     };
     format!(
-        r#"<span class="conn" title="{0}"><span class="dot {cls}" role="img" aria-label="{0}"></span><span class="host mono">{1}</span></span><button type="button" class="link lockbtn" data-act="lock">{2}{3}</button>"#,
+        r#"<span class="conn" title="{0}"><span class="dot {cls}" role="img" aria-label="{0}"></span><span class="host mono">{1}</span></span>"#,
         esc(tr(l, key)),
         esc(&host_of(&s.data.settings.endpoint)),
-        icon("lock"),
-        esc(tr(l, "nav.lock"))
     )
-}
-
-fn preview(m: Option<&Msg>) -> String {
-    m.map_or_else(String::new, |m| {
-        let t: String = clean_text(&m.text)
-            .replace('\n', " ")
-            .chars()
-            .take(48)
-            .collect();
-        t
-    })
 }
 
 pub fn list(app: &App) -> String {
     let l = app.lang();
-    let Some(s) = &app.session else {
+    if app.session.is_none() {
         return String::new();
-    };
-    struct Row<'a> {
-        last: u64,
-        kind: &'static str,
-        id: &'a str,
-        title: String,
-        chat: &'a Chat,
     }
-    let mut rows: Vec<Row<'_>> = Vec::new();
-    for (u, chat) in &s.data.dms {
-        if let Some(c) = s.data.contacts.get(u) {
-            rows.push(Row {
-                last: chat.last_ms(),
-                kind: "dm",
-                id: u,
-                title: contact_name(c),
-                chat,
-            });
-        }
-    }
-    for (id, g) in &s.data.groups {
-        rows.push(Row {
-            last: g.chat.last_ms(),
-            kind: "group",
-            id,
-            title: sanitize_display_text(&g.title),
-            chat: &g.chat,
-        });
-    }
-    rows.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.id.cmp(b.id)));
-    if rows.is_empty() {
-        return format!(r#"<p class="empty muted">{}</p>"#, esc(tr(l, "list.empty")));
-    }
+    let rs = rows(app);
     let mut h = String::new();
-    for r in rows {
-        let active = matches!(&app.route, Route::Chat(ChatRef::Dm(u)) if r.kind == "dm" && u == r.id)
-            || matches!(&app.route, Route::Chat(ChatRef::Group(g)) if r.kind == "group" && g == r.id);
-        let letter: String = r
-            .title
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().collect())
-            .unwrap_or_default();
-        let unread = if r.chat.unread > 0 && !active {
-            format!(r#"<span class="badge">{}</span>"#, r.chat.unread.min(99))
+    for r in rs {
+        let active = matches!(&app.route, Route::Chat(c) if *c == r.chat);
+        let unread = if r.unread > 0 && !active {
+            format!(
+                r#"<span class="badge{}">{}</span>"#,
+                if r.muted { " dim" } else { "" },
+                r.unread.min(99)
+            )
+        } else if r.pinned {
+            icon("pin").to_owned()
+        } else {
+            String::new()
+        };
+        let tag = if r.official {
+            format!(
+                r#"<span class="otag">{}</span>"#,
+                esc(tr(l, "chan.official_tag"))
+            )
         } else {
             String::new()
         };
         let q = format!("{} {}", r.title, r.id).to_lowercase();
+        let time = if r.last == 0 {
+            String::new()
+        } else {
+            format!(r#"<time class="s" data-ts="{}"></time>"#, r.last)
+        };
         h.push_str(&format!(
-            r#"<button type="button" class="item{}" data-act="nav" data-to="{}" data-id="{}" data-q="{}"><span class="av{}">{}</span><span class="it-body"><span class="it-top"><span class="it-name">{}</span>{}</span><span class="it-prev muted">{}</span></span>{}</button>"#,
+            r#"<button type="button" class="item{}" data-act="nav" data-to="{}" data-id="{}" data-kind="{}" data-q="{}">{}<span class="it-body"><span class="it-top"><span class="it-name">{}{}</span>{}</span><span class="it-bot"><span class="it-prev muted">{}</span>{}</span></span></button>"#,
             if active { " on" } else { "" },
             r.kind,
-            esc(r.id),
+            esc(&r.id),
+            r.kind,
             esc(&q),
-            if r.kind == "group" { " grp" } else { "" },
-            esc(&letter),
+            avatar(&r.key, "a48"),
             esc(&r.title),
-            if r.chat.msgs.is_empty() { String::new() } else { time_tag(r.chat.last_ms()) },
-            esc(&preview(r.chat.msgs.last())),
+            tag,
+            time,
+            esc(&r.prev),
             unread
         ));
+    }
+    if h.is_empty() {
+        h = format!(r#"<p class="empty muted">{}</p>"#, esc(tr(l, "list.empty")));
     }
     h
 }
 
 // ---- main pane ----------------------------------------------------------------
+
+fn menu_html(l: Lang, s: &Session, r: &ChatRef) -> String {
+    let item = |attrs: &str, key: &str, danger: bool| {
+        format!(
+            r#"<button type="button" class="mi{}" {attrs}>{}</button>"#,
+            if danger { " bad" } else { "" },
+            esc(tr(l, key))
+        )
+    };
+    let mut h = String::from(r#"<div class="menu" hidden>"#);
+    h.push_str(&item(r#"data-act="info_toggle""#, "menu.info", false));
+    h.push_str(&item(
+        r#"data-act="pin""#,
+        if s.is_pinned(r) {
+            "menu.unpin"
+        } else {
+            "menu.pin"
+        },
+        false,
+    ));
+    h.push_str(&item(
+        r#"data-act="mute""#,
+        if s.is_muted(r) {
+            "menu.unmute"
+        } else {
+            "menu.mute"
+        },
+        false,
+    ));
+    h.push_str(&item(
+        &format!(
+            r#"data-act="open_dialog" data-kind="clear_chat" data-id="{}""#,
+            esc(&r.key())
+        ),
+        "menu.clear",
+        false,
+    ));
+    match r {
+        ChatRef::Dm(u) => h.push_str(&item(
+            &format!(
+                r#"data-act="open_dialog" data-kind="delete_chat" data-id="{}""#,
+                esc(u)
+            ),
+            "contact.delete",
+            true,
+        )),
+        ChatRef::Group(g) => h.push_str(&item(
+            &format!(
+                r#"data-act="open_dialog" data-kind="leave_group" data-id="{}""#,
+                esc(g)
+            ),
+            "group.leave",
+            true,
+        )),
+        ChatRef::Channel(c) => {
+            if !s.data.channels.get(c).is_some_and(|c| c.official) {
+                h.push_str(&item(
+                    &format!(
+                        r#"data-act="open_dialog" data-kind="leave_channel" data-id="{}""#,
+                        esc(c)
+                    ),
+                    "chan.leave",
+                    true,
+                ));
+            }
+        }
+    }
+    h.push_str("</div>");
+    h
+}
 
 pub fn head(app: &App) -> String {
     let l = app.lang();
@@ -398,30 +703,29 @@ pub fn head(app: &App) -> String {
         return String::new();
     };
     let plain = |key: &str| format!(r#"<span class="title static">{}</span>"#, esc(tr(l, key)));
+    let back = |to: &str, id: &str| {
+        format!(
+            r#"<button type="button" class="ib" data-act="nav" data-to="{to}" data-id="{}" aria-label="{}">{}</button>"#,
+            esc(id),
+            esc(tr(l, "common.back")),
+            icon("back")
+        )
+    };
     match &app.route {
         Route::Welcome => plain("main.welcome_title"),
         Route::NewChat => plain("nav.new_chat"),
         Route::NewGroup => plain("nav.new_group"),
-        Route::Settings => plain("nav.settings"),
-        Route::Contact(u) => format!(
-            r#"<button type="button" class="ib" data-act="nav" data-to="dm" data-id="{}" aria-label="{}">{}</button>{}"#,
-            esc(u),
-            esc(tr(l, "common.back")),
-            icon("back"),
-            plain("contact.title")
-        ),
-        Route::GroupInfo(g) => format!(
-            r#"<button type="button" class="ib" data-act="nav" data-to="group" data-id="{}" aria-label="{}">{}</button>{}"#,
-            esc(g),
-            esc(tr(l, "common.back")),
-            icon("back"),
-            plain("group.info")
-        ),
+        Route::NewChannel => plain("nav.new_channel"),
+        Route::Contacts => plain("nav.contacts"),
+        Route::Account(_) => plain("drawer.account"),
+        Route::Contact(u) => format!("{}{}", back("dm", u), plain("contact.title")),
+        Route::GroupInfo(g) => format!("{}{}", back("group", g), plain("group.info")),
+        Route::ChannelInfo(c) => format!("{}{}", back("channel", c), plain("chan.manage")),
         Route::Chat(r) => {
             let Some(chat) = s.chat(r) else {
                 return String::new();
             };
-            let (title, sub, to, id) = match r {
+            let (title, sub, key) = match r {
                 ChatRef::Dm(u) => {
                     let c = s.data.contacts.get(u);
                     let name = c.map_or_else(|| u.clone(), contact_name);
@@ -430,7 +734,7 @@ pub fn head(app: &App) -> String {
                     } else {
                         tr(l, "contact.unverified")
                     };
-                    (name, v.to_owned(), "contact", u.as_str())
+                    (name, v.to_owned(), contact_key(s, u))
                 }
                 ChatRef::Group(g) => {
                     let grp = s.data.groups.get(g);
@@ -442,8 +746,15 @@ pub fn head(app: &App) -> String {
                             grp.map_or(0, |g| g.members.len()),
                             tr(l, "group.members_n")
                         ),
-                        "group_info",
-                        g.as_str(),
+                        id_key(g),
+                    )
+                }
+                ChatRef::Channel(c) => {
+                    let ch = s.data.channels.get(c);
+                    (
+                        ch.map(chan_title).unwrap_or_default(),
+                        ch.map(|c| chan_status(l, c)).unwrap_or_default(),
+                        id_key(c),
                     )
                 }
             };
@@ -456,78 +767,104 @@ pub fn head(app: &App) -> String {
                     tr(l, ttl_key(chat.ttl_s))
                 )
             };
-            let opts: String = TTL_CHOICES
-                .iter()
-                .map(|&t| {
-                    format!(
-                        r#"<option value="{t}"{}>{}</option>"#,
-                        if t == chat.ttl_s { " selected" } else { "" },
-                        esc(tr(l, ttl_key(t)))
-                    )
-                })
-                .collect();
-            let (ic, label) = match r {
-                ChatRef::Dm(_) => ("shield-sm", "warn.view"),
-                ChatRef::Group(_) => ("users", "group.info"),
-            };
             format!(
-                r#"<button type="button" class="title" data-act="nav" data-to="{to}" data-id="{0}"><span class="t1">{1}</span><span class="t2 muted">{2}</span></button><label class="ttl" title="{3}">{4}<select data-change="set_ttl" data-key="ttl" aria-label="{3}">{5}</select></label><button type="button" class="btn ghost safetybtn" data-act="nav" data-to="{to}" data-id="{0}">{6}{7}</button>"#,
-                esc(id),
+                r#"<button type="button" class="hmain" data-act="info_toggle">{}<span class="title"><span class="t1">{}</span><span class="t2 muted">{}</span></span></button><div class="hbtns"><button type="button" class="ib" data-ui="msgsearch" title="{3}" aria-label="{3}">{4}</button><span class="menuwrap"><button type="button" class="ib" data-ui="menu" aria-label="{5}">{6}</button>{7}</span></div>"#,
+                avatar(&key, "a40"),
                 esc(&title),
                 esc(&sub),
-                esc(tr(l, "ttl.label")),
-                icon("clock"),
-                opts,
-                icon(ic),
-                esc(tr(l, label))
+                esc(tr(l, "chat.search")),
+                icon("search"),
+                esc(tr(l, "menu.more")),
+                icon("dots"),
+                menu_html(l, s, r)
             )
         }
     }
 }
 
-fn msg_html(s: &Session, l: Lang, m: &Msg, group: bool) -> String {
+struct Ctx {
+    group: bool,
+    channel: bool,
+    first: bool,
+    last: bool,
+}
+
+fn msg_html(app: &App, s: &Session, l: Lang, m: &Msg, c: &Ctx) -> String {
+    let mut cls = String::from("m");
+    cls.push_str(if m.out { " out" } else { " in" });
+    if c.first {
+        cls.push_str(" first");
+    }
+    if c.last {
+        cls.push_str(" last");
+    }
+    if c.channel {
+        cls.push_str(" post");
+    }
+    let text = if m.text == UNDECRYPTABLE {
+        tr(l, "chat.undecryptable").to_owned()
+    } else {
+        clean_text(&m.text)
+    };
+    let bare = m.media.is_some() && text.is_empty();
     let mut h = format!(
-        r#"<div class="m {}" data-mid="{}">"#,
-        if m.out { "out" } else { "in" },
-        esc(&m.id)
+        r#"<div class="{cls}" data-mid="{}" data-ts="{}">"#,
+        esc(&m.id),
+        m.ts_ms
     );
-    h.push_str(r#"<div class="bubble">"#);
-    if group && !m.out {
+    if c.group && !m.out {
+        if c.last {
+            h.push_str(&format!(
+                r#"<span class="gav">{}</span>"#,
+                avatar(&contact_key(s, &m.from), "a28")
+            ));
+        } else {
+            h.push_str(r#"<span class="gav"></span>"#);
+        }
+    }
+    h.push_str(&format!(
+        r#"<div class="bubble{}">"#,
+        if bare { " bare" } else { "" }
+    ));
+    if c.group && !m.out && c.first {
         h.push_str(&format!(
             r#"<div class="who">{}</div>"#,
             disp(&who(s, &m.from))
         ));
     }
+    if let Some(mr) = &m.media {
+        h.push_str(&media_div(app, mr, "media"));
+    }
+    if !text.is_empty() {
+        h.push_str(&format!(r#"<div class="t">{}</div>"#, esc(&text)));
+    }
     h.push_str(&format!(
-        r#"<div class="t">{}</div><div class="meta">"#,
-        esc(&clean_text(&m.text))
+        r#"<div class="meta{}">"#,
+        if bare { " ov" } else { "" }
     ));
     if m.ttl_s != 0 {
         h.push_str(icon("clock"));
     }
     h.push_str(&time_tag(m.ts_ms));
     match (m.out, m.state) {
-        (true, MsgState::Sending) => {
-            h.push_str(&format!(
-                r#"<span class="st">{}</span>"#,
-                esc(tr(l, "msg.sending"))
-            ));
-        }
-        (true, MsgState::Failed) => {
-            h.push_str(&format!(
-                r#"<span class="st bad">{}</span><button type="button" class="link" data-act="retry" data-id="{}">{}</button>"#,
-                esc(tr(l, "msg.failed")),
-                esc(&m.id),
-                esc(tr(l, "msg.retry"))
-            ));
-        }
+        (true, MsgState::Sending) => h.push_str(&format!(
+            r#"<span class="st">{}</span>"#,
+            esc(tr(l, "msg.sending"))
+        )),
+        (true, MsgState::Failed) => h.push_str(&format!(
+            r#"<span class="st bad">{}</span><button type="button" class="link" data-act="retry" data-id="{}">{}</button>"#,
+            esc(tr(l, "msg.failed")),
+            esc(&m.id),
+            esc(tr(l, "msg.retry"))
+        )),
+        (true, _) => h.push_str(&format!(r#"<span class="tick">{}</span>"#, icon("check"))),
         _ => {}
     }
     h.push_str("</div></div></div>");
     h
 }
 
-fn banner(l: Lang, c: &Contact, with_accept: bool) -> String {
+fn key_banner(l: Lang, c: &Contact, with_accept: bool) -> String {
     let mut h = format!(
         r#"<div class="banner" role="alert"><p>{} <strong>{}</strong> (@{}). {}</p><div class="row">"#,
         esc(tr(l, "warn.key_changed")),
@@ -571,20 +908,35 @@ pub fn msgs(app: &App) -> String {
         return String::new();
     };
     let mut h = String::new();
-    let group = matches!(r, ChatRef::Group(_));
     match r {
         ChatRef::Dm(u) => {
             if let Some(c) = s.data.contacts.get(u).filter(|c| c.changed.is_some()) {
-                h.push_str(&banner(l, c, c.changed.as_ref().is_some_and(|x| x.via_dm)));
+                h.push_str(&key_banner(
+                    l,
+                    c,
+                    c.changed.as_ref().is_some_and(|x| x.via_dm),
+                ));
             }
         }
         ChatRef::Group(g) => {
             if let Some(grp) = s.data.groups.get(g) {
                 for u in &grp.members {
                     if let Some(c) = s.data.contacts.get(u).filter(|c| c.changed.is_some()) {
-                        h.push_str(&banner(l, c, c.changed.as_ref().is_some_and(|x| x.via_dm)));
+                        h.push_str(&key_banner(
+                            l,
+                            c,
+                            c.changed.as_ref().is_some_and(|x| x.via_dm),
+                        ));
                     }
                 }
+            }
+        }
+        ChatRef::Channel(id) => {
+            if s.data.channels.get(id).is_some_and(|c| c.warn) {
+                h.push_str(&format!(
+                    r#"<p class="sys warnq">{}</p>"#,
+                    esc(tr(l, "chan.key_changed"))
+                ));
             }
         }
     }
@@ -600,9 +952,200 @@ pub fn msgs(app: &App) -> String {
             esc(tr(l, "chat.ttl_on"))
         ));
     }
-    for m in &chat.msgs {
-        h.push_str(&msg_html(s, l, m, group));
+    let group = matches!(r, ChatRef::Group(_));
+    let channel = matches!(r, ChatRef::Channel(_));
+    let n = chat.msgs.len();
+    for (i, m) in chat.msgs.iter().enumerate() {
+        let same = |o: &Msg| o.from == m.from && o.out == m.out;
+        let ctx = Ctx {
+            group,
+            channel,
+            first: channel || i == 0 || !chat.msgs.get(i - 1).is_some_and(same),
+            last: channel || i + 1 == n || !chat.msgs.get(i + 1).is_some_and(same),
+        };
+        h.push_str(&msg_html(app, s, l, m, &ctx));
     }
+    h
+}
+
+/// True when the composer is shown; subscribers of a channel get a bar instead.
+pub fn compose(app: &App) -> bool {
+    let (Some(s), Route::Chat(r)) = (&app.session, &app.route) else {
+        return false;
+    };
+    match r {
+        ChatRef::Channel(c) => s.data.channels.get(c).is_some_and(|c| c.mine),
+        _ => true,
+    }
+}
+
+pub fn bar(app: &App) -> String {
+    let l = app.lang();
+    let (Some(s), Route::Chat(r @ ChatRef::Channel(_))) = (&app.session, &app.route) else {
+        return String::new();
+    };
+    if compose(app) {
+        return String::new();
+    }
+    format!(
+        r#"<button type="button" class="mutebar" data-act="mute">{}</button>"#,
+        esc(tr(
+            l,
+            if s.is_muted(r) {
+                "menu.unmute"
+            } else {
+                "menu.mute"
+            }
+        ))
+    )
+}
+
+/// Right-hand panel for the open chat.
+pub fn info(app: &App) -> String {
+    let l = app.lang();
+    let (Some(s), Route::Chat(r), true) = (&app.session, &app.route, app.info) else {
+        return String::new();
+    };
+    let Some(chat) = s.chat(r) else {
+        return String::new();
+    };
+    let (name, sub, about, particles, key) = match r {
+        ChatRef::Dm(u) => {
+            let c = s.data.contacts.get(u);
+            (
+                c.map_or_else(|| u.clone(), contact_name),
+                format!("@{u}"),
+                c.map(|c| clean_text(&c.about)).unwrap_or_default(),
+                c.map(|c| c.particles.clone()).unwrap_or_default(),
+                contact_key(s, u),
+            )
+        }
+        ChatRef::Group(g) => {
+            let grp = s.data.groups.get(g);
+            (
+                grp.map(|g| sanitize_display_text(&g.title))
+                    .unwrap_or_default(),
+                format!(
+                    "{} {}",
+                    grp.map_or(0, |g| g.members.len()),
+                    tr(l, "group.members_n")
+                ),
+                String::new(),
+                String::new(),
+                id_key(g),
+            )
+        }
+        ChatRef::Channel(c) => {
+            let ch = s.data.channels.get(c);
+            (
+                ch.map(chan_title).unwrap_or_default(),
+                ch.map(|c| chan_status(l, c)).unwrap_or_default(),
+                ch.map(|c| clean_text(&c.about)).unwrap_or_default(),
+                String::new(),
+                id_key(c),
+            )
+        }
+    };
+    let mut h = format!(
+        r#"<div class="in-bar"><button type="button" class="ib" data-act="info_toggle" aria-label="{}">&times;</button></div><div class="in-top">{}<div class="in-av">{}</div></div><div class="in-body"><h2>{}</h2><p class="muted">{}</p>"#,
+        esc(tr(l, "common.close")),
+        pbanner(&particles, false),
+        avatar(&key, "a96"),
+        esc(&name),
+        esc(&sub)
+    );
+    if !about.is_empty() {
+        h.push_str(&format!(r#"<p class="about">{}</p>"#, esc(&about)));
+    }
+    let btn = |attrs: &str, key: &str, danger: bool| {
+        format!(
+            r#"<button type="button" class="btn ghost{}" {attrs}>{}</button>"#,
+            if danger { " danger" } else { "" },
+            esc(tr(l, key))
+        )
+    };
+    h.push_str(r#"<div class="acts">"#);
+    h.push_str(&btn(
+        r#"data-act="mute""#,
+        if s.is_muted(r) {
+            "menu.unmute"
+        } else {
+            "menu.mute"
+        },
+        false,
+    ));
+    match r {
+        ChatRef::Dm(u) => h.push_str(&btn(
+            &format!(r#"data-act="nav" data-to="contact" data-id="{}""#, esc(u)),
+            "warn.view",
+            false,
+        )),
+        ChatRef::Group(g) => h.push_str(&btn(
+            &format!(
+                r#"data-act="nav" data-to="group_info" data-id="{}""#,
+                esc(g)
+            ),
+            "group.info",
+            false,
+        )),
+        ChatRef::Channel(c) => {
+            if s.data.channels.get(c).is_some_and(|c| c.mine) {
+                h.push_str(&btn(
+                    &format!(
+                        r#"data-act="nav" data-to="channel_info" data-id="{}""#,
+                        esc(c)
+                    ),
+                    "chan.manage",
+                    false,
+                ));
+            }
+        }
+    }
+    h.push_str(&btn(
+        &format!(
+            r#"data-act="open_dialog" data-kind="clear_chat" data-id="{}""#,
+            esc(&r.key())
+        ),
+        "menu.clear",
+        true,
+    ));
+    h.push_str("</div>");
+    if !matches!(r, ChatRef::Channel(_)) {
+        let opts: String = TTL_CHOICES
+            .iter()
+            .map(|&t| {
+                format!(
+                    r#"<option value="{t}"{}>{}</option>"#,
+                    if t == chat.ttl_s { " selected" } else { "" },
+                    esc(tr(l, ttl_key(t)))
+                )
+            })
+            .collect();
+        h.push_str(&format!(
+            r#"<label class="ttl">{}<span>{}</span><select data-change="set_ttl" data-key="ttl" aria-label="{1}">{}</select></label>"#,
+            icon("clock"),
+            esc(tr(l, "ttl.label")),
+            opts
+        ));
+    }
+    let shared: Vec<&crate::model::MediaRef> = chat
+        .msgs
+        .iter()
+        .rev()
+        .filter_map(|m| m.media.as_ref())
+        .take(12)
+        .collect();
+    if !shared.is_empty() {
+        h.push_str(&format!(
+            r#"<h3>{}</h3><div class="grid">"#,
+            esc(tr(l, "info.media"))
+        ));
+        for m in shared {
+            h.push_str(&media_div(app, m, "thumb"));
+        }
+        h.push_str("</div>");
+    }
+    h.push_str("</div>");
     h
 }
 
@@ -636,9 +1179,35 @@ fn page_new_chat(l: Lang) -> String {
     )
 }
 
-fn page_new_group(l: Lang, s: &Session) -> String {
+fn member_checks(l: Lang, s: &Session, skip: &[String]) -> String {
     let mut h = format!(
-        r#"<div class="card" data-scope><h2>{}</h2><p class="note">{}</p>{}"#,
+        r#"<div class="f"><span>{}</span><div class="checks">"#,
+        esc(tr(l, "newgroup.members"))
+    );
+    let mut any = false;
+    for c in s.data.contacts.values().filter(|c| !skip.contains(&c.u)) {
+        any = true;
+        h.push_str(&format!(
+            r#"<label class="chk"><input type="checkbox" name="members[]" value="{}">{}<span>{} <span class="muted">@{}</span></span></label>"#,
+            esc(&c.u),
+            avatar(&c.ed, "a28"),
+            disp(&c.name),
+            esc(&c.u)
+        ));
+    }
+    if !any {
+        h.push_str(&format!(
+            r#"<p class="muted">{}</p>"#,
+            esc(tr(l, "newgroup.no_contacts"))
+        ));
+    }
+    h.push_str("</div></div>");
+    h
+}
+
+fn page_new_group(l: Lang, s: &Session) -> String {
+    format!(
+        r#"<div class="card" data-scope><h2>{}</h2><p class="note">{}</p>{}{}<div class="row"><button type="button" class="btn primary" data-act="create_group" data-primary>{}</button></div></div>"#,
         esc(tr(l, "nav.new_group")),
         esc(tr(l, "newgroup.note")),
         field(
@@ -647,32 +1216,124 @@ fn page_new_group(l: Lang, s: &Session) -> String {
             "f.group_title",
             "text",
             r#"maxlength="64" autofocus"#
-        )
+        ),
+        member_checks(l, s, &[]),
+        esc(tr(l, "newgroup.create"))
+    )
+}
+
+fn page_new_channel(l: Lang, s: &Session) -> String {
+    format!(
+        r#"<div class="card" data-scope><h2>{}</h2><p class="note">{}</p>{}{}{}<div class="row"><button type="button" class="btn primary" data-act="create_channel" data-primary>{}</button></div></div>"#,
+        esc(tr(l, "nav.new_channel")),
+        esc(tr(l, "newchannel.note")),
+        field(
+            l,
+            "title",
+            "f.channel_title",
+            "text",
+            r#"maxlength="64" autofocus"#
+        ),
+        field(l, "about", "f.about", "text", r#"maxlength="140""#),
+        member_checks(l, s, &[]),
+        esc(tr(l, "newchannel.create"))
+    )
+}
+
+fn page_channel_info(l: Lang, s: &Session, cid: &str) -> String {
+    let Some(ch) = s.data.channels.get(cid) else {
+        return String::new();
+    };
+    let mut h = format!(
+        r#"<div class="card"><div class="ci-head">{}<div><h2>{}</h2><p class="muted">{}</p></div></div>"#,
+        avatar(&id_key(cid), "a56"),
+        esc(&chan_title(ch)),
+        esc(&chan_status(l, ch))
     );
-    h.push_str(&format!(
-        r#"<div class="f"><span>{}</span><div class="checks">"#,
-        esc(tr(l, "newgroup.members"))
-    ));
+    if !ch.about.is_empty() {
+        h.push_str(&format!(
+            r#"<p class="about">{}</p>"#,
+            esc(&clean_text(&ch.about))
+        ));
+    }
+    if ch.mine {
+        h.push_str(&format!(
+            r#"<p class="note">{} {}/{}</p>"#,
+            esc(tr(l, "chan.subs_n")),
+            ch.subs.len(),
+            aegis_core::channel::MAX_SUBSCRIBERS
+        ));
+        h.push_str(&format!(
+            r#"<div data-scope>{}<div class="row"><button type="button" class="btn" data-act="invite_channel" data-primary>{}</button></div></div>"#,
+            member_checks(l, s, &ch.subs),
+            esc(tr(l, "chan.invite"))
+        ));
+    }
+    if !ch.official {
+        h.push_str(&format!(
+            r#"<div class="row"><button type="button" class="btn danger" data-act="open_dialog" data-kind="leave_channel" data-id="{}">{}</button></div>"#,
+            esc(cid),
+            esc(tr(l, if ch.mine { "chan.delete" } else { "chan.leave" }))
+        ));
+    }
+    h.push_str("</div>");
+    h
+}
+
+fn page_contacts(l: Lang, s: &Session) -> String {
+    let mut h = format!(
+        r#"<div class="card"><h2>{}</h2><ul class="members">"#,
+        esc(tr(l, "nav.contacts"))
+    );
+    for c in s.data.contacts.values() {
+        h.push_str(&format!(
+            r#"<li>{}<span class="cname">{} <span class="muted">@{}</span></span><span class="cbtns"><button type="button" class="link" data-act="nav" data-to="dm" data-id="{2}">{}</button><button type="button" class="link" data-act="nav" data-to="contact" data-id="{2}">{}</button></span></li>"#,
+            avatar(&c.ed, "a36"),
+            disp(&contact_name(c)),
+            esc(&c.u),
+            esc(tr(l, "contacts.chat")),
+            esc(tr(l, "warn.view"))
+        ));
+    }
     if s.data.contacts.is_empty() {
         h.push_str(&format!(
-            r#"<p class="muted">{}</p>"#,
+            r#"<li class="muted">{}</li>"#,
             esc(tr(l, "newgroup.no_contacts"))
         ));
     }
-    for c in s.data.contacts.values() {
-        h.push_str(&format!(
-            r#"<label class="chk"><input type="checkbox" name="members[]" value="{}"><span>{} <span class="muted">@{}</span></span></label>"#,
-            esc(&c.u),
-            disp(&c.name),
-            esc(&c.u)
-        ));
+    h.push_str("</ul></div>");
+    for p in &s.data.pending {
+        h.push_str(&request_card(l, p));
     }
-    h.push_str("</div></div>");
-    h.push_str(&format!(
-        r#"<div class="row"><button type="button" class="btn primary" data-act="create_group" data-primary>{}</button></div></div>"#,
-        esc(tr(l, "newgroup.create"))
-    ));
     h
+}
+
+/// Spaced groups of four hex digits, for comparing a key by eye.
+fn key_fingerprint(x: &[u8; 32]) -> String {
+    let hx = aegis_core::hex::encode(x);
+    hx.as_bytes()
+        .chunks(4)
+        .take(8)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A message from a key that is not a contact: nothing is trusted until the user chooses.
+fn request_card(l: Lang, p: &Pending) -> String {
+    let x = aegis_core::hex::encode(&p.x);
+    format!(
+        r#"<div class="card" data-scope><h2>{}</h2><p class="note">{}</p><p class="safety" aria-label="{}">{}</p><label class="fld"><span>{}</span><input name="username" type="text" autocomplete="off" spellcheck="false" maxlength="32"></label><div class="row"><button type="button" class="btn primary" data-act="accept_request" data-x="{}">{}</button><button type="button" class="btn ghost" data-act="block_request" data-x="{}">{}</button></div></div>"#,
+        esc(tr(l, "req.title")),
+        esc(tr(l, "req.note")),
+        esc(tr(l, "req.fingerprint")),
+        esc(&key_fingerprint(&p.x)),
+        esc(tr(l, "req.username")),
+        esc(&x),
+        esc(tr(l, "req.accept")),
+        esc(&x),
+        esc(tr(l, "req.block"))
+    )
 }
 
 fn page_contact(l: Lang, s: &Session, u: &str) -> String {
@@ -681,10 +1342,16 @@ fn page_contact(l: Lang, s: &Session, u: &str) -> String {
     };
     let sn = s.safety_number(u).unwrap_or_default();
     let mut h = format!(
-        r#"<div class="card"><h2>{}</h2><p class="muted">@{}</p>"#,
+        r#"<div class="card pcard">{}<div class="pav">{}</div><h2>{}</h2><p class="muted">@{}</p>"#,
+        pbanner(&c.particles, false),
+        avatar(&c.ed, "a72"),
         disp(&c.name),
         esc(&c.u)
     );
+    let about = clean_text(&c.about);
+    if !about.is_empty() {
+        h.push_str(&format!(r#"<p class="about">{}</p>"#, esc(&about)));
+    }
     if let Some(ch) = &c.changed {
         h.push_str(&format!(
             r#"<div class="banner"><p>{}</p><div class="row">"#,
@@ -728,7 +1395,8 @@ fn page_group_info(l: Lang, s: &Session, gid: &str) -> String {
         return String::new();
     };
     let mut h = format!(
-        r#"<div class="card"><h2>{}</h2><p class="muted">{} {}</p><ul class="members">"#,
+        r#"<div class="card"><div class="ci-head">{}<div><h2>{}</h2><p class="muted">{} {}</p></div></div><ul class="members">"#,
+        avatar(&id_key(gid), "a56"),
         esc(&sanitize_display_text(&g.title)),
         g.members.len(),
         esc(tr(l, "group.members_n"))
@@ -745,7 +1413,8 @@ fn page_group_info(l: Lang, s: &Session, gid: &str) -> String {
             }
         );
         h.push_str(&format!(
-            r#"<li><span>{} <span class="muted">@{}</span></span><span class="muted">{}</span>"#,
+            r#"<li>{}<span class="cname">{} <span class="muted">@{}</span></span><span class="muted">{}</span>"#,
+            avatar(&if me { s.ed_public() } else { contact_key(s, u) }, "a28"),
             disp(&who(s, u)),
             esc(u),
             esc(tags.trim())
@@ -785,67 +1454,220 @@ fn conn_html(app: &App, l: Lang) -> String {
     }
 }
 
-fn page_settings(app: &App, s: &Session) -> String {
+fn sec_key(sec: &str) -> &'static str {
+    match sec {
+        "profile" => "acct.profile",
+        "privacy" => "acct.privacy",
+        "notifications" => "acct.notifications",
+        "appearance" => "acct.appearance",
+        "connection" => "acct.connection",
+        _ => "acct.data",
+    }
+}
+
+fn check(name: &str, label: &str, on: bool, disabled: bool) -> String {
+    format!(
+        r#"<label class="chk"><input type="checkbox" name="{name}"{}{}><span>{}</span></label>"#,
+        if on { " checked" } else { "" },
+        if disabled { " disabled" } else { "" },
+        esc(label)
+    )
+}
+
+/// The PIN section of the privacy page.
+fn pin_card(app: &App, l: Lang) -> String {
+    let pin_attrs = r#"inputmode="numeric" maxlength="6""#;
+    let dis = if app.busy.is_some() { " disabled" } else { "" };
+    let mut h = format!(r#"<section class="card" data-scope><h2>{}</h2>"#, esc(tr(l, "priv.pin")));
+    if !app.pin_on {
+        h.push_str(&field(l, "pin", "f.pin", "password", pin_attrs));
+        h.push_str(&field(l, "confirm", "f.pin_confirm", "password", pin_attrs));
+        h.push_str(&format!(
+            r#"<div class="row"><button type="button" class="btn primary" data-act="pin_set"{dis}>{}</button></div>"#,
+            esc(tr(l, "priv.set_pin"))
+        ));
+    } else {
+        h.push_str(&format!(r#"<p class="note">{}</p>"#, esc(tr(l, "priv.pin_on"))));
+        h.push_str(&field(l, "pin", "f.pin_current", "password", pin_attrs));
+        h.push_str(&field(l, "duress", "f.duress", "password", pin_attrs));
+        h.push_str(&format!(
+            r#"<div class="row"><button type="button" class="btn" data-act="duress_set"{dis}>{}</button><button type="button" class="btn danger" data-act="pin_remove"{dis}>{}</button>"#,
+            esc(tr(l, "priv.set_duress")),
+            esc(tr(l, "priv.remove_pin"))
+        ));
+        if app.duress_on {
+            h.push_str(&format!(
+                r#"<button type="button" class="btn" data-act="duress_clear"{dis}>{}</button>"#,
+                esc(tr(l, "priv.clear_duress"))
+            ));
+        }
+        h.push_str("</div>");
+        if app.duress_on {
+            h.push_str(&format!(r#"<p class="note">{}</p>"#, esc(tr(l, "priv.duress_on"))));
+        }
+    }
+    h.push_str(&format!(r#"<p class="note">{}</p></section>"#, esc(tr(l, "priv.pin_note"))));
+    h
+}
+
+fn cover_options(l: Lang, cur: u8) -> String {
+    [(0u8, "off", "conn.cover_off"), (1, "std", "conn.cover_std"), (2, "high", "conn.cover_high")]
+        .iter()
+        .map(|(n, v, k)| {
+            format!(
+                r#"<option value="{v}"{}>{}</option>"#,
+                if *n == cur { " selected" } else { "" },
+                esc(tr(l, k))
+            )
+        })
+        .collect()
+}
+
+fn save_row(l: Lang, act: &str) -> String {
+    format!(
+        r#"<div class="row"><button type="button" class="btn primary" data-act="{act}" data-primary>{}</button></div>"#,
+        esc(tr(l, "common.save"))
+    )
+}
+
+fn page_account(app: &App, s: &Session, sec: &str) -> String {
     let l = app.lang();
     let st = &s.data.settings;
     let val = |v: &str| format!(r#"value="{}""#, esc(v));
-    let mut h = String::from(r#"<div class="stack">"#);
-    h.push_str(&format!(
-        r#"<section class="card" data-scope><h2>{}</h2>{}<div class="row"><button type="button" class="btn" data-act="update_display" data-primary>{}</button></div></section>"#,
-        esc(tr(l, "set.profile")),
-        field(l, "display", "f.display", "text", &format!(r#"maxlength="64" {}"#, val(&s.data.display))),
-        esc(tr(l, "common.save"))
-    ));
-    h.push_str(&format!(
-        r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>"#,
-        esc(tr(l, "set.connection")),
-        field(l, "endpoint", "f.endpoint", "text", &val(&st.endpoint)),
-        field(
-            l,
-            "socks5",
-            "f.socks5",
-            "text",
-            &format!(r#"placeholder="127.0.0.1:9050" {}"#, val(&st.socks5))
-        ),
-        esc(tr(l, "set.conn_note"))
-    ));
-    h.push_str(&format!(
-        r#"{}<label class="chk"><input type="checkbox" name="flash"{}><span>{}</span></label><div class="row"><button type="button" class="btn primary" data-act="save_settings">{}</button><button type="button" class="btn" data-act="test_conn">{}</button></div>{}</section>"#,
-        field(l, "idle_min", "f.idle", "text", &format!(r#"inputmode="numeric" maxlength="4" {}"#, val(&st.idle_min.to_string()))),
-        if st.flash_taskbar { " checked" } else { "" },
-        esc(tr(l, "set.flash")),
-        esc(tr(l, "common.save")),
-        esc(tr(l, "set.test")),
-        conn_html(app, l)
-    ));
-    h.push_str(&format!(
-        r#"<section class="card"><h2>{}</h2><div class="row">{}</div><p class="note">{}</p></section>"#,
-        esc(tr(l, "set.language")),
-        lang_select(l),
-        esc(tr(l, "set.lang_note"))
-    ));
-    h.push_str(&format!(
-        r#"<section class="card" data-scope><h2>{}</h2><p class="note">{}</p>{}<div class="row"><button type="button" class="btn" data-act="export" data-primary>{}</button><button type="button" class="btn" data-act="lock">{}</button></div></section>"#,
-        esc(tr(l, "set.backup")),
-        esc(tr(l, "set.backup_note")),
-        field(l, "path", "f.export_path", "text", r#"placeholder="C:\Users\...\backup.vault""#),
-        esc(tr(l, "set.export")),
+    let mut nav = String::new();
+    for id in crate::engine::SECTIONS {
+        nav.push_str(&format!(
+            r#"<button type="button" class="cn{}" data-act="nav" data-to="account" data-id="{id}">{}</button>"#,
+            if id == sec { " on" } else { "" },
+            esc(tr(l, sec_key(id)))
+        ));
+    }
+    nav.push_str(&format!(
+        r#"<button type="button" class="cn" data-act="lock">{}</button>"#,
         esc(tr(l, "nav.lock"))
     ));
-    h.push_str(&format!(
-        r#"<section class="card"><h2>{}</h2><p class="note">{}</p><div class="row"><button type="button" class="btn danger" data-act="open_dialog" data-kind="delete_account">{}</button></div></section>"#,
-        esc(tr(l, "set.danger")),
-        esc(tr(l, "set.delete_note")),
-        esc(tr(l, "set.delete"))
-    ));
-    h.push_str(&format!(
-        r#"<section class="card"><h2>{}</h2><p class="note">{}</p><p class="note">{}</p><p class="note">{}</p></section></div>"#,
-        esc(tr(l, "set.about")),
-        esc(tr(l, "set.about_text")),
-        esc(tr(l, "main.e2ee")),
-        esc(tr(l, "set.about_font"))
-    ));
-    h
+    let body = match sec {
+        "profile" => {
+            let cur = pfx(&s.data.particles);
+            let opts: String = ["none", "dust", "snow", "embers", "orbit", "rain"]
+                .iter()
+                .map(|p| {
+                    format!(
+                        r#"<option value="{p}"{}>{}</option>"#,
+                        if *p == cur { " selected" } else { "" },
+                        esc(tr(l, &format!("pfx.{p}")))
+                    )
+                })
+                .collect();
+            format!(
+                r#"<section class="card pcard" data-scope>{}<div class="pav">{}</div><h2>{}</h2><p class="muted">@{}</p>{}{}<label class="f"><span>{}</span><select name="particles" data-live="particles">{}</select></label><p class="note">{}</p>{}</section>"#,
+                pbanner(cur, true),
+                avatar(&s.ed_public(), "a72"),
+                disp(&s.data.display),
+                esc(&s.data.username),
+                field(
+                    l,
+                    "display",
+                    "f.display",
+                    "text",
+                    &format!(r#"maxlength="64" {}"#, val(&s.data.display))
+                ),
+                field(
+                    l,
+                    "about",
+                    "f.about",
+                    "text",
+                    &format!(r#"maxlength="140" {}"#, val(&s.data.about))
+                ),
+                esc(tr(l, "f.particles")),
+                opts,
+                esc(tr(l, "profile.note")),
+                save_row(l, "save_profile")
+            )
+        }
+        "privacy" => format!(
+            r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}</section>{}"#,
+            esc(tr(l, "acct.privacy")),
+            field(
+                l,
+                "idle_min",
+                "f.idle",
+                "text",
+                &format!(
+                    r#"inputmode="numeric" maxlength="4" {}"#,
+                    val(&st.idle_min.to_string())
+                )
+            ),
+            check("protect", tr(l, "priv.protect"), st.protect, false),
+            esc(tr(l, "priv.protect_note")),
+            save_row(l, "save_privacy"),
+            pin_card(app, l)
+        ),
+        "notifications" => format!(
+            r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}</section>"#,
+            esc(tr(l, "acct.notifications")),
+            check("on", tr(l, "notify.on"), st.flash_taskbar, false),
+            check("name", tr(l, "notify.name"), st.notify_name, false),
+            esc(tr(l, "notify.note")),
+            save_row(l, "save_notify")
+        ),
+        "appearance" => format!(
+            r#"<section class="card"><h2>{}</h2><div class="row">{}</div><p class="note">{}</p></section>"#,
+            esc(tr(l, "set.language")),
+            lang_select(l),
+            esc(tr(l, "set.lang_note"))
+        ),
+        "connection" => {
+            let socks = format!(r#"placeholder="127.0.0.1:9050" {}"#, val(&st.socks5));
+            let cover_field = format!(
+                r#"{}<label class="f"><span>{}</span><select name="cover">{}</select></label>"#,
+                check("tor", tr(l, "conn.tor"), st.tor, false),
+                esc(tr(l, "conn.cover")),
+                cover_options(l, st.cover)
+            );
+            format!(
+            r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}<p class="note">{}</p><div class="row"><button type="button" class="btn primary" data-act="save_connection" data-primary>{}</button><button type="button" class="btn" data-act="test_conn">{}</button></div>{}</section>"#,
+            esc(tr(l, "acct.connection")),
+            field(l, "endpoint", "f.endpoint", "text", &val(&st.endpoint)),
+            field(
+                l,
+                "socks5",
+                "f.socks5",
+                "text",
+                &socks
+            ),
+            esc(tr(l, "set.conn_note")),
+            cover_field,
+            esc(&[tr(l, "conn.tor_note"), tr(l, "conn.cover_note")].join(" ")),
+            esc(tr(l, "common.save")),
+            esc(tr(l, "set.test")),
+            conn_html(app, l)
+            )
+        }
+        _ => format!(
+            r#"<section class="card" data-scope><h2>{}</h2><p class="note">{}</p>{}<div class="row"><button type="button" class="btn" data-act="export" data-primary>{}</button></div></section><section class="card"><h2>{}</h2><p class="note">{}</p><div class="row"><button type="button" class="btn danger" data-act="open_dialog" data-kind="delete_account">{}</button></div></section><section class="card"><h2>{}</h2><p class="note">{}</p><p class="note">{}</p><p class="note">{}</p></section>"#,
+            esc(tr(l, "set.backup")),
+            esc(tr(l, "set.backup_note")),
+            field(
+                l,
+                "path",
+                "f.export_path",
+                "text",
+                r#"placeholder="C:\Users\...\backup.vault""#
+            ),
+            esc(tr(l, "set.export")),
+            esc(tr(l, "set.danger")),
+            esc(tr(l, "set.delete_note")),
+            esc(tr(l, "set.delete")),
+            esc(tr(l, "set.about")),
+            esc(tr(l, "set.about_text")),
+            esc(tr(l, "main.e2ee")),
+            esc(tr(l, "set.about_font"))
+        ),
+    };
+    format!(
+        r#"<div class="cab"><div class="cabnav">{nav}</div><div class="cabbody">{body}</div></div>"#
+    )
 }
 
 pub fn page(app: &App) -> String {
@@ -858,14 +1680,35 @@ pub fn page(app: &App) -> String {
         Route::Welcome => page_welcome(l),
         Route::NewChat => page_new_chat(l),
         Route::NewGroup => page_new_group(l, s),
+        Route::NewChannel => page_new_channel(l, s),
+        Route::ChannelInfo(c) => page_channel_info(l, s, c),
+        Route::Contacts => page_contacts(l, s),
         Route::Contact(u) => page_contact(l, s, u),
         Route::GroupInfo(g) => page_group_info(l, s, g),
-        Route::Settings => page_settings(app, s),
+        Route::Account(sec) => page_account(app, s, sec),
     }
 }
 
 pub fn overlay(app: &App) -> String {
     let l = app.lang();
+    if app.key_alert && app.session.is_some() {
+        if app.key_reset_ask {
+            return format!(
+                r#"<div class="scrim"></div><div class="dialog" role="alertdialog" aria-modal="true"><h2>{}</h2><p>{}</p><div class="row end"><button type="button" class="btn" data-act="key_reset" data-step="cancel" data-primary>{}</button><button type="button" class="btn danger" data-act="key_reset" data-step="do">{}</button></div></div>"#,
+                esc(tr(l, "key.reset_title")),
+                esc(tr(l, "key.reset_warn")),
+                esc(tr(l, "common.cancel")),
+                esc(tr(l, "key.reset_do"))
+            );
+        }
+        return format!(
+            r#"<div class="scrim"></div><div class="dialog" role="alertdialog" aria-modal="true"><h2>{}</h2><p>{}</p><div class="row end"><button type="button" class="btn" data-act="key_reset" data-step="ask">{}</button><button type="button" class="btn danger" data-act="lock" data-primary>{}</button></div></div>"#,
+            esc(tr(l, "key.title")),
+            esc(tr(l, "key.text")),
+            esc(tr(l, "key.reset")),
+            esc(tr(l, "key.lock"))
+        );
+    }
     let Some(s) = &app.session else {
         return String::new();
     };
@@ -885,6 +1728,20 @@ pub fn overlay(app: &App) -> String {
             tr(l, "group.leave_note").to_owned(),
             "leave_group",
             tr(l, "group.leave"),
+            String::new(),
+        ),
+        Dialog::LeaveChannel(_) => (
+            tr(l, "chan.leave"),
+            tr(l, "chan.leave_note").to_owned(),
+            "leave_channel",
+            tr(l, "chan.leave"),
+            String::new(),
+        ),
+        Dialog::ClearChat(_) => (
+            tr(l, "menu.clear"),
+            tr(l, "dlg.clear_text").to_owned(),
+            "clear_chat",
+            tr(l, "menu.clear"),
             String::new(),
         ),
         Dialog::DeleteAccount => (
@@ -925,30 +1782,35 @@ pub fn view(app: &App) -> Value {
     let l = app.lang();
     let logged_in = app.session.is_some();
     let chat = matches!(app.route, Route::Chat(_)) && logged_in;
-    let ttl = match (&app.session, &app.route) {
-        (Some(s), Route::Chat(r)) => s.chat(r).map_or(0, |c| c.ttl_s),
-        _ => 0,
-    };
     let pkey = format!("{logged_in}:{:?}:{:?}", app.route, app.tab);
+    let info_html = info(app);
     json!({
         "lang": l.code(),
         "authed": logged_in,
         "auth": if logged_in { String::new() } else { auth(app) },
-        "sidetop": sidetop(app),
-        "sideme": sideme(app),
+        "drawer": drawer(app),
+        "tabs": tabs(app),
         "sidefoot": sidefoot(app),
         "list": list(app),
         "head": head(app),
         "msgs": msgs(app),
         "page": page(app),
+        "bar": bar(app),
+        "info": info_html,
         "chat": chat,
-        "ttl": ttl,
+        "compose": chat && compose(app),
         "overlay": overlay(app),
         "toast": toast(app),
         "pkey": pkey,
         "ph_msg": tr(l, "chat.placeholder"),
         "ph_filter": tr(l, "list.filter"),
+        "ph_msgq": tr(l, "chat.search"),
         "lbl_send": tr(l, "chat.send"),
+        "lbl_attach": tr(l, "chat.attach"),
+        "lbl_menu": tr(l, "menu.more"),
+        "lbl_lookup": tr(l, "list.lookup"),
+        "lbl_today": tr(l, "date.today"),
+        "lbl_yesterday": tr(l, "date.yesterday"),
         "hint": tr(l, "chat.hint"),
     })
 }
@@ -957,7 +1819,7 @@ pub fn view(app: &App) -> Value {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::model::Changed;
+    use crate::model::{Changed, MediaRef};
     use aegis_core::net::DirEntry;
 
     const PAYLOADS: [&str; 6] = [
@@ -1033,6 +1895,7 @@ mod tests {
         }
         assert!(!html.contains("<script"));
         assert!(!html.contains("<img"));
+        assert!(!html.contains("<video"));
         // hostile payloads may only appear escaped: no verbatim copy with markup characters
         for p in PAYLOADS.iter().filter(|p| p.contains(['<', '"', '\''])) {
             assert!(!html.contains(*p), "unescaped payload {p:?}");
@@ -1055,6 +1918,8 @@ mod tests {
             s.add_contact(&e, 1);
             if let Some(c) = s.data.contacts.get_mut(&u) {
                 c.name = (*p).to_owned();
+                c.about = (*p).to_owned();
+                c.particles = (*p).to_owned();
                 c.changed = Some(Changed {
                     x: None,
                     ed: [3; 32],
@@ -1070,10 +1935,29 @@ mod tests {
                     text: (*p).to_owned(),
                     out: false,
                     state: MsgState::Sent,
+                    media: None,
+                });
+                ch.push(Msg {
+                    id: format!("m{i}"),
+                    from: u.clone(),
+                    ts_ms: 6,
+                    ttl_s: 0,
+                    text: (*p).to_owned(),
+                    out: false,
+                    state: MsgState::Sent,
+                    media: Some(MediaRef {
+                        video: i % 2 == 0,
+                        w: 10,
+                        h: 10,
+                        dur_ms: 61_000,
+                        file: (*p).to_owned(),
+                    }),
                 });
             }
             ids.push(u);
         }
+        s.data.about = PAYLOADS[1].to_owned();
+        s.data.particles = PAYLOADS[2].to_owned();
         let (gid, _) = s.prepare_group(PAYLOADS[1], &ids, 10).expect("group");
         if let Some(g) = s.data.groups.get_mut(&gid) {
             g.chat.push(Msg {
@@ -1084,6 +1968,23 @@ mod tests {
                 text: PAYLOADS[4].to_owned(),
                 out: false,
                 state: MsgState::Sent,
+                media: None,
+            });
+        }
+        let cid = s
+            .create_channel(PAYLOADS[3], PAYLOADS[0], 12)
+            .expect("channel");
+        if let Some(c) = s.data.channels.get_mut(&cid) {
+            c.warn = true;
+            c.chat.push(Msg {
+                id: "c1".into(),
+                from: "alice".into(),
+                ts_ms: 13,
+                ttl_s: 0,
+                text: PAYLOADS[5].to_owned(),
+                out: true,
+                state: MsgState::Sent,
+                media: None,
             });
         }
         app.session = Some(s);
@@ -1103,15 +2004,28 @@ mod tests {
             .as_ref()
             .and_then(|s| s.data.groups.keys().next().cloned())
             .unwrap_or_default();
+        let chans: Vec<String> = app
+            .session
+            .as_ref()
+            .map(|s| s.data.channels.keys().cloned().collect())
+            .unwrap_or_default();
         let mut routes = vec![
             Route::Welcome,
             Route::NewChat,
             Route::NewGroup,
-            Route::Settings,
+            Route::NewChannel,
+            Route::Contacts,
         ];
+        for sec in crate::engine::SECTIONS {
+            routes.push(Route::Account(sec));
+        }
         for u in &ids {
             routes.push(Route::Chat(ChatRef::Dm(u.clone())));
             routes.push(Route::Contact(u.clone()));
+        }
+        for c in &chans {
+            routes.push(Route::Chat(ChatRef::Channel(c.clone())));
+            routes.push(Route::ChannelInfo(c.clone()));
         }
         routes.push(Route::Chat(ChatRef::Group(gid.clone())));
         routes.push(Route::GroupInfo(gid.clone()));
@@ -1121,21 +2035,40 @@ mod tests {
             }
             for r in &routes {
                 app.route = r.clone();
-                for d in [
-                    None,
-                    Some(Dialog::DeleteAccount),
-                    Some(Dialog::LeaveGroup(gid.clone())),
-                    Some(Dialog::DeleteChat(ids[0].clone())),
-                ] {
-                    app.dialog = d;
-                    let v = view(&app);
-                    for k in [
-                        "sidetop", "sideme", "sidefoot", "list", "head", "msgs", "page", "overlay",
-                        "toast",
+                for info in [false, true] {
+                    app.info = info;
+                    for d in [
+                        None,
+                        Some(Dialog::DeleteAccount),
+                        Some(Dialog::LeaveGroup(gid.clone())),
+                        Some(Dialog::LeaveChannel(chans[0].clone())),
+                        Some(Dialog::ClearChat(ChatRef::Group(gid.clone()))),
+                        Some(Dialog::DeleteChat(ids[0].clone())),
                     ] {
-                        let h = v[k].as_str().unwrap_or_default();
-                        check_html(h);
-                        assert!(!h.contains("??"), "missing translation in {k}: {h}");
+                        app.dialog = d;
+                        let v = view(&app);
+                        for k in [
+                            "drawer", "tabs", "sidefoot", "list", "head", "msgs", "page", "bar",
+                            "info", "overlay", "toast",
+                        ] {
+                            let h = v[k].as_str().unwrap_or_default();
+                            check_html(h);
+                            assert!(!h.contains("??"), "missing translation in {k}: {h}");
+                        }
+                        for k in [
+                            "ph_msg",
+                            "ph_filter",
+                            "ph_msgq",
+                            "lbl_send",
+                            "lbl_attach",
+                            "lbl_menu",
+                            "lbl_lookup",
+                            "lbl_today",
+                            "lbl_yesterday",
+                            "hint",
+                        ] {
+                            assert_ne!(v[k].as_str(), Some("??"), "missing translation {k}");
+                        }
                     }
                 }
             }
@@ -1145,6 +2078,62 @@ mod tests {
         let m = msgs(&app);
         assert!(m.contains("&lt;img src=x onerror=alert(1)&gt;"));
         assert!(!m.contains("<img"));
+    }
+
+    #[test]
+    fn media_uses_relative_session_urls_only() {
+        let mut app = app_with_payloads();
+        app.route = Route::Chat(ChatRef::Dm("bob0".into()));
+        let m = msgs(&app);
+        assert!(m.contains(r#"data-media="/media/"#));
+        assert!(m.contains(r#"data-video="1""#));
+        assert!(!m.contains("onerror=alert(1)\" "));
+        // the stored file name is never exposed to the page
+        assert!(!m.contains("alert(1)</script>"));
+    }
+
+    #[test]
+    fn unknown_particles_fall_back_to_none() {
+        assert_eq!(pfx("rain"), "rain");
+        assert_eq!(pfx("\"><x>"), "none");
+    }
+
+    #[test]
+    fn subscriber_gets_bar_not_composer() {
+        let mut app = app_with_payloads();
+        let id = aegis_core::official::official_channel_id();
+        app.route = Route::Chat(ChatRef::Channel(id));
+        assert!(!compose(&app));
+        assert!(bar(&app).contains("mutebar"));
+        let own = app
+            .session
+            .as_ref()
+            .and_then(|s| {
+                s.data
+                    .channels
+                    .values()
+                    .find(|c| c.mine)
+                    .map(|c| c.id.clone())
+            })
+            .unwrap_or_default();
+        app.route = Route::Chat(ChatRef::Channel(own));
+        assert!(compose(&app));
+        assert!(bar(&app).is_empty());
+    }
+
+    #[test]
+    fn official_channel_is_first_in_list() {
+        let app = app_with_payloads();
+        let rs = rows(&app);
+        assert!(rs.first().is_some_and(|r| r.official && r.pinned));
+    }
+
+    #[test]
+    fn avatar_is_a_grayscale_circle() {
+        let a = avatar(&[5; 32], "a48");
+        assert!(a.starts_with("<svg"));
+        assert!(a.contains("<circle"));
+        assert!(!a.contains("style"));
     }
 
     #[test]

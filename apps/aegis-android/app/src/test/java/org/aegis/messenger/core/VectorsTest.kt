@@ -362,7 +362,7 @@ class VectorsTest {
         val inv = envFrom(list(v, "envelopes")[1])
         val tooMany = Envelope(
             Kind.Ginv, inv.msgId, inv.sender, inv.senderName, inv.senderEd, inv.tsMs, inv.ttlS,
-            inv.groupId, inv.body, inv.groupKey, (0 until 21).map { "user%02d".format(it) },
+            inv.groupId, inv.body, inv.groupKey, (0 until 101).map { "user%02d".format(it) },
         )
         try { tooMany.encode(); fail() } catch (_: AegisException) {}
         val wrongId = Envelope(Kind.Ginv, inv.msgId, inv.sender, inv.senderName, inv.senderEd, inv.tsMs, inv.ttlS, "ab".repeat(32), inv.body, inv.groupKey, inv.members)

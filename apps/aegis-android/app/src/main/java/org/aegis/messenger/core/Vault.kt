@@ -33,6 +33,9 @@ object Vault {
             return Bytes.concat(header, nonce, ct)
         }
 
+        /** Copy of the derived key, for wrapping with a PIN (spec section 20). The caller wipes it. */
+        fun exportKey(): ByteArray = key.copyOf()
+
         fun wipe() {
             key.fill(0)
         }
@@ -80,6 +83,26 @@ object Vault {
         val salt = file.copyOfRange(16, 32)
         val nonce = file.copyOfRange(AAD_LEN, HEADER_LEN)
         val key = derive(password, salt, params)
+        try {
+            val data = Crypto.aeadOpen(key, nonce, file.copyOfRange(0, AAD_LEN), file.copyOfRange(HEADER_LEN, file.size))
+            return Opened(data, Keyed(params, salt, key))
+        } catch (e: AegisException.Decrypt) {
+            key.fill(0)
+            throw AegisException.VaultDecrypt()
+        }
+    }
+
+    /** Opens a file with the already derived 32-byte key (PIN unlock). The key is copied. */
+    fun decryptWithKey(keyBytes: ByteArray, file: ByteArray): Opened {
+        if (file.size < HEADER_LEN + 16 || !Bytes.eq(file.copyOfRange(0, 4), MAGIC)) throw AegisException.VaultFormat()
+        val m = Bytes.be32(file, 4)
+        val t = Bytes.be32(file, 8)
+        val p = Bytes.be32(file, 12)
+        if (p !in 1..MAX_P || t !in 1..MAX_T || m !in (8 * p)..MAX_M_KIB) throw AegisException.VaultParams()
+        val params = Params(m.toInt(), t.toInt(), p.toInt())
+        val salt = file.copyOfRange(16, 32)
+        val nonce = file.copyOfRange(AAD_LEN, HEADER_LEN)
+        val key = keyBytes.copyOf()
         try {
             val data = Crypto.aeadOpen(key, nonce, file.copyOfRange(0, AAD_LEN), file.copyOfRange(HEADER_LEN, file.size))
             return Opened(data, Keyed(params, salt, key))

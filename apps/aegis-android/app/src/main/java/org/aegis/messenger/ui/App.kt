@@ -46,7 +46,8 @@ fun Root(session: Session, onLanguage: () -> Unit) {
         0f, 1f, infiniteRepeatable(tween(20_000, easing = LinearEasing), RepeatMode.Reverse), label = "shift",
     ) else remember { mutableStateOf(0f) }
     Box(Modifier.fillMaxSize().background(Ui.bg).background(Ui.ground(if (d == null) shift else 0f))) {
-        if (d == null) StartScreen(session) else Navigator(session, onLanguage)
+        if (session.keyChangedOrigin != null) KeyChangedStop(session)
+        else if (d == null) StartScreen(session) else Navigator(session, onLanguage)
         session.notice?.let { n ->
             Box(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(12.dp).clip(RoundedCornerShape(14.dp)).background(Ui.surface2).border(1.dp, Ui.border, RoundedCornerShape(14.dp)).fillMaxWidth()) {
                 Text(stringResource(n), color = Ui.text, modifier = Modifier.padding(12.dp).align(Alignment.CenterStart))
@@ -78,15 +79,49 @@ private fun Navigator(session: Session, onLanguage: () -> Unit) {
         val arg = r.substringAfter(':', "")
         when (r.substringBefore(':')) {
             "chat" -> ChatScreen(session, d, arg, ::pop) {
-                if (arg.startsWith("g:")) push("ginfo:" + arg.removePrefix("g:")) else push("contact:" + arg.removePrefix("dm:"))
+                when {
+                    arg.startsWith("g:") -> push("ginfo:" + arg.removePrefix("g:"))
+                    arg.startsWith("c:") -> push("chinfo:" + arg.removePrefix("c:"))
+                    else -> push("contact:" + arg.removePrefix("dm:"))
+                }
             }
+            "account" -> AccountScreen(session, d, ::pop)
+            "contacts" -> ContactsScreen(d, ::pop) { k -> push("chat:$k") }
+            "newchannel" -> NewChannelScreen(session, d, ::pop) { k -> stack = "list|chat:$k" }
+            "chinfo" -> ChannelInfoScreen(session, d, arg, ::pop) { reset("list") }
             "new" -> NewChatScreen(session, ::pop, { k -> stack = "list|chat:$k" }) { push("newgroup") }
             "newgroup" -> NewGroupScreen(session, d, ::pop) { k -> stack = "list|chat:$k" }
             "contact" -> ContactScreen(session, d, arg, ::pop)
             "ginfo" -> GroupInfoScreen(session, d, arg, ::pop) { reset("list") }
             "settings" -> SettingsScreen(session, d, ::pop, { push("about") }, onLanguage)
             "about" -> AboutScreen(::pop)
-            else -> ChatListScreen(session, d, { k -> push("chat:$k") }, { push("new") }, { push("settings") })
+            "requests" -> RequestsScreen(session, ::pop)
+            else -> ChatListScreen(session, d, { k -> push("chat:$k") }) { r -> push(r) }
+        }
+    }
+}
+
+/** Hard stop when the pinned server key changed (spec section 23). */
+@Composable
+private fun KeyChangedStop(session: Session) {
+    var confirm by rememberSaveable { mutableStateOf(false) }
+    androidx.compose.foundation.layout.Column(
+        Modifier.fillMaxSize().navigationBarsPadding().padding(24.dp),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+    ) {
+        Text(stringResource(R.string.key_changed_title), color = Ui.danger, style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+        androidx.compose.foundation.layout.Spacer(Modifier.padding(8.dp))
+        Text(stringResource(R.string.key_changed_body), color = Ui.text)
+        androidx.compose.foundation.layout.Spacer(Modifier.padding(12.dp))
+        Primary(stringResource(R.string.key_changed_lock)) { session.lock(); session.dismissKeyChanged() }
+        androidx.compose.foundation.layout.Spacer(Modifier.padding(4.dp))
+        if (!confirm) {
+            Secondary(stringResource(R.string.key_changed_trust), danger = true) { confirm = true }
+        } else {
+            Text(stringResource(R.string.key_changed_warn), color = Ui.danger)
+            androidx.compose.foundation.layout.Spacer(Modifier.padding(4.dp))
+            Secondary(stringResource(R.string.key_changed_trust_yes), danger = true) { session.trustNewServerKey() }
+            Secondary(stringResource(R.string.cancel)) { confirm = false }
         }
     }
 }

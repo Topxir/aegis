@@ -21,5 +21,9 @@ sealed class AegisException(message: String) : Exception(message) {
     class InvalidEndpoint : AegisException("invalid endpoint")
     class BadResponse : AegisException("bad server response")
     class Http(val code: Int) : AegisException("http status $code")
+    class Media(what: String) : AegisException("media: $what")
+    class Session(what: String) : AegisException("session: $what")
+    class NeedsUpdate : AegisException("contact has no prekeys")
+    class ServerKeyChanged : AegisException("server key changed")
     class Network(what: String) : AegisException("network: $what")
 }

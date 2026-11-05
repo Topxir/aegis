@@ -24,6 +24,25 @@ mod hex32 {
     }
 }
 
+/// Secret byte strings (encoded ratchet stores and chains) kept as hex in the vault.
+mod hexvec {
+    use aegis_core::hex;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use zeroize::Zeroizing;
+
+    pub fn serialize<S: Serializer>(v: &Zeroizing<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        let h = Zeroizing::new(hex::encode(v.as_slice()));
+        s.serialize_str(&h)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<Vec<u8>>, D::Error> {
+        let s = Zeroizing::new(String::deserialize(d)?);
+        hex::decode(&s)
+            .map(Zeroizing::new)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 mod hex32_secret {
     use aegis_core::hex;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -69,10 +88,58 @@ pub struct Settings {
     pub socks5: String,
     pub lang: Lang,
     pub idle_min: u32,
+    /// Notifications on or off (a taskbar flash while the window is not focused).
     pub flash_taskbar: bool,
+    /// Show the sender name in the notification instead of "New message".
+    #[serde(default)]
+    pub notify_name: bool,
+    /// Hide the window from screen capture.
+    #[serde(default = "yes")]
+    pub protect: bool,
+    /// Pinned key of the sealed transport (spec section 23) and the endpoint it belongs to.
+    #[serde(default, with = "hex32_opt")]
+    pub server_key: Option<[u8; 32]>,
+    #[serde(default)]
+    pub server_key_for: String,
+    /// Connect through a local Tor SOCKS5 proxy.
+    #[serde(default)]
+    pub tor: bool,
+    /// Cover traffic: 0 off, 1 standard, 2 high.
+    #[serde(default = "cover_std")]
+    pub cover: u8,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn cover_std() -> u8 {
+    1
+}
+
+fn no_particles() -> String {
+    "none".to_owned()
+}
+
+fn zero_key() -> Zeroizing<[u8; 32]> {
+    Zeroizing::new([0; 32])
 }
 
 impl Settings {
+    /// The transport key we trust for the current endpoint, if one was pinned.
+    pub fn pinned_key(&self) -> Option<[u8; 32]> {
+        if self.server_key_for == self.endpoint {
+            self.server_key
+        } else {
+            None
+        }
+    }
+
+    /// The SOCKS5 address to use, if any. Empty means a direct connection.
+    pub fn proxy(&self) -> Option<&str> {
+        (!self.socks5.is_empty()).then_some(self.socks5.as_str())
+    }
+
     pub fn new(lang: Lang) -> Self {
         Self {
             endpoint: DEFAULT_ENDPOINT.to_owned(),
@@ -80,6 +147,12 @@ impl Settings {
             lang,
             idle_min: 10,
             flash_taskbar: true,
+            notify_name: false,
+            protect: true,
+            server_key: None,
+            server_key_for: String::new(),
+            tor: false,
+            cover: 1,
         }
     }
 }
@@ -105,6 +178,11 @@ pub struct Contact {
     pub ed: [u8; 32],
     pub verified: bool,
     pub changed: Option<Changed>,
+    /// Profile card from the contact (spec section 22).
+    #[serde(default)]
+    pub about: String,
+    #[serde(default = "no_particles")]
+    pub particles: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,15 +193,29 @@ pub enum MsgState {
     Failed,
 }
 
+/// A photo or video kept in the encrypted media store next to the vault.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MediaRef {
+    pub video: bool,
+    pub w: u32,
+    pub h: u32,
+    pub dur_ms: u64,
+    /// 32 hex characters, the name of the `.bin` file.
+    pub file: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Msg {
     pub id: String,
     pub from: String,
     pub ts_ms: u64,
     pub ttl_s: u64,
+    /// Message text, or the caption of an attachment.
     pub text: String,
     pub out: bool,
     pub state: MsgState,
+    #[serde(default)]
+    pub media: Option<MediaRef>,
 }
 
 impl Msg {
@@ -185,6 +277,95 @@ impl core::fmt::Debug for Group {
     }
 }
 
+/// A broadcast channel (spec section 15), also used for the official channel (section 19).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Channel {
+    pub id: String,
+    #[serde(with = "hex32_secret")]
+    pub g: Zeroizing<[u8; 32]>,
+    pub title: String,
+    #[serde(default)]
+    pub about: String,
+    pub owner: String,
+    /// Pinned owner key; `None` only for the official channel before first use.
+    #[serde(default, with = "hex32_opt")]
+    pub owner_ed: Option<[u8; 32]>,
+    pub mine: bool,
+    #[serde(default)]
+    pub official: bool,
+    /// Invited subscribers (owner only).
+    #[serde(default)]
+    pub subs: Vec<String>,
+    pub cursor: u64,
+    /// The directory now shows another key for the owner than the pinned one.
+    #[serde(default)]
+    pub warn: bool,
+    pub chat: Chat,
+}
+
+impl core::fmt::Debug for Channel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Channel")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Text of the local "could not be decrypted" line. Network text never contains control
+/// characters (see `clean_text`), so a real message cannot imitate it.
+pub const UNDECRYPTABLE: &str = "\u{1}undecryptable";
+
+/// Most requests from unknown keys kept at once, and most frames kept for each.
+pub const MAX_PENDING: usize = 20;
+pub const MAX_PENDING_FRAMES: usize = 3;
+pub const MAX_BLOCKED: usize = 200;
+pub const MAX_DEFERRED: usize = 20;
+/// Most group or channel frames kept while their sender key has not arrived.
+pub const MAX_HELD: usize = 50;
+
+/// Sender-key state of one group or channel, as stored in the vault.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkeyState {
+    /// Our sending chain (AGC1), empty before the first message.
+    #[serde(default, with = "hexvec")]
+    pub send: Zeroizing<Vec<u8>>,
+    /// Chains of the other senders (AGK1), empty before the first one arrives.
+    #[serde(default, with = "hexvec")]
+    pub recv: Zeroizing<Vec<u8>>,
+    /// Members who got the current sending chain.
+    #[serde(default)]
+    pub given: Vec<String>,
+    /// A new sending chain is due (someone was removed).
+    #[serde(default)]
+    pub rotate: bool,
+    /// Frames that arrived before their chain (unpadded, hex).
+    #[serde(default)]
+    pub held: Vec<String>,
+}
+
+/// A decrypted message whose attachment could not be fetched yet. The ratchet has moved on,
+/// so it is kept (encoded envelope, hex) and tried again at the next poll.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Deferred {
+    /// "" for a direct message, "g" for a group, "c" for a channel.
+    #[serde(default)]
+    pub kind: String,
+    /// The contact, group id or channel id.
+    pub contact: String,
+    pub env: String,
+}
+
+/// A first message from a key that is not a contact. The frame cannot be read before the
+/// sender is known, so the user decides whom it is from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Pending {
+    #[serde(with = "hex32")]
+    pub x: [u8; 32],
+    pub first_ms: u64,
+    /// Unpadded type 0x03 frames, oldest first.
+    pub frames: Vec<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Data {
     pub schema: u32,
@@ -200,6 +381,33 @@ pub struct Data {
     pub groups: BTreeMap<String, Group>,
     pub seen: Vec<String>,
     pub inbox_cursor: u64,
+    /// Key for the local media store; made on first load of an older vault.
+    #[serde(default = "zero_key", with = "hex32_secret")]
+    pub media_key: Zeroizing<[u8; 32]>,
+    #[serde(default)]
+    pub about: String,
+    #[serde(default = "no_particles")]
+    pub particles: String,
+    #[serde(default)]
+    pub channels: BTreeMap<String, Channel>,
+    /// Pinned chats as `kind:id`.
+    #[serde(default)]
+    pub pinned: Vec<String>,
+    #[serde(default)]
+    pub muted: Vec<String>,
+    /// Encoded `SessionStore` (AGS1); empty before the first session.
+    #[serde(default, with = "hexvec")]
+    pub sessions: Zeroizing<Vec<u8>>,
+    /// Requests from unknown keys.
+    #[serde(default)]
+    pub pending: Vec<Pending>,
+    /// Keys the user blocked, as hex.
+    #[serde(default)]
+    pub blocked: Vec<String>,
+    #[serde(default)]
+    pub deferred: Vec<Deferred>,
+    #[serde(default)]
+    pub skeys: BTreeMap<String, SkeyState>,
 }
 
 impl core::fmt::Debug for Data {

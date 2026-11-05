@@ -51,6 +51,7 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
     var saved by remember { mutableStateOf(false) }
     var test by remember { mutableStateOf<Boolean?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var confirmWipe by remember { mutableStateOf(false) }
     var info by remember { mutableStateOf<Int?>(null) }
 
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
@@ -87,6 +88,16 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 test?.let { Note(stringResource(if (it) R.string.test_ok else R.string.test_fail), if (it) Ui.accent else Ui.danger) }
             }
             Divider()
+            Section(stringResource(R.string.cover_traffic)) {
+                val coverCtx = LocalContext.current
+                var cover by remember { mutableStateOf(Boot.coverMode(coverCtx)) }
+                Choices(
+                    listOf(0 to stringResource(R.string.cover_off), 1 to stringResource(R.string.cover_standard), 2 to stringResource(R.string.cover_high)),
+                    cover,
+                ) { cover = it; Boot.setCoverMode(coverCtx, it); session.coverChanged() }
+                Note(stringResource(R.string.cover_note))
+            }
+            Divider()
             Section(stringResource(R.string.locking)) {
                 Text(stringResource(R.string.lock_idle), color = Ui.text)
                 Choices(listOf(1, 5, 15, 60).map { it to lockLabel(it) }, s.idleLockMin) { save(current().withLocks(it, s.backgroundLockMin)) }
@@ -105,6 +116,15 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                     )
                 }
                 Note(stringResource(R.string.notifications_note))
+                var bg by remember { mutableStateOf(Boot.backgroundPoll(ctx)) }
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(stringResource(R.string.background_check), color = Ui.text, modifier = Modifier.weight(1f))
+                    Switch(
+                        bg, { bg = it; session.setBackgroundPoll(it) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = Ui.accent, checkedThumbColor = Ui.onAccent, uncheckedTrackColor = Ui.surface2, uncheckedThumbColor = Ui.muted, uncheckedBorderColor = Ui.border),
+                    )
+                }
+                Note(stringResource(R.string.background_check_note))
             }
             Divider()
             Section(stringResource(R.string.language)) {
@@ -118,6 +138,7 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
             Section(stringResource(R.string.data)) {
                 Secondary(stringResource(R.string.start_export)) { exporter.launch("aegis-" + d.username + ".vault") }
                 Note(stringResource(R.string.export_note))
+                Secondary(stringResource(R.string.wipe_chats), danger = true) { confirmWipe = true }
                 Secondary(stringResource(R.string.delete_account), danger = true) { confirmDelete = true }
                 info?.let { Note(stringResource(it), Ui.accent) }
             }
@@ -131,6 +152,10 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
             }
         }
     }
+    if (confirmWipe) Confirm(
+        stringResource(R.string.wipe_chats), stringResource(R.string.delete_chats_body), stringResource(R.string.delete),
+        { confirmWipe = false; session.wipeAllChats() }, { confirmWipe = false },
+    )
     if (confirmDelete) Confirm(
         stringResource(R.string.delete_account), stringResource(R.string.delete_account_body), stringResource(R.string.delete),
         { confirmDelete = false; session.deleteAccount() }, { confirmDelete = false },

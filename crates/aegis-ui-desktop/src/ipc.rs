@@ -48,7 +48,27 @@ pub enum Cmd {
         #[serde(deserialize_with = "secret")]
         password: Zeroizing<String>,
     },
+    PinSet {
+        #[serde(deserialize_with = "secret")]
+        pin: Zeroizing<String>,
+        #[serde(deserialize_with = "secret")]
+        confirm: Zeroizing<String>,
+    },
+    PinRemove {
+        #[serde(deserialize_with = "secret")]
+        pin: Zeroizing<String>,
+    },
+    DuressSet {
+        #[serde(deserialize_with = "secret")]
+        pin: Zeroizing<String>,
+        #[serde(deserialize_with = "secret")]
+        duress: Zeroizing<String>,
+    },
+    DuressClear {},
     Lock {},
+    KeyReset {
+        step: String,
+    },
     Nav {
         to: String,
         #[serde(default)]
@@ -79,6 +99,13 @@ pub enum Cmd {
     AcceptKey {
         id: String,
     },
+    AcceptRequest {
+        x: String,
+        username: String,
+    },
+    BlockRequest {
+        x: String,
+    },
     DismissKey {
         id: String,
     },
@@ -92,18 +119,49 @@ pub enum Cmd {
     },
     LeaveGroup {},
     DeleteChat {},
-    SaveSettings {
+    SaveConnection {
         endpoint: String,
         socks5: String,
+        #[serde(default)]
+        tor: bool,
+        #[serde(default)]
+        cover: String,
+    },
+    SavePrivacy {
         idle_min: String,
-        flash: bool,
+        protect: bool,
+    },
+    SaveNotify {
+        on: bool,
+        name: bool,
     },
     TestConn {
         endpoint: String,
         socks5: String,
+        #[serde(default)]
+        tor: bool,
     },
-    UpdateDisplay {
+    SaveProfile {
         display: String,
+        about: String,
+        particles: String,
+    },
+    PickMedia {},
+    Mute {},
+    Pin {},
+    InfoToggle {},
+    ClearChat {},
+    LeaveChannel {},
+    CreateChannel {
+        title: String,
+        #[serde(default)]
+        about: String,
+        #[serde(default)]
+        members: Vec<String>,
+    },
+    InviteChannel {
+        #[serde(default)]
+        members: Vec<String>,
     },
     Export {
         path: String,
@@ -157,6 +215,36 @@ mod tests {
         assert!(parse(o, r#"{"cmd":"lock","args":{}}"#).is_ok());
         assert!(parse(o, r#"{"cmd":"send","args":{"text":"hi"}}"#).is_ok());
         assert!(parse(o, r#"{"cmd":"send","args":{}}"#).is_err());
+    }
+
+    #[test]
+    fn new_commands_parse() {
+        let o = "https://aegis.localhost/";
+        for c in [
+            r#"{"cmd":"pick_media","args":{}}"#,
+            r#"{"cmd":"pin_set","args":{"pin":"1234","confirm":"1234"}}"#,
+            r#"{"cmd":"pin_remove","args":{"pin":"1234"}}"#,
+            r#"{"cmd":"duress_set","args":{"pin":"1234","duress":"4321"}}"#,
+            r#"{"cmd":"duress_clear","args":{}}"#,
+            r#"{"cmd":"key_reset","args":{"step":"ask"}}"#,
+            r#"{"cmd":"accept_request","args":{"x":"ab","username":"bob"}}"#,
+            r#"{"cmd":"block_request","args":{"x":"ab"}}"#,
+            r#"{"cmd":"mute","args":{}}"#,
+            r#"{"cmd":"pin","args":{}}"#,
+            r#"{"cmd":"info_toggle","args":{}}"#,
+            r#"{"cmd":"clear_chat","args":{}}"#,
+            r#"{"cmd":"leave_channel","args":{}}"#,
+            r#"{"cmd":"create_channel","args":{"title":"t","about":"a","members":["x"]}}"#,
+            r#"{"cmd":"create_channel","args":{"title":"t"}}"#,
+            r#"{"cmd":"invite_channel","args":{"members":[]}}"#,
+            r#"{"cmd":"save_connection","args":{"endpoint":"e","socks5":""}}"#,
+            r#"{"cmd":"save_privacy","args":{"idle_min":"5","protect":true}}"#,
+            r#"{"cmd":"save_notify","args":{"on":true,"name":false}}"#,
+            r#"{"cmd":"save_profile","args":{"display":"d","about":"a","particles":"snow"}}"#,
+        ] {
+            assert!(parse(o, c).is_ok(), "{c}");
+        }
+        assert!(parse(o, r#"{"cmd":"save_profile","args":{"display":"d"}}"#).is_err());
     }
 
     #[test]
