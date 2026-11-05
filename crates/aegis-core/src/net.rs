@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 /// Response bodies larger than this are refused.
 pub const MAX_RESPONSE: usize = 1 << 20;
+/// Largest blob body: one 1 MiB chunk plus the AEAD tag.
+pub const MAX_BLOB: usize = (1 << 20) + 16;
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_POLL_FRAMES: usize = 100;
 
@@ -227,6 +229,37 @@ impl Client {
         Ok(Poll { frames, next })
     }
 
+    /// Uploads one ciphertext chunk under a random id (spec section 14).
+    pub fn blob_put(&self, id: &[u8; 32], data: &[u8]) -> Result<()> {
+        if data.is_empty() || data.len() > MAX_BLOB {
+            return Err(Error::BadResponse);
+        }
+        let idhex = hex::encode(id);
+        let ts = now_secs();
+        let scope = format!("blob:{idhex}");
+        let n = pow::mine(&scope, ts, &pow::body_hash_hex(data), self.pow_bits);
+        let path = format!("/api/v2/blob/put?id={idhex}&ts={ts}&pow={n}");
+        let (code, _) =
+            self.request_capped("POST", &path, "application/octet-stream", data, MAX_RESPONSE)?;
+        if code == 200 {
+            Ok(())
+        } else {
+            Err(Error::Http(code))
+        }
+    }
+
+    /// Downloads one ciphertext chunk; `None` if the server does not have it.
+    pub fn blob_get(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        let path = format!("/api/v2/blob/get?id={}", hex::encode(id));
+        let (code, body) = self.request_capped("GET", &path, "", &[], MAX_BLOB)?;
+        match code {
+            404 => Ok(None),
+            200 if !body.is_empty() => Ok(Some(body)),
+            200 => Err(Error::BadResponse),
+            c => Err(Error::Http(c)),
+        }
+    }
+
     fn connect(&self) -> Result<TcpStream> {
         let ep = &self.endpoint;
         let stream = if let Some(proxy) = &self.socks5 {
@@ -245,6 +278,17 @@ impl Client {
     }
 
     fn request(&self, method: &str, path: &str, ctype: &str, body: &[u8]) -> Result<(u16, Vec<u8>)> {
+        self.request_capped(method, path, ctype, body, MAX_RESPONSE)
+    }
+
+    fn request_capped(
+        &self,
+        method: &str,
+        path: &str,
+        ctype: &str,
+        body: &[u8],
+        cap: usize,
+    ) -> Result<(u16, Vec<u8>)> {
         let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: aegis\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
             self.endpoint.host_header()
@@ -266,10 +310,10 @@ impl Client {
             let mut s = connector
                 .connect(&self.endpoint.host, tcp)
                 .map_err(|e| Error::Net(format!("tls: {e}")))?;
-            exchange(&mut s, &req, deadline)
+            exchange(&mut s, &req, deadline, cap)
         } else {
             let mut s = tcp;
-            exchange(&mut s, &req, deadline)
+            exchange(&mut s, &req, deadline, cap)
         }
     }
 }
@@ -338,14 +382,23 @@ fn read_some<S: Read>(s: &mut S, buf: &mut Vec<u8>, deadline: Instant) -> Result
     }
 }
 
-fn exchange<S: Read + Write>(s: &mut S, req: &[u8], deadline: Instant) -> Result<(u16, Vec<u8>)> {
+fn exchange<S: Read + Write>(
+    s: &mut S,
+    req: &[u8],
+    deadline: Instant,
+    cap: usize,
+) -> Result<(u16, Vec<u8>)> {
     s.write_all(req)?;
     s.flush()?;
-    read_response(s, deadline)
+    read_response_capped(s, deadline, cap)
 }
 
 /// Reads one HTTP/1.x response (Content-Length, chunked or until close), capped at 1 MiB.
 pub fn read_response<S: Read>(s: &mut S, deadline: Instant) -> Result<(u16, Vec<u8>)> {
+    read_response_capped(s, deadline, MAX_RESPONSE)
+}
+
+fn read_response_capped<S: Read>(s: &mut S, deadline: Instant, cap: usize) -> Result<(u16, Vec<u8>)> {
     let mut buf = Vec::new();
     let head_end = loop {
         if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -380,7 +433,7 @@ pub fn read_response<S: Read>(s: &mut S, deadline: Instant) -> Result<(u16, Vec<
         let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
         if k == "content-length" {
             let n: usize = v.parse().map_err(|_| Error::BadResponse)?;
-            if n > MAX_RESPONSE || content_length.replace(n).is_some_and(|o| o != n) {
+            if n > cap || content_length.replace(n).is_some_and(|o| o != n) {
                 return Err(Error::BadResponse);
             }
         } else if k == "transfer-encoding" && v.to_ascii_lowercase().contains("chunked") {
@@ -390,10 +443,10 @@ pub fn read_response<S: Read>(s: &mut S, deadline: Instant) -> Result<(u16, Vec<
     let mut raw = buf.split_off(head_end + 4);
     let body = if chunked {
         loop {
-            if let Some(r) = decode_chunked(&raw) {
+            if let Some(r) = decode_chunked(&raw, cap) {
                 break r?;
             }
-            if raw.len() > MAX_RESPONSE * 2 {
+            if raw.len() > cap * 2 {
                 return Err(Error::BadResponse);
             }
             if read_some(s, &mut raw, deadline)? == 0 {
@@ -410,20 +463,20 @@ pub fn read_response<S: Read>(s: &mut S, deadline: Instant) -> Result<(u16, Vec<
         raw
     } else {
         while read_some(s, &mut raw, deadline)? != 0 {
-            if raw.len() > MAX_RESPONSE {
+            if raw.len() > cap {
                 return Err(Error::BadResponse);
             }
         }
         raw
     };
-    if body.len() > MAX_RESPONSE {
+    if body.len() > cap {
         return Err(Error::BadResponse);
     }
     Ok((code, body))
 }
 
 /// Decodes a complete chunked body, or `None` if more data is needed.
-fn decode_chunked(raw: &[u8]) -> Option<Result<Vec<u8>>> {
+fn decode_chunked(raw: &[u8], cap: usize) -> Option<Result<Vec<u8>>> {
     let mut out = Vec::new();
     let mut i = 0;
     loop {
@@ -444,7 +497,7 @@ fn decode_chunked(raw: &[u8]) -> Option<Result<Vec<u8>>> {
                 None
             };
         }
-        if out.len() + size > MAX_RESPONSE {
+        if out.len() + size > cap {
             return Some(Err(Error::BadResponse));
         }
         if raw.len() < i + size + 2 {

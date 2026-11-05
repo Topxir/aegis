@@ -7,11 +7,13 @@
     allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+mod blob;
 mod http;
 mod state;
 
-pub use http::{read_request, serve, write_response, HttpError, Request, Response};
+pub use blob::{BlobStore, MAX_BLOB_BYTES};
+pub use http::{read_request, serve, write_response, BlobReply, HttpError, Request, Response};
 pub use state::{
-    default_data_dir_from, persist_now, Config, ServerError, ServerState,
+    default_data_dir_from, handle_blob, persist_now, KEY_FILE, Config, ServerError, ServerState,
     DEFAULT_QUEUE_TTL_SECS, STATE_FILE,
 };

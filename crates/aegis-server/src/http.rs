@@ -1,4 +1,6 @@
-use crate::state::ServerState;
+use crate::blob::MAX_BLOB_BYTES;
+use crate::state::{handle_blob, persist_now, ServerState};
+use aegis_core::sealed;
 use aegis_core::text::parse_pairs;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -9,6 +11,10 @@ use std::time::{Duration, Instant};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
+/// A blob body must arrive within this window (absolute, per connection).
+const BLOB_BODY_WINDOW: Duration = Duration::from_secs(60);
+const BLOB_PUT_PATH: &str = "/api/v2/blob/put";
+const SEALED_PATH: &str = "/api/v2/s";
 const MAX_CONNECTIONS: usize = 256;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_DEADLINE: Duration = Duration::from_secs(15);
@@ -21,6 +27,13 @@ pub struct Request {
     pub path: String,
     pub query: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+/// Reply of the blob routes: JSON, or raw blob bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobReply {
+    Json(Response),
+    Bytes(Vec<u8>),
 }
 
 /// A JSON response.
@@ -150,24 +163,34 @@ pub fn read_request<R: BufRead>(r: &mut R, deadline: Instant) -> Result<Request,
             _ => {}
         }
     }
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    // The limit is decided by the request line alone, before any body byte is read.
+    let (limit, deadline) = if method == "POST" && path == BLOB_PUT_PATH {
+        (MAX_BLOB_BYTES, deadline.max(Instant::now() + BLOB_BODY_WINDOW))
+    } else if method == "POST" && path == SEALED_PATH {
+        (sealed::MAX_OUTER_BYTES, deadline.max(Instant::now() + BLOB_BODY_WINDOW))
+    } else {
+        (MAX_BODY_BYTES, deadline)
+    };
     let length = length.unwrap_or(0);
-    if length > MAX_BODY_BYTES {
+    if length > limit {
         return Err(HttpError::TooLarge);
     }
-    let mut body = vec![0u8; length];
-    let mut got = 0;
-    while got < length {
+    // Grow with the data actually received so idle connections do not pin the full size.
+    let mut body = Vec::with_capacity(length.min(16 * 1024));
+    let mut chunk = [0u8; 16 * 1024];
+    while body.len() < length {
         if Instant::now() > deadline {
             return Err(HttpError::Timeout);
         }
-        match r.read(&mut body[got..]) {
+        let want = chunk.len().min(length - body.len());
+        match r.read(&mut chunk[..want]) {
             Ok(0) => return Err(HttpError::Io),
-            Ok(n) => got += n,
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => return Err(io_err(&e)),
         }
     }
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let query = parse_pairs(query).map_err(|_| HttpError::Malformed)?;
     Ok(Request {
         method: method.to_owned(),
@@ -193,6 +216,17 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
+/// Writes a `200` with raw blob bytes.
+pub fn write_blob_bytes<W: Write>(w: &mut W, bytes: &[u8]) -> io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        bytes.len()
+    );
+    w.write_all(head.as_bytes())?;
+    w.write_all(bytes)?;
+    w.flush()
+}
+
 pub fn write_response<W: Write>(w: &mut W, resp: &Response) -> io::Result<()> {
     let head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
@@ -203,6 +237,74 @@ pub fn write_response<W: Write>(w: &mut W, resp: &Response) -> io::Result<()> {
     w.write_all(head.as_bytes())?;
     w.write_all(resp.body.as_bytes())?;
     w.flush()
+}
+
+/// Routes one request to the blob handlers or the main state. PIN changes are written to
+/// disk before the reply, so a restart can never reset an attempt counter.
+fn dispatch(state: &Mutex<ServerState>, req: &Request, now: u64) -> BlobReply {
+    if req.path.starts_with("/api/v2/blob/") {
+        return handle_blob(state, req, now);
+    }
+    let resp = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .handle(req, now);
+    if req.path.starts_with("/api/v2/pin/") || req.path.starts_with("/api/v2/prekeys/") {
+        let _ = persist_now(state);
+    }
+    BlobReply::Json(resp)
+}
+
+fn json_err(status: u16, msg: &str) -> BlobReply {
+    BlobReply::Json(Response { status, body: format!("{{\"error\":\"{msg}\"}}") })
+}
+
+/// `POST /api/v2/s`: opens the sealed request, runs it like a direct one and seals the answer.
+fn handle_sealed(state: &Mutex<ServerState>, outer: &Request) -> BlobReply {
+    let empty_400 = || BlobReply::Json(Response { status: 400, body: String::new() });
+    let sk = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .server_secret_key();
+    let Some(sk) = sk else { return empty_400() };
+    let Ok((inner, k_resp)) = sealed::open_request(&sk, &outer.body) else {
+        return empty_400();
+    };
+    let (status, body) = run_inner(state, &inner);
+    match sealed::seal_response(&k_resp, status, &body) {
+        Ok(b) => BlobReply::Bytes(b),
+        Err(_) => empty_400(),
+    }
+}
+
+fn run_inner(state: &Mutex<ServerState>, inner: &sealed::SealedRequest) -> (u16, Vec<u8>) {
+    let fail = |status: u16, msg: &str| (status, format!("{{\"error\":\"{msg}\"}}").into_bytes());
+    let (path, query) = inner.target.split_once('?').unwrap_or((inner.target.as_str(), ""));
+    if !inner.method.bytes().all(|c| c.is_ascii_uppercase())
+        || inner.method.is_empty()
+        || !path.starts_with('/')
+        || !inner.target.bytes().all(|c| (0x21..0x7f).contains(&c))
+        || path == SEALED_PATH
+    {
+        return fail(400, "malformed request");
+    }
+    let limit = if inner.method == "POST" && path == BLOB_PUT_PATH { MAX_BLOB_BYTES } else { MAX_BODY_BYTES };
+    if inner.body.len() > limit {
+        return fail(413, "request too large");
+    }
+    let Ok(query) = parse_pairs(query) else {
+        return fail(400, "malformed request");
+    };
+    let req = Request {
+        method: inner.method.clone(),
+        path: path.to_owned(),
+        query,
+        body: inner.body.clone(),
+    };
+    match dispatch(state, &req, aegis_core::now_secs()) {
+        BlobReply::Json(r) => (r.status, r.body.into_bytes()),
+        BlobReply::Bytes(b) => (200, b),
+    }
 }
 
 fn handle_connection(stream: TcpStream, state: &Mutex<ServerState>) {
@@ -216,19 +318,18 @@ fn handle_connection(stream: TcpStream, state: &Mutex<ServerState>) {
     };
     let mut reader = BufReader::new(read_half);
     let deadline = Instant::now() + REQUEST_DEADLINE;
-    let resp = match read_request(&mut reader, deadline) {
-        Ok(req) => state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .handle(&req, aegis_core::now_secs()),
+    let reply = match read_request(&mut reader, deadline) {
+        Ok(req) if req.method == "POST" && req.path == SEALED_PATH => handle_sealed(state, &req),
+        Ok(req) => dispatch(state, &req, aegis_core::now_secs()),
         Err(HttpError::Io) => return,
-        Err(e) => Response {
-            status: e.status(),
-            body: format!("{{\"error\":\"{e}\"}}"),
-        },
+        Err(e) => json_err(e.status(), &e.to_string()),
     };
     let mut out = &stream;
-    if write_response(&mut out, &resp).is_err() {
+    let written = match &reply {
+        BlobReply::Json(resp) => write_response(&mut out, resp),
+        BlobReply::Bytes(b) => write_blob_bytes(&mut out, b),
+    };
+    if written.is_err() {
         return;
     }
     let _ = stream.shutdown(Shutdown::Write);

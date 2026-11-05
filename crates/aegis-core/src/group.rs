@@ -31,7 +31,7 @@ fn sig_input(envelope: &[u8]) -> Vec<u8> {
     [b"aegis-v2 gmsg\n".as_slice(), envelope].concat()
 }
 
-/// Signs and encrypts a `gmsg` envelope with a random nonce.
+/// Signs and encrypts a `gmsg` or `gmf` envelope with a random nonce.
 pub fn group_encrypt(g: &[u8; 32], ed_sk: &[u8; 32], env: &Envelope) -> Result<Vec<u8>> {
     group_encrypt_with(&crate::random_bytes::<12>()?, g, ed_sk, env)
 }
@@ -43,10 +43,41 @@ pub fn group_encrypt_with(
     ed_sk: &[u8; 32],
     env: &Envelope,
 ) -> Result<Vec<u8>> {
-    if env.kind != Kind::Gmsg {
+    if !matches!(env.kind, Kind::Gmsg | Kind::Gmf) {
+        return Err(Error::BadFrameType);
+    }
+    let k = group_msg_key(g)?;
+    signed_frame_seal(&k, &group_id(g), nonce, ed_sk, env)
+}
+
+/// Decrypts a type 0x02 frame delivered on the queue of group `g` and verifies
+/// the envelope signature against its `sender_ed`. The caller still has to
+/// compare `sender_ed` with the pinned contact ([`crate::envelope::check_pinned_group`]).
+pub fn group_decrypt(g: &[u8; 32], frame: &[u8]) -> Result<Envelope> {
+    let k = group_msg_key(g)?;
+    let env = signed_frame_open(&k, frame)?;
+    if !matches!(env.kind, Kind::Gmsg | Kind::Gmf) {
         return Err(Error::BadFrameType);
     }
     if env.group_id != group_id(g) {
+        return Err(Error::GroupMismatch);
+    }
+    Ok(env)
+}
+
+/// Shared framing of sections 7 and 15: `0x02 || nonce || AEAD(k, nonce, 0x02, envelope || sig)`.
+/// `expected_id` is the group or channel id the envelope must carry.
+pub(crate) fn signed_frame_seal(
+    k: &[u8; 32],
+    expected_id: &str,
+    nonce: &[u8; 12],
+    ed_sk: &[u8; 32],
+    env: &Envelope,
+) -> Result<Vec<u8>> {
+    if env.kind.frame_type() != FRAME_GROUP {
+        return Err(Error::BadFrameType);
+    }
+    if env.group_id != expected_id {
         return Err(Error::GroupMismatch);
     }
     if env.sender_ed != ed25519_public(ed_sk) {
@@ -55,15 +86,13 @@ pub fn group_encrypt_with(
     let bytes = env.encode()?;
     let sig = ed25519_sign(ed_sk, &sig_input(&bytes));
     let plain = Zeroizing::new([bytes.as_slice(), &sig].concat());
-    let k = group_msg_key(g)?;
-    let ct = aead_seal(&k, nonce, &[FRAME_GROUP], &plain)?;
+    let ct = aead_seal(k, nonce, &[FRAME_GROUP], &plain)?;
     Ok([[FRAME_GROUP].as_slice(), nonce, &ct].concat())
 }
 
-/// Decrypts a type 0x02 frame delivered on the queue of group `g` and verifies
-/// the envelope signature against its `sender_ed`. The caller still has to
-/// compare `sender_ed` with the pinned contact ([`crate::envelope::check_pinned_group`]).
-pub fn group_decrypt(g: &[u8; 32], frame: &[u8]) -> Result<Envelope> {
+/// Decrypts a 0x02 frame and verifies the signature against the envelope's own `sender_ed`.
+/// The caller checks kind, group/channel id and the pinned key.
+pub(crate) fn signed_frame_open(k: &[u8; 32], frame: &[u8]) -> Result<Envelope> {
     if frame.len() < 1 + 12 + 16 + 64 {
         return Err(Error::Length);
     }
@@ -71,18 +100,14 @@ pub fn group_decrypt(g: &[u8; 32], frame: &[u8]) -> Result<Envelope> {
         return Err(Error::BadFrameType);
     }
     let nonce: [u8; 12] = arr(&frame[1..13])?;
-    let k = group_msg_key(g)?;
-    let plain = Zeroizing::new(aead_open(&k, &nonce, &[FRAME_GROUP], &frame[13..])?);
+    let plain = Zeroizing::new(aead_open(k, &nonce, &[FRAME_GROUP], &frame[13..])?);
     if plain.len() < 64 {
         return Err(Error::Length);
     }
     let (body, sig) = plain.split_at(plain.len() - 64);
     let env = Envelope::decode(body)?;
-    if env.kind != Kind::Gmsg {
+    if env.kind.frame_type() != FRAME_GROUP {
         return Err(Error::BadFrameType);
-    }
-    if env.group_id != group_id(g) {
-        return Err(Error::GroupMismatch);
     }
     let sig: [u8; 64] = arr(sig)?;
     if !ed25519_verify(&env.sender_ed, &sig_input(body), &sig) {

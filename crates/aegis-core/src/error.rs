@@ -12,6 +12,12 @@ pub enum Error {
     InvalidUsername,
     InvalidText,
     InvalidEnvelope(&'static str),
+    /// Attachment descriptor/blob or media sanitizing failure (sections 13 and 16).
+    Media(&'static str),
+    /// Session, ratchet or sender-key failure (sections 27 and 28).
+    Session(&'static str),
+    /// The server's pinned transport key changed (section 23).
+    ServerKeyChanged,
     ZeroSharedSecret,
     Decrypt,
     BadFrameType,
@@ -34,6 +40,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Error::InvalidEnvelope(why) => return write!(f, "invalid envelope: {why}"),
+            Error::Media(why) => return write!(f, "invalid media: {why}"),
+            Error::Session(why) => return write!(f, "session: {why}"),
+            Error::ServerKeyChanged => "the server key changed",
             Error::Net(why) => return write!(f, "network error: {why}"),
             Error::Http(code) => return write!(f, "server answered {code}"),
             Error::Io(why) => return write!(f, "i/o error: {why}"),

@@ -42,10 +42,21 @@ pub fn seal_dm_with(
     recipient_x_pk: &[u8; 32],
     env: &Envelope,
 ) -> Result<Vec<u8>> {
-    if env.kind == Kind::Gmsg {
+    if env.kind.frame_type() != FRAME_SEAL || env.kind == Kind::Skey {
         return Err(Error::BadFrameType);
     }
     let plain = zeroize::Zeroizing::new(env.encode()?);
+    seal_raw(FRAME_SEAL, e_sk, sender_x_sk, recipient_x_pk, &plain)
+}
+
+/// Sealed-sender construction of section 6 for frame type `ft` (`0x01` or `0x03`).
+pub(crate) fn seal_raw(
+    ft: u8,
+    e_sk: &[u8; 32],
+    sender_x_sk: &[u8; 32],
+    recipient_x_pk: &[u8; 32],
+    plain: &[u8],
+) -> Result<Vec<u8>> {
     let e_pk = x25519_public(e_sk);
     let s_pk = x25519_public(sender_x_sk);
     let dh1 = dh(e_sk, recipient_x_pk)?;
@@ -53,23 +64,27 @@ pub fn seal_dm_with(
     let salt = [e_pk.as_slice(), recipient_x_pk.as_slice()].concat();
 
     let k1 = hkdf32(dh1.as_ref(), &salt, b"aegis-v2 seal-1")?;
-    let aad1 = [[FRAME_SEAL].as_slice(), &e_pk].concat();
+    let aad1 = [[ft].as_slice(), &e_pk].concat();
     let c1 = aead_seal(&k1, &[0; 12], &aad1, &s_pk)?;
 
     let ikm = zeroize::Zeroizing::new([dh1.as_slice(), dh2.as_slice()].concat());
     let k2 = hkdf32(&ikm, &salt, b"aegis-v2 seal-2")?;
     let aad2 = [aad1.as_slice(), &c1].concat();
-    let c2 = aead_seal(&k2, &[0; 12], &aad2, &plain)?;
+    let c2 = aead_seal(&k2, &[0; 12], &aad2, plain)?;
 
     Ok([aad2.as_slice(), &c2].concat())
 }
 
-/// Opens a type 0x01 frame addressed to the owner of `recipient_x_sk`.
-pub fn open_dm(recipient_x_sk: &[u8; 32], frame: &[u8]) -> Result<Opened> {
+/// Inverse of [`seal_raw`]: returns the authenticated sender key and the plaintext of `c2`.
+pub(crate) fn open_raw(
+    ft: u8,
+    recipient_x_sk: &[u8; 32],
+    frame: &[u8],
+) -> Result<([u8; 32], zeroize::Zeroizing<Vec<u8>>)> {
     if frame.len() < MIN_LEN {
         return Err(Error::Length);
     }
-    if frame[0] != FRAME_SEAL {
+    if frame[0] != ft {
         return Err(Error::BadFrameType);
     }
     let e_pk: [u8; 32] = arr(&frame[1..33])?;
@@ -80,7 +95,7 @@ pub fn open_dm(recipient_x_sk: &[u8; 32], frame: &[u8]) -> Result<Opened> {
 
     let dh1 = dh(recipient_x_sk, &e_pk)?;
     let k1 = hkdf32(dh1.as_ref(), &salt, b"aegis-v2 seal-1")?;
-    let aad1 = [[FRAME_SEAL].as_slice(), &e_pk].concat();
+    let aad1 = [[ft].as_slice(), &e_pk].concat();
     let s_pk: [u8; 32] = arr(&aead_open(&k1, &[0; 12], &aad1, c1)?)?;
 
     let dh2 = dh(recipient_x_sk, &s_pk)?;
@@ -88,9 +103,14 @@ pub fn open_dm(recipient_x_sk: &[u8; 32], frame: &[u8]) -> Result<Opened> {
     let k2 = hkdf32(&ikm, &salt, b"aegis-v2 seal-2")?;
     let aad2 = [aad1.as_slice(), c1].concat();
     let plain = zeroize::Zeroizing::new(aead_open(&k2, &[0; 12], &aad2, c2)?);
+    Ok((s_pk, plain))
+}
 
+/// Opens a type 0x01 frame addressed to the owner of `recipient_x_sk`.
+pub fn open_dm(recipient_x_sk: &[u8; 32], frame: &[u8]) -> Result<Opened> {
+    let (s_pk, plain) = open_raw(FRAME_SEAL, recipient_x_sk, frame)?;
     let envelope = Envelope::decode(&plain)?;
-    if envelope.kind == Kind::Gmsg {
+    if envelope.kind.frame_type() != FRAME_SEAL || envelope.kind == Kind::Skey {
         return Err(Error::BadFrameType);
     }
     Ok(Opened {
@@ -167,7 +187,7 @@ mod tests {
             Error::ZeroSharedSecret
         );
         let mut g = dm();
-        g.kind = Kind::Gmsg;
+        g.kind = crate::envelope::Kind::Gmsg;
         g.group_id = "ab".repeat(32);
         assert_eq!(seal_dm(&S, &x25519_public(&R), &g).unwrap_err(), Error::BadFrameType);
         let mut f = frame();

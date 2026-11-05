@@ -1,4 +1,4 @@
-use aegis_server::{default_data_dir_from, persist_now, serve, ServerState};
+use aegis_server::{default_data_dir_from, persist_now, serve, Config, ServerState};
 use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,6 +10,7 @@ struct Args {
     bind: IpAddr,
     port: u16,
     data_dir: Option<PathBuf>,
+    blob_quota_mib: u64,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -17,6 +18,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
         bind: IpAddr::from([127, 0, 0, 1]),
         port: 8443,
         data_dir: None,
+        blob_quota_mib: 4096,
     };
     let mut it = args;
     while let Some(arg) = it.next() {
@@ -38,8 +40,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
                 out.port = value("--port")?.parse().map_err(|_| "invalid --port".to_owned())?;
             }
             "--data-dir" => out.data_dir = Some(PathBuf::from(value("--data-dir")?)),
+            "--blob-quota-mib" => {
+                out.blob_quota_mib = value("--blob-quota-mib")?
+                    .parse()
+                    .map_err(|_| "invalid --blob-quota-mib".to_owned())?;
+            }
             "--help" | "-h" => {
-                return Err("usage: aegis-serverd [--bind ADDR] [--port PORT] [--data-dir DIR]".into());
+                return Err("usage: aegis-serverd [--bind ADDR] [--port PORT] [--data-dir DIR] [--blob-quota-mib MIB]".into());
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -57,7 +64,13 @@ fn run() -> Result<(), String> {
         )
         .ok_or("no data directory: pass --data-dir")?,
     };
-    let state = ServerState::open(&data_dir).map_err(|e| format!("cannot open state: {e}"))?;
+    let state = ServerState::open_with(
+        &data_dir,
+        Config {
+            blob_quota_bytes: args.blob_quota_mib.saturating_mul(1024 * 1024),
+            ..Config::default()
+        },
+    ).map_err(|e| format!("cannot open state: {e}"))?;
     let state = Arc::new(Mutex::new(state));
     let listener = TcpListener::bind(SocketAddr::new(args.bind, args.port))
         .map_err(|e| format!("cannot bind: {e}"))?;

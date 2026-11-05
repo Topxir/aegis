@@ -6,7 +6,7 @@ use crate::{hex, Error, Result};
 use std::collections::{HashSet, VecDeque};
 use zeroize::Zeroizing;
 
-pub const MAX_MEMBERS: usize = 20;
+pub const MAX_MEMBERS: usize = 100;
 const FIELDS: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,14 +14,43 @@ pub enum Kind {
     Dm,
     Ginv,
     Gmsg,
+    /// Direct attachment descriptor (section 13).
+    Dmf,
+    /// Group attachment descriptor.
+    Gmf,
+    /// Channel invite (section 15).
+    Cinv,
+    /// Channel text post.
+    Cmsg,
+    /// Channel attachment post.
+    Cmf,
+    /// Profile card (section 22).
+    Prof,
+    /// Sender-key chain distribution (section 28).
+    Skey,
 }
 
 impl Kind {
+    /// Frame type that carries this envelope kind: `0x01` (sealed) or `0x02` (group/channel queue).
+    pub fn frame_type(self) -> u8 {
+        match self {
+            Kind::Dm | Kind::Ginv | Kind::Dmf | Kind::Cinv | Kind::Prof | Kind::Skey => 0x01,
+            Kind::Gmsg | Kind::Gmf | Kind::Cmsg | Kind::Cmf => 0x02,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Dm => "dm",
             Kind::Ginv => "ginv",
             Kind::Gmsg => "gmsg",
+            Kind::Dmf => "dmf",
+            Kind::Gmf => "gmf",
+            Kind::Cinv => "cinv",
+            Kind::Cmsg => "cmsg",
+            Kind::Cmf => "cmf",
+            Kind::Prof => "prof",
+            Kind::Skey => "skey",
         }
     }
 
@@ -30,6 +59,13 @@ impl Kind {
             "dm" => Ok(Kind::Dm),
             "ginv" => Ok(Kind::Ginv),
             "gmsg" => Ok(Kind::Gmsg),
+            "dmf" => Ok(Kind::Dmf),
+            "gmf" => Ok(Kind::Gmf),
+            "cinv" => Ok(Kind::Cinv),
+            "cmsg" => Ok(Kind::Cmsg),
+            "cmf" => Ok(Kind::Cmf),
+            "prof" => Ok(Kind::Prof),
+            "skey" => Ok(Kind::Skey),
             _ => Err(Error::InvalidEnvelope("type")),
         }
     }
@@ -66,6 +102,17 @@ impl core::fmt::Debug for Envelope {
     }
 }
 
+/// Parses the `skey` body `hex(chain_id) ":" n` (spec section 28).
+pub fn parse_skey_body(body: &str) -> Result<([u8; 16], u32)> {
+    let (id, n) = body.split_once(':').ok_or(Error::InvalidEnvelope("skey body"))?;
+    if !hex::is_hex_len(id, 16) || n.is_empty() || (n.len() > 1 && n.starts_with('0')) {
+        return Err(Error::InvalidEnvelope("skey body"));
+    }
+    let n = parse_dec(n)?;
+    let n = u32::try_from(n).map_err(|_| Error::InvalidEnvelope("skey body"))?;
+    Ok((hex::decode_array::<16>(id)?, n))
+}
+
 /// Fresh random `msg_id`.
 pub fn random_msg_id() -> Result<String> {
     Ok(hex::encode(&crate::random_bytes::<16>()?))
@@ -84,19 +131,36 @@ impl Envelope {
             return Err(Error::InvalidEnvelope("sender"));
         }
         match self.kind {
-            Kind::Dm => {
+            Kind::Dm | Kind::Dmf | Kind::Prof => {
                 if !self.group_id.is_empty() || self.group_key.is_some() || !self.members.is_empty()
                 {
                     return Err(Error::InvalidEnvelope("dm carries group fields"));
                 }
             }
-            Kind::Gmsg => {
+            Kind::Gmsg | Kind::Gmf | Kind::Cmsg | Kind::Cmf => {
                 if !hex::is_hex_len(&self.group_id, 32) {
                     return Err(Error::InvalidEnvelope("group_id"));
                 }
                 if self.group_key.is_some() || !self.members.is_empty() {
                     return Err(Error::InvalidEnvelope("gmsg carries invite fields"));
                 }
+            }
+            Kind::Cinv => {
+                let Some(key) = &self.group_key else {
+                    return Err(Error::InvalidEnvelope("group_key"));
+                };
+                if self.group_id != crate::channel::channel_id(key) {
+                    return Err(Error::InvalidEnvelope("group_id does not match group_key"));
+                }
+                if !self.members.is_empty() {
+                    return Err(Error::InvalidEnvelope("cinv carries members"));
+                }
+            }
+            Kind::Skey => {
+                if !hex::is_hex_len(&self.group_id, 32) || self.group_key.is_none() || !self.members.is_empty() {
+                    return Err(Error::InvalidEnvelope("skey fields"));
+                }
+                parse_skey_body(&self.body)?;
             }
             Kind::Ginv => {
                 let Some(key) = &self.group_key else {
@@ -216,7 +280,7 @@ pub fn check_pinned_dm(env: &Envelope, sender_x_pk: &[u8; 32], pinned: &PinnedKe
     }
 }
 
-/// Receiver check for `gmsg`: `sender_ed` must equal the pinned key.
+/// Receiver check for `gmsg`/`gmf`: `sender_ed` must equal the pinned key.
 pub fn check_pinned_group(env: &Envelope, pinned: &PinnedKeys) -> Result<()> {
     if pinned.ed_pk == env.sender_ed {
         Ok(())
@@ -356,8 +420,39 @@ pub(crate) mod tests {
         g.group_id = "ab".repeat(32);
         assert!(g.encode().is_err());
         let mut g = ginv();
-        g.members = (0..21).map(|i| format!("user{i:02}")).collect();
+        g.members = (0..101).map(|i| format!("user{i:02}")).collect();
         assert!(g.encode().is_err());
+    }
+
+    #[test]
+    fn new_kinds_and_frame_types() {
+        let all = [
+            (Kind::Dm, 1), (Kind::Prof, 1), (Kind::Ginv, 1), (Kind::Dmf, 1), (Kind::Cinv, 1),
+            (Kind::Gmsg, 2), (Kind::Gmf, 2), (Kind::Cmsg, 2), (Kind::Cmf, 2),
+        ];
+        for (k, t) in all {
+            assert_eq!(k.frame_type(), t);
+            assert_eq!(Kind::parse(k.as_str()).unwrap(), k);
+        }
+        let dmf = Envelope { kind: Kind::Dmf, ..dm() };
+        assert_eq!(Envelope::decode(&dmf.encode().unwrap()).unwrap(), dmf);
+        let cmf = Envelope { kind: Kind::Cmf, group_id: "ab".repeat(32), ..dm() };
+        assert_eq!(Envelope::decode(&cmf.encode().unwrap()).unwrap(), cmf);
+        // dmf must not carry group fields, cmf needs a channel id.
+        assert!(Envelope { group_id: "ab".repeat(32), ..dmf.clone() }.encode().is_err());
+        assert!(Envelope { group_id: String::new(), ..cmf }.encode().is_err());
+        let enc = String::from_utf8(dmf.encode().unwrap()).unwrap();
+        for bad in ["dmff", "DMF", "cmsgs", ""] {
+            assert!(Envelope::decode(enc.replacen("dmf", bad, 1).as_bytes()).is_err(), "{bad}");
+        }
+        // Frame type 0x01 refuses kinds that belong to 0x02 queues.
+        let r = crate::identity::x25519_public(&[2; 32]);
+        for k in [Kind::Gmf, Kind::Cmsg, Kind::Cmf] {
+            let e = Envelope { kind: k, group_id: "ab".repeat(32), ..dm() };
+            assert_eq!(crate::seal::seal_dm(&[1; 32], &r, &e).unwrap_err(), Error::BadFrameType);
+        }
+        let f = crate::seal::seal_dm(&[1; 32], &r, &dmf).unwrap();
+        assert_eq!(crate::seal::open_dm(&[2; 32], &f).unwrap().envelope, dmf);
     }
 
     #[test]

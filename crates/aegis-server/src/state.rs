@@ -1,5 +1,7 @@
-use crate::http::{Request, Response};
+use crate::blob::{is_blob_id, BlobStore, Reserve, DEFAULT_BLOB_QUOTA_BYTES, DEFAULT_BLOB_TTL_SECS, MAX_BLOB_BYTES};
+use crate::http::{BlobReply, Request, Response};
 use aegis_core::directory::Registration;
+use aegis_core::prekeys::{PrekeyPut, PrekeyTake, MAX_OPKS};
 use aegis_core::identity::is_valid_username;
 use aegis_core::text::parse_u64;
 use aegis_core::{hex, pad, pow};
@@ -8,13 +10,20 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Frames are kept this long (14 days).
 pub const DEFAULT_QUEUE_TTL_SECS: u64 = 14 * 24 * 3600;
 /// Name of the persisted state inside the data directory.
 pub const STATE_FILE: &str = "server-v2.state";
-const MAGIC: &[u8; 8] = b"AEGSRV02";
+const MAGIC: &[u8; 8] = b"AEGSRV04";
+const MAGIC_V3: &[u8; 8] = b"AEGSRV03";
+const MAGIC_V2: &[u8; 8] = b"AEGSRV02";
+/// Name of the server's long-term X25519 secret (section 23) inside the data directory.
+pub const KEY_FILE: &str = "server-x25519.key";
+/// Slots unused for this long expire (section 20).
+const PIN_TTL_SECS: u64 = 90 * 24 * 3600;
+const PIN_MAX_FAILS: u8 = 5;
 const POLL_PAGE: usize = 100;
 
 /// Tunable limits. The defaults are the protocol values.
@@ -26,6 +35,16 @@ pub struct Config {
     pub replay_secs: u64,
     pub max_queues: usize,
     pub max_directory_entries: usize,
+    pub max_pin_slots: usize,
+    /// Most users with stored prekeys (about 3.5 KiB each when full).
+    pub max_prekey_users: usize,
+    /// Minimum seconds between verification attempts on one PIN slot (`0` disables).
+    pub pin_min_interval_secs: u64,
+    /// Most PIN verification attempts per second over all slots.
+    pub pin_global_per_sec: u32,
+    /// Total size cap of the blob store in bytes.
+    pub blob_quota_bytes: u64,
+    pub blob_ttl_secs: u64,
 }
 
 impl Default for Config {
@@ -37,6 +56,12 @@ impl Default for Config {
             replay_secs: 20 * 60,
             max_queues: 200_000,
             max_directory_entries: 1_000_000,
+            max_pin_slots: 100_000,
+            max_prekey_users: 1_000_000,
+            pin_min_interval_secs: 1,
+            pin_global_per_sec: 50,
+            blob_quota_bytes: DEFAULT_BLOB_QUOTA_BYTES,
+            blob_ttl_secs: DEFAULT_BLOB_TTL_SECS,
         }
     }
 }
@@ -46,6 +71,8 @@ pub enum ServerError {
     Io(String),
     /// The state file exists but cannot be parsed; it is left untouched.
     Corrupt,
+    /// The server key file exists but is unusable; it is never regenerated.
+    CorruptKey,
 }
 
 impl fmt::Display for ServerError {
@@ -53,6 +80,7 @@ impl fmt::Display for ServerError {
         match self {
             ServerError::Io(e) => write!(f, "i/o error: {e}"),
             ServerError::Corrupt => f.write_str("state file is corrupt"),
+            ServerError::CorruptKey => f.write_str("server key file is corrupt"),
         }
     }
 }
@@ -71,6 +99,22 @@ struct DirEntry {
     ed: [u8; 32],
 }
 
+struct PinSlot {
+    v: [u8; 32],
+    s: [u8; 32],
+    fails: u8,
+    last_used: u64,
+    /// Unix second of the last counted attempt (memory only).
+    last_attempt: u64,
+}
+
+struct Prekeys {
+    spk: [u8; 32],
+    spk_ts: u64,
+    spk_sig: [u8; 64],
+    opks: VecDeque<[u8; 32]>,
+}
+
 struct Frame {
     seq: u64,
     stored_at: u64,
@@ -85,6 +129,11 @@ pub struct ServerState {
     queues: HashMap<[u8; 32], VecDeque<Frame>>,
     next_seq: u64,
     replay: HashMap<[u8; 32], u64>,
+    blobs: Option<Arc<BlobStore>>,
+    pins: HashMap<[u8; 32], PinSlot>,
+    prekeys: HashMap<String, Prekeys>,
+    pin_window: (u64, u32),
+    srv_sk: Option<[u8; 32]>,
     dirty: bool,
 }
 
@@ -148,7 +197,11 @@ impl ServerState {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
+        s.srv_sk = Some(load_or_create_key(&data_dir.join(KEY_FILE))?);
         s.path = Some(path);
+        let blobs = BlobStore::open(data_dir, s.config.blob_quota_bytes, s.config.blob_ttl_secs)?;
+        blobs.purge(aegis_core::now_secs());
+        s.blobs = Some(Arc::new(blobs));
         Ok(s)
     }
 
@@ -161,6 +214,11 @@ impl ServerState {
             queues: HashMap::new(),
             next_seq: 1,
             replay: HashMap::new(),
+            blobs: None,
+            pins: HashMap::new(),
+            prekeys: HashMap::new(),
+            pin_window: (0, 0),
+            srv_sk: aegis_core::random_bytes::<32>().ok(),
             dirty: false,
         }
     }
@@ -177,11 +235,21 @@ impl ServerState {
     pub fn handle(&mut self, req: &Request, now: u64) -> Response {
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/health") => json_resp(200, &json!({"status": "ok", "protocol": 2})),
+            ("GET", "/api/v2/key") => match self.server_public_key() {
+                Some(pk) => json_resp(200, &json!({"x": hex::encode(&pk)})),
+                None => err(503, "no server key"),
+            },
+            ("POST", "/api/v2/nop") => nop(&req.body),
+            ("POST", "/api/v2/pin/create") => self.pin_create(&req.body, now),
+            ("POST", "/api/v2/pin/open") => self.pin_verify(&req.body, now, false),
+            ("POST", "/api/v2/pin/delete") => self.pin_verify(&req.body, now, true),
+            ("POST", "/api/v2/prekeys/put") => self.prekeys_put(&req.body, now),
+            ("POST", "/api/v2/prekeys/take") => self.prekeys_take(&req.body, now),
             ("POST", "/api/v2/dir/register") => self.register(&req.body, now),
             ("GET", "/api/v2/dir/lookup") => self.lookup(&req.query),
             ("POST", "/api/v2/queue/send") => self.send(&req.query, &req.body, now),
             ("GET", "/api/v2/queue/poll") => self.poll(&req.query, now),
-            (_, "/health" | "/api/v2/dir/register" | "/api/v2/dir/lookup" | "/api/v2/queue/send" | "/api/v2/queue/poll") => {
+            (_, "/health" | "/api/v2/key" | "/api/v2/nop" | "/api/v2/pin/create" | "/api/v2/pin/open" | "/api/v2/pin/delete" | "/api/v2/prekeys/put" | "/api/v2/prekeys/take" | "/api/v2/dir/register" | "/api/v2/dir/lookup" | "/api/v2/queue/send" | "/api/v2/queue/poll") => {
                 err(405, "method not allowed")
             }
             _ => err(404, "not found"),
@@ -364,7 +432,298 @@ impl ServerState {
             !fr.is_empty()
         });
         self.replay.retain(|_, exp| *exp > now);
+        let before = self.pins.len();
+        self.pins.retain(|_, p| p.last_used.saturating_add(PIN_TTL_SECS) > now);
+        changed |= self.pins.len() != before;
+        if let Some(b) = &self.blobs {
+            b.purge(now);
+        }
         self.dirty |= changed;
+    }
+
+    /// Public half of the long-term transport key (section 23).
+    pub fn server_public_key(&self) -> Option<[u8; 32]> {
+        self.srv_sk.as_ref().map(aegis_core::identity::x25519_public)
+    }
+
+    /// Secret half, for opening sealed requests.
+    pub fn server_secret_key(&self) -> Option<[u8; 32]> {
+        self.srv_sk
+    }
+
+    pub fn pin_slots(&self) -> usize {
+        self.pins.len()
+    }
+
+    fn prekeys_put(&mut self, body: &[u8], now: u64) -> Response {
+        let Ok(text) = core::str::from_utf8(body) else {
+            return err(400, "body is not utf-8");
+        };
+        let Ok(put) = PrekeyPut::from_form(text) else {
+            return err(400, "malformed prekeys");
+        };
+        let Some(entry) = self.dir.get(&put.u) else {
+            return err(404, "unknown user");
+        };
+        let ed = entry.ed;
+        if !pow::ts_in_window(put.ts, now) {
+            return err(403, "timestamp out of range");
+        }
+        if !put.sig_ok(&ed) || !put.spk_sig_ok(&ed) {
+            return err(403, "bad signature");
+        }
+        let hash = aegis_core::sha256(&[&put.message()]);
+        if self.pow_spent(hash, now) {
+            return err(403, "request already used");
+        }
+        if put.spk_ts > now.saturating_add(pow::MAX_SKEW_SECS) {
+            return err(403, "spk_ts in the future");
+        }
+        let stored = self.prekeys.get(&put.u);
+        if stored.is_some_and(|p| put.spk_ts <= p.spk_ts) {
+            return err(409, "spk_ts is not newer");
+        }
+        if stored.is_none() && self.prekeys.len() >= self.config.max_prekey_users {
+            return err(503, "prekey table full");
+        }
+        self.replay.insert(hash, self.replay_expiry(put.ts, now));
+        let rec = self.prekeys.entry(put.u).or_insert_with(|| Prekeys {
+            spk: put.spk,
+            spk_ts: put.spk_ts,
+            spk_sig: put.spk_sig,
+            opks: VecDeque::new(),
+        });
+        rec.spk = put.spk;
+        rec.spk_ts = put.spk_ts;
+        rec.spk_sig = put.spk_sig;
+        for o in put.opks {
+            if !rec.opks.contains(&o) {
+                rec.opks.push_back(o);
+            }
+        }
+        while rec.opks.len() > MAX_OPKS {
+            rec.opks.pop_front();
+        }
+        self.dirty = true;
+        json_resp(200, &json!({"opks": rec.opks.len()}))
+    }
+
+    fn prekeys_take(&mut self, body: &[u8], now: u64) -> Response {
+        let Ok(text) = core::str::from_utf8(body) else {
+            return err(400, "body is not utf-8");
+        };
+        let Ok(take) = PrekeyTake::from_form(text) else {
+            return err(400, "malformed request");
+        };
+        if !pow::ts_in_window(take.ts, now) {
+            return err(403, "timestamp out of range");
+        }
+        if !take.pow_ok(self.config.pow_bits) {
+            return err(403, "insufficient proof of work");
+        }
+        let hash = pow::pow_hash(
+            &aegis_core::prekeys::take_scope(&take.u),
+            take.ts,
+            &aegis_core::prekeys::take_body_hash(&take.u, take.ts),
+            take.pow,
+        );
+        if self.pow_spent(hash, now) {
+            return err(403, "proof of work already used");
+        }
+        self.replay.insert(hash, self.replay_expiry(take.ts, now));
+        let Some(rec) = self.prekeys.get_mut(&take.u) else {
+            return err(404, "not found");
+        };
+        let opk = rec.opks.pop_front();
+        if opk.is_some() {
+            self.dirty = true;
+        }
+        json_resp(
+            200,
+            &json!({
+                "spk": hex::encode(&rec.spk),
+                "spk_ts": rec.spk_ts,
+                "spk_sig": hex::encode(&rec.spk_sig),
+                "opk": opk.map(|o| hex::encode(&o)).unwrap_or_default(),
+            }),
+        )
+    }
+
+    /// Parses a form body with exactly the given keys, each a 32-byte lowercase hex value
+    /// (`ts` and `pow` are decimal).
+    fn pin_form(body: &[u8], keys: &[&str]) -> Result<(Vec<[u8; 32]>, u64, u64), Response> {
+        let text = core::str::from_utf8(body).map_err(|_| err(400, "body is not utf-8"))?;
+        let pairs = aegis_core::text::parse_pairs(text).map_err(|_| err(400, "malformed form"))?;
+        if pairs.len() != keys.len() + 2 {
+            return Err(err(400, "malformed form"));
+        }
+        let mut vals = Vec::new();
+        for k in keys {
+            let v = one(&pairs, k)?.ok_or_else(|| err(400, "missing field"))?;
+            vals.push(hex::decode_array::<32>(v).map_err(|_| err(400, "bad field"))?);
+        }
+        let num = |k: &str| -> Result<u64, Response> {
+            one(&pairs, k)?
+                .and_then(|s| parse_u64(s).ok())
+                .ok_or_else(|| err(400, "bad parameter"))
+        };
+        Ok((vals, num("ts")?, num("pow")?))
+    }
+
+    /// Checks ts window, proof of work and replay for a PIN request. Returns the pow hash;
+    /// the caller records it once the request is accepted for processing.
+    fn pin_pow(&mut self, slot: &[u8; 32], hash_fields: &[&[u8; 32]], ts: u64, nonce: u64, now: u64) -> Result<[u8; 32], Response> {
+        if !pow::ts_in_window(ts, now) {
+            return Err(err(403, "timestamp out of range"));
+        }
+        let joined = hash_fields.iter().map(|f| hex::encode(*f)).collect::<Vec<_>>().join("\n");
+        let scope = format!("pin:{}", hex::encode(slot));
+        let body_hash = pow::body_hash_hex(joined.as_bytes());
+        if !pow::verify(&scope, ts, &body_hash, nonce, self.config.pow_bits) {
+            return Err(err(403, "insufficient proof of work"));
+        }
+        let hash = pow::pow_hash(&scope, ts, &body_hash, nonce);
+        if self.pow_spent(hash, now) {
+            return Err(err(403, "proof of work already used"));
+        }
+        Ok(hash)
+    }
+
+    fn pin_create(&mut self, body: &[u8], now: u64) -> Response {
+        let (vals, ts, nonce) = match Self::pin_form(body, &["slot", "v", "s"]) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let (slot, v, s) = (vals[0], vals[1], vals[2]);
+        let hash = match self.pin_pow(&slot, &[&slot, &v, &s], ts, nonce, now) {
+            Ok(h) => h,
+            Err(r) => return r,
+        };
+        if self.pins.contains_key(&slot) {
+            return err(409, "slot exists");
+        }
+        if self.pins.len() >= self.config.max_pin_slots {
+            return err(503, "pin table full");
+        }
+        self.replay.insert(hash, self.replay_expiry(ts, now));
+        self.pins.insert(slot, PinSlot { v, s, fails: 0, last_used: now, last_attempt: 0 });
+        self.dirty = true;
+        json_resp(200, &json!({}))
+    }
+
+    /// `pin/open` (returns the secret) and `pin/delete` (removes the slot) share the attempt counter.
+    fn pin_verify(&mut self, body: &[u8], now: u64, delete: bool) -> Response {
+        let (vals, ts, nonce) = match Self::pin_form(body, &["slot", "v"]) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let (slot, v) = (vals[0], vals[1]);
+        let hash = match self.pin_pow(&slot, &[&slot, &v], ts, nonce, now) {
+            Ok(h) => h,
+            Err(r) => return r,
+        };
+        let expiry = self.replay_expiry(ts, now);
+        let Some(entry) = self.pins.get(&slot) else {
+            self.replay.insert(hash, expiry);
+            return err(404, "not found");
+        };
+        if entry.last_used.saturating_add(PIN_TTL_SECS) <= now {
+            self.pins.remove(&slot);
+            self.dirty = true;
+            self.replay.insert(hash, expiry);
+            return err(404, "not found");
+        }
+        // Throttles: the request is not counted and its proof of work stays usable.
+        let min = self.config.pin_min_interval_secs;
+        if min > 0 && entry.last_attempt != 0 && now < entry.last_attempt.saturating_add(min) {
+            return err(429, "too many attempts");
+        }
+        if self.pin_window.0 != now {
+            self.pin_window = (now, 0);
+        }
+        if self.pin_window.1 >= self.config.pin_global_per_sec {
+            return err(429, "too many attempts");
+        }
+        self.pin_window.1 += 1;
+        self.replay.insert(hash, expiry);
+        let Some(entry) = self.pins.get_mut(&slot) else {
+            return err(404, "not found");
+        };
+        entry.last_attempt = now;
+        if ct_eq(&entry.v, &v) {
+            self.dirty = true;
+            if delete {
+                self.pins.remove(&slot);
+                return json_resp(200, &json!({}));
+            }
+            entry.fails = 0;
+            entry.last_used = now;
+            return json_resp(200, &json!({"s": hex::encode(&entry.s)}));
+        }
+        entry.fails += 1;
+        self.dirty = true;
+        let left = PIN_MAX_FAILS.saturating_sub(entry.fails);
+        if left == 0 {
+            self.pins.remove(&slot);
+        }
+        json_resp(403, &json!({"left": left}))
+    }
+
+    /// The blob store, present when the state is backed by a data directory.
+    pub fn blob_store(&self) -> Option<&Arc<BlobStore>> {
+        self.blobs.as_ref()
+    }
+
+    /// Validates a blob upload, spends its proof of work and reserves quota. The caller then
+    /// writes the data outside the state lock with `BlobStore::write_reserved`.
+    fn blob_put_prepare(
+        &mut self,
+        q: &[(String, String)],
+        body: &[u8],
+        now: u64,
+    ) -> Result<(Arc<BlobStore>, String), Response> {
+        let id = match one(q, "id") {
+            Ok(Some(id)) if is_blob_id(id) => id.to_owned(),
+            Ok(_) => return Err(err(400, "bad id")),
+            Err(r) => return Err(r),
+        };
+        let parse = |k: &str| -> Result<u64, Response> {
+            one(q, k)?
+                .and_then(|s| parse_u64(s).ok())
+                .ok_or_else(|| err(400, "bad parameter"))
+        };
+        let (ts, nonce) = match (parse("ts"), parse("pow")) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(r), _) | (_, Err(r)) => return Err(r),
+        };
+        if body.is_empty() {
+            return Err(err(400, "empty body"));
+        }
+        if body.len() > MAX_BLOB_BYTES {
+            return Err(err(413, "request too large"));
+        }
+        if !pow::ts_in_window(ts, now) {
+            return Err(err(403, "timestamp out of range"));
+        }
+        let scope = format!("blob:{id}");
+        let body_hash = pow::body_hash_hex(body);
+        if !pow::verify(&scope, ts, &body_hash, nonce, self.config.pow_bits) {
+            return Err(err(403, "insufficient proof of work"));
+        }
+        let hash = pow::pow_hash(&scope, ts, &body_hash, nonce);
+        if self.pow_spent(hash, now) {
+            return Err(err(403, "proof of work already used"));
+        }
+        let Some(store) = self.blobs.clone() else {
+            return Err(err(503, "blob store unavailable"));
+        };
+        match store.reserve(&id, body.len() as u64, now) {
+            Ok(()) => {}
+            Err(Reserve::Exists) => return Err(err(409, "blob exists")),
+            Err(Reserve::OverQuota) => return Err(err(503, "blob store full")),
+        }
+        self.replay.insert(hash, self.replay_expiry(ts, now));
+        Ok((store, id))
     }
 
     pub fn queue_len(&self, qid: &[u8; 32]) -> usize {
@@ -396,6 +755,25 @@ impl ServerState {
             o.extend_from_slice(&e.x);
             o.extend_from_slice(&e.ed);
         }
+        put_len(&mut o, self.pins.len());
+        for (slot, p) in &self.pins {
+            o.extend_from_slice(slot);
+            o.extend_from_slice(&p.v);
+            o.extend_from_slice(&p.s);
+            o.push(p.fails);
+            o.extend_from_slice(&p.last_used.to_be_bytes());
+        }
+        put_len(&mut o, self.prekeys.len());
+        for (u, p) in &self.prekeys {
+            put_bytes(&mut o, u.as_bytes());
+            o.extend_from_slice(&p.spk);
+            o.extend_from_slice(&p.spk_ts.to_be_bytes());
+            o.extend_from_slice(&p.spk_sig);
+            put_len(&mut o, p.opks.len());
+            for k in &p.opks {
+                o.extend_from_slice(k);
+            }
+        }
         put_len(&mut o, self.queues.len());
         for (q, frames) in &self.queues {
             o.extend_from_slice(q);
@@ -412,9 +790,12 @@ impl ServerState {
     fn load(&mut self, bytes: &[u8]) -> Result<(), ServerError> {
         let mut r = Reader { b: bytes, i: 0 };
         let parsed = (|| -> Option<()> {
-            if r.take(8)? != MAGIC {
+            let magic = r.take(8)?;
+            if magic != MAGIC && magic != MAGIC_V3 && magic != MAGIC_V2 {
                 return None;
             }
+            let has_pins = magic != MAGIC_V2;
+            let has_prekeys = magic == MAGIC;
             self.next_seq = r.u64()?;
             for _ in 0..r.u32()? {
                 let u = String::from_utf8(r.bytes()?.to_vec()).ok()?;
@@ -425,6 +806,36 @@ impl ServerState {
                     return None;
                 }
                 self.dir.insert(u, DirEntry { title, x, ed });
+            }
+            if has_pins {
+                for _ in 0..r.u32()? {
+                    let slot: [u8; 32] = r.take(32)?.try_into().ok()?;
+                    let v: [u8; 32] = r.take(32)?.try_into().ok()?;
+                    let s: [u8; 32] = r.take(32)?.try_into().ok()?;
+                    let fails = r.take(1)?[0];
+                    let last_used = r.u64()?;
+                    if fails >= PIN_MAX_FAILS {
+                        return None;
+                    }
+                    self.pins.insert(slot, PinSlot { v, s, fails, last_used, last_attempt: 0 });
+                }
+            }
+            if has_prekeys {
+                for _ in 0..r.u32()? {
+                    let u = String::from_utf8(r.bytes()?.to_vec()).ok()?;
+                    let spk: [u8; 32] = r.take(32)?.try_into().ok()?;
+                    let spk_ts = r.u64()?;
+                    let spk_sig: [u8; 64] = r.take(64)?.try_into().ok()?;
+                    let n = r.u32()? as usize;
+                    if n > MAX_OPKS || !is_valid_username(&u) {
+                        return None;
+                    }
+                    let mut opks = VecDeque::new();
+                    for _ in 0..n {
+                        opks.push_back(<[u8; 32]>::try_from(r.take(32)?).ok()?);
+                    }
+                    self.prekeys.insert(u, Prekeys { spk, spk_ts, spk_sig, opks });
+                }
             }
             for _ in 0..r.u32()? {
                 let q: [u8; 32] = r.take(32)?.try_into().ok()?;
@@ -444,11 +855,96 @@ impl ServerState {
         })();
         if parsed.is_none() {
             self.dir.clear();
+            self.pins.clear();
+            self.prekeys.clear();
             self.queues.clear();
             return Err(ServerError::Corrupt);
         }
         Ok(())
     }
+}
+
+/// Handles the `/api/v2/blob/*` routes. File I/O happens outside the state lock.
+pub fn handle_blob(state: &Mutex<ServerState>, req: &Request, now: u64) -> BlobReply {
+    let lock = || state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match (req.method.as_str(), req.path.as_str()) {
+        ("POST", "/api/v2/blob/put") => {
+            let prepared = lock().blob_put_prepare(&req.query, &req.body, now);
+            match prepared {
+                Ok((store, id)) => match store.write_reserved(&id, &req.body, now) {
+                    Ok(()) => BlobReply::Json(json_resp(200, &json!({}))),
+                    Err(_) => BlobReply::Json(err(503, "storage error")),
+                },
+                Err(r) => BlobReply::Json(r),
+            }
+        }
+        ("GET", "/api/v2/blob/get") => {
+            let id = match one(&req.query, "id") {
+                Ok(Some(id)) if is_blob_id(id) => id,
+                Ok(_) => return BlobReply::Json(err(400, "bad id")),
+                Err(r) => return BlobReply::Json(r),
+            };
+            let store = lock().blobs.clone();
+            match store.and_then(|b| b.get(id, now)) {
+                Some(bytes) => BlobReply::Bytes(bytes),
+                None => BlobReply::Json(err(404, "not found")),
+            }
+        }
+        (_, "/api/v2/blob/put" | "/api/v2/blob/get") => BlobReply::Json(err(405, "method not allowed")),
+        _ => BlobReply::Json(err(404, "not found")),
+    }
+}
+
+/// Cover traffic (section 26): `BE32(resp_len) || random` is answered with `resp_len` zero bytes.
+fn nop(body: &[u8]) -> Response {
+    let Some(len) = body.first_chunk::<4>().map(|b| u32::from_be_bytes(*b) as usize) else {
+        return err(400, "short body");
+    };
+    if len > 65_536 {
+        return err(400, "bad length");
+    }
+    Response { status: 200, body: " ".repeat(len) }
+}
+
+fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut d = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        d |= x ^ y;
+    }
+    std::hint::black_box(d) == 0
+}
+
+/// Loads the server key, or creates it on first start. A bad file is an error, never replaced.
+fn load_or_create_key(path: &Path) -> Result<[u8; 32], ServerError> {
+    match std::fs::read(path) {
+        Ok(b) => return <[u8; 32]>::try_from(b.as_slice()).map_err(|_| ServerError::CorruptKey),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let sk = aegis_core::random_bytes::<32>().map_err(|_| ServerError::Io("rng".into()))?;
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    let res = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(&sk)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(sk)
 }
 
 fn put_len(o: &mut Vec<u8>, n: usize) {

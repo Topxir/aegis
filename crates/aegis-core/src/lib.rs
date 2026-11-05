@@ -5,17 +5,26 @@
     allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+pub mod attach;
+pub mod avatar;
+pub mod channel;
 pub mod directory;
 pub mod envelope;
 mod error;
 pub mod group;
 pub mod hex;
 pub mod identity;
+pub mod mp4clean;
 pub mod net;
+pub mod official;
 pub mod pad;
+pub mod pin;
 pub mod pow;
+pub mod prekeys;
+pub mod profile;
 pub mod queue_ids;
 pub mod seal;
+pub mod sealed;
 pub mod text;
 pub mod vault;
 pub mod vectors;

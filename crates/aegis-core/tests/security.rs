@@ -620,9 +620,9 @@ fn envelope_kind_and_group_field_consistency() {
     assert!(inv.encode().is_err());
     // ginv member limits and names
     let mut inv = ginv_env(&G, [7; 32]);
-    inv.members = (0..21).map(|i| format!("user{i:02}")).collect();
+    inv.members = (0..101).map(|i| format!("user{i:02}")).collect();
     assert!(inv.encode().is_err());
-    inv.members = (0..20).map(|i| format!("user{i:02}")).collect();
+    inv.members = (0..100).map(|i| format!("user{i:02}")).collect();
     assert!(inv.encode().is_ok());
     for bad in ["Bob", "bo", "bob,carol", "bob carol", "", &"x".repeat(25), "bób"] {
         let mut inv = ginv_env(&G, [7; 32]);

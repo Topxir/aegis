@@ -12,6 +12,11 @@ pub fn group_queue(g: &[u8; 32]) -> Result<[u8; 32]> {
     Ok(*hkdf32(g, b"", b"aegis-v2 group-queue")?)
 }
 
+/// Channel queue: `HKDF(G, "", "aegis-v2 channel-queue", 32)`.
+pub fn channel_queue(g: &[u8; 32]) -> Result<[u8; 32]> {
+    Ok(*hkdf32(g, b"", b"aegis-v2 channel-queue")?)
+}
+
 pub fn queue_hex(q: &[u8; 32]) -> String {
     hex::encode(q)
 }

@@ -1055,7 +1055,7 @@ fn state_and_responses_contain_no_sender_or_network_metadata() {
     // Only the state file (or its temp) lives in the data directory.
     for e in std::fs::read_dir(&dir).unwrap() {
         let name = e.unwrap().file_name().into_string().unwrap();
-        assert!(name == STATE_FILE || name.starts_with(STATE_FILE), "stray file {name}");
+        assert!(name == STATE_FILE || name == "server-x25519.key" || name.starts_with(STATE_FILE), "stray file {name}");
         assert!(!name.contains("log"));
     }
     drop(s);
@@ -1266,6 +1266,7 @@ fn persisted_file_is_replaced_atomically_and_leaves_no_temp() {
         let names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n != "server-x25519.key")
             .collect();
         assert_eq!(names, vec![STATE_FILE.to_owned()]);
     }

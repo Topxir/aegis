@@ -134,7 +134,7 @@ Each client also keeps its own copy of what it sent; nothing is sent to self.
 ## 7. Groups (frame type 0x02)
 
 A creator makes a random 32-byte `G` and sends a `ginv` envelope to every member
-(section 6). Members ≤ 20.
+(section 6). Members ≤ 100. Any user can create groups and channels.
 
 ```
 group_id = hex(SHA256("aegis-v2 group-id" || G))
@@ -148,8 +148,8 @@ Receivers verify `sig` against `sender_ed`, which must match the pinned key for 
 (unknown members are looked up once and pinned), and require `group_id` in the envelope to
 equal the id of the group whose queue delivered the frame. Group members are not anonymous to each other.
 
-No forward secrecy in v2: a stolen `x_sk` or `G` decrypts past traffic captured by the
-server. This is a known limitation.
+Frame type 0x02 is the original group format. Clients send group messages as frame type 0x05
+(section 28), which adds forward secrecy; 0x02 is still accepted on receive.
 
 ## 8. Contacts and verification
 
@@ -190,6 +190,18 @@ group nonces, keys, salts) through `*_with_rng`-style entry points, and must be 
 exactly by the Android implementation. HKDF with an empty salt means "no salt" (Rust `None`,
 BouncyCastle `null`). Argon2 is version 0x13.
 
+Vectors added for sections 13 to 17 (top-level names in `test-vectors.json`): `attachment`
+(sealed chunks and descriptor body for a 100-byte image, chunk lengths and hashes for a
+two-chunk one, plus the `dmf` envelope), `channel` (`channel_id`, queue, key, a `cinv` and a signed
+`cmsg` frame), `avatar` (two identities, 25-char row-major mask, `bg`, `fg`) and `mp4` (a
+synthetic MP4 with GPS metadata: input hex, sanitized output hex and SHA-256, width, height,
+duration).
+
+Vectors for sections 19, 20 and 22: `official` (`G`, channel id, queue, key, a signed post), `prof`
+(a `prof` envelope and invalid bodies) and `pin` (Argon2id `T`, verifier, wrap key, the 116-byte pin
+file, hash inputs, the duress record). The `pin` vector uses Argon2id m=64 KiB, t=1, p=1 to stay
+fast; the protocol values are in section 20.
+
 ## 12. Server implementation notes
 
 - Status codes: malformed request `400`; `ts` outside the window, insufficient, reused or
@@ -206,3 +218,492 @@ BouncyCastle `null`). Argon2 is version 0x13.
 - The server itself speaks plain HTTP and must sit behind a TLS terminator (Cloudflare tunnel,
   reverse proxy) when reachable from outside the machine; clients refuse `http://` to public hosts.
 - Section 11 entry points are named `*_with` and take the random bytes explicitly.
+- State file magic is `AEGSRV04` (directory, PIN slots, prekeys, queues); `AEGSRV02` and
+  `AEGSRV03` files are still read. Prekey table limit (section 27.1): `max_prekey_users`,
+  default as many as directory entries. `prekeys/put` with a `spk_ts` that is not newer than
+  the stored one gets `409`; other rule failures `403`; unknown user `404`.
+- The blob quota (section 14) is set with `aegis-serverd --blob-quota-mib <MiB>` (default 4096).
+
+## 13. Attachments (photos and videos)
+
+Only two kinds exist: `image` (always JPEG after sanitizing, section 16) and `video`
+(MP4/MOV after sanitizing). Nothing is sent unless sanitizing succeeded; the original file
+is never uploaded and its file name is never sent.
+
+Upload, for sanitized bytes `m` (at most 31 MiB):
+
+```
+key     = 32 random bytes
+padded  = BE64(len(m)) || m || zeros     // total = smallest power of two ≥ 65536 that fits
+n       = ceil(len(padded) / 1048576)    // chunks of 1 MiB, last one may be shorter; n ≤ 32
+chunk_i = AEAD(key, nonce = 0^8 || BE32(i), aad = "aegis-v2 blob" || BE32(i) || BE32(n), padded[i MiB ..])
+id_i    = 32 random bytes                // ids are unrelated to each other
+```
+
+Each `chunk_i` is uploaded with `POST /api/v2/blob/put` (section 14). Receivers fetch all
+chunks, decrypt them in order, check `BE64` length and `SHA256(m)` against the descriptor and
+check the magic bytes: `image` must start with `FF D8 FF`, `video` must have `ftyp` at
+offset 4. Anything else is dropped. The receiver decides the media type from `kind`, never
+from data supplied by the sender.
+
+Descriptor: new envelope types `dmf` (frame `0x01`), `gmf` (frame `0x02`, group queue) and
+`cmf` (frame `0x02`, channel queue). All other envelope fields are as for `dm`/`gmsg`/`cmsg`.
+`body` holds these lines joined by `\n` (the whole body is percent-encoded as usual):
+
+```
+0 AT1
+1 kind        image | video
+2 size        len(m), decimal
+3 sha256      hex SHA256(m)
+4 key         hex key
+5 width       decimal pixels
+6 height      decimal pixels
+7 duration_ms decimal, 0 for image
+8 ids         comma-separated hex ids, in chunk order
+9 caption     text, may be empty, may not contain \n
+```
+
+Exactly 10 lines. `n` must match `ceil((padded size)/1 MiB)` for the padded size implied by `size`.
+Clients that do not know a type drop the frame like any malformed envelope.
+
+Local storage of attachments: the vault holds a random 32-byte `media_key`. Each received or
+sent attachment is stored next to the vault as `<vault name>.media/<32 hex random>.bin` =
+`nonce(12) || AEAD(media_key, nonce, aad = "aegis-v2 media", m)`. Deleting a message
+(including disappearing messages) deletes its file.
+
+## 14. Blob store (server)
+
+- `POST /api/v2/blob/put?id=<hex64>&ts=<unix>&pow=<u64>`, body `application/octet-stream`,
+  raw bytes, 1 ≤ length ≤ 1048592 (1 MiB + tag). Proof of work as in section 4 with
+  `scope = "blob:" || id` and `body_hash` = hex SHA-256 of the body. → `200 {}`.
+  Existing id → `409`. Store over quota → `503`.
+- `GET /api/v2/blob/get?id=<hex64>` → `200` raw bytes, `Content-Type: application/octet-stream`,
+  `Cache-Control: no-store`; unknown or expired → `404`.
+- Blobs are files in `blobs/` inside the data directory, written to a temp file and renamed.
+  They expire 14 days after upload and are not deleted on read (several group members read
+  the same blob). Total size is capped (default 4 GiB). Only the blob route accepts bodies
+  over 64 KiB.
+- The server learns: blob sizes (padded to powers of two), upload and download times.
+
+## 15. Channels
+
+A channel is a broadcast group where only the owner posts. The owner makes a random 32-byte
+`G` and sends a `cinv` envelope (frame `0x01`) to each subscriber: `body` = channel title,
+`group_key` = hex `G`, `members` empty. Subscribers never learn who else is subscribed.
+
+```
+channel_id = hex(SHA256("aegis-v2 channel-id" || G))
+queue      = HKDF(G, "", "aegis-v2 channel-queue", 32)
+k          = HKDF(G, "", "aegis-v2 channel-msg", 32)
+```
+
+Posts are `cmsg` (text) or `cmf` (attachment) envelopes, framed exactly like section 7 with
+`aad = 0x02` and the Ed25519 signature over `"aegis-v2 gmsg\n" || envelope`, and `group_id` =
+`channel_id`. The owner is the sender of the `cinv`. Receivers accept a post only if `sender`
+equals the owner and the signature verifies against the owner's pinned key; everything else
+on the channel queue is dropped. At most 200 subscribers per channel (one invite each).
+Channels are not listed or searchable anywhere; joining needs an invite from the owner.
+
+## 16. Sanitizing media before sending
+
+Both clients must do exactly this; failure at any step means nothing is sent.
+
+Images (input JPEG, PNG, WebP; Android also HEIC):
+- Input at most 40 MiB and 50 megapixels, checked before full decode.
+- Decode, apply the EXIF orientation, drop everything except pixels.
+- Scale so the longer side is at most 2560 px; encode JPEG quality 85, no metadata segments.
+- The output must contain no `APP1`..`APP15` segments (no Exif, XMP, ICC, maker notes).
+
+Videos (input ISO BMFF: MP4/MOV, at most 31 MiB):
+- Reject when there is no `ftyp` or `moov`, when `moof` exists (fragmented), or when any box
+  size is inconsistent.
+- Box allowlist. Top level: `ftyp`, `moov`, `mdat`, `free`, `skip`, `wide`. In `moov`: `mvhd`,
+  `trak`. In `trak`: `tkhd`, `edts`, `mdia`. In `mdia`: `mdhd`, `hdlr`, `minf`. In `minf`:
+  `vmhd`, `smhd`, `dinf`, `stbl`. `stbl` children are kept as is.
+- Any other box is turned into a `free` box of the same size with its payload zeroed, so
+  `stco`/`co64` offsets stay valid. This removes `udta`, `meta`, `©xyz`, `tref` and the like.
+- Only tracks whose `hdlr` type is `vide` or `soun` are kept. Any other track (timed metadata
+  such as `mebx`, `gpmd`, `camm`, text) is turned into `free`, and its sample bytes in `mdat`
+  (found through `stsc`, `stsz`, `stco`/`co64`) are zeroed. If those tables are inconsistent
+  or point outside the file, the video is rejected.
+- Creation and modification times in `mvhd`, `tkhd` and `mdhd` are set to 0.
+- Payloads of `free`, `skip` and `wide` boxes (kept or created) are zeroed.
+- Exactly one `moov` and one `mvhd`; at most one `tkhd`, `mdia`, `hdlr`, `mdhd`, `minf`, `stbl`
+  per parent. A dropped track must have `stsc`, `stsz` and `stco` or `co64` (`stz2` is rejected).
+- At least one `vide` track must remain.
+
+## 17. Default avatars
+
+Generated from the identity key so that a key change also changes the avatar.
+
+```
+h     = SHA256("aegis-v2 avatar" || ed_pk)
+cell(r, c) for r in 0..5, c in 0..3: on = bit (r*3 + c) of h[0..2] (bit 0 = h[0] & 1)
+column 3 mirrors column 1, column 4 mirrors column 0
+bg    = gray level 0x1c + h[2] % 0x18
+fg    = gray level 0xa0 + h[3] % 0x50
+```
+
+Drawn as a 5×5 grid inside a circle with a margin of one cell. Grayscale only.
+
+## 18. Search
+
+The directory only answers exact usernames (section 3); nothing else can be searched on the
+server. Search in the clients covers local chats, groups, channels and message text inside
+the open vault.
+
+## 19. Official channel
+
+Every client has one built-in channel, "Aegis", owned by the username `owner`. Anyone can
+read it; only `owner` can post. It uses section 15 framing with a public key:
+
+```
+G          = SHA256("aegis-v2 official-channel")
+```
+
+so its content is not secret, only authenticated. The owner's `ed_pk` is compiled into the
+clients when known; until then the client looks up `owner` once and pins the key like any
+contact. Posts not signed by that key are dropped. Other channels (section 15) can be created
+by any user. Core: `official::{official_g, official_queue, official_msg_key, open_official_post}`;
+the compiled-in key is `OFFICIAL_OWNER_ED_PK` (`None` for now).
+
+## 20. PIN unlock
+
+After the first unlock with the password, a user may set a 4- or 6-digit PIN for re-opening a
+locked session on the same device. The PIN alone is useless: unlocking also needs a secret
+held by the server, and the server erases it after 5 wrong attempts. Then only the password
+works.
+
+Setup (client):
+
+```
+salt     = 16 random bytes                     // stored locally
+T        = Argon2id(pin, salt, m = 19456 KiB, t = 2, p = 1) → 32 bytes
+slot     = 32 random bytes                     // stored locally
+S        = 32 random bytes                     // sent to the server, then forgotten
+verifier = HKDF(T, slot, "aegis-v2 pin-verify", 32)
+wrap     = HKDF(T || S, slot, "aegis-v2 pin-wrap", 32)
+pin file = "AGP1" || salt || slot || nonce(12) || AEAD(wrap, nonce, aad = "AGP1" || salt || slot, vault_key)
+```
+
+`POST /api/v2/pin/create`, form body: `slot`, `v` (verifier), `s` (S), `ts`, `pow`
+(section 4, `scope = "pin:" || slot`, `body_hash` = hex SHA-256 of `slot || v || s` as hex
+strings joined by `\n`). Existing slot → `409`.
+
+Unlock: `POST /api/v2/pin/open`, form body `slot`, `v`, `ts`, `pow` (same scope rule, hash of
+`slot || v`). Server compares `v` in constant time. Match → `200 {"s":"<hex>"}` and the
+attempt counter is reset. Mismatch → `403 {"left":N}`; after the fifth consecutive mismatch the
+slot is deleted and later requests get `404`. The client then deletes the pin file and asks
+for the password. Removing the PIN: `POST /api/v2/pin/delete` with `slot`, `v`, `ts`, `pow`.
+Slots unused for 90 days expire.
+
+Throttle: the server accepts one attempt per slot per second and 50 attempts per second over
+all slots. A request over either limit gets `429`; it does not count
+as an attempt, does not change `left`, and its proof of work is not consumed, so the client
+waits a second and sends the same request again. `left` is the number of attempts remaining
+after this mismatch (4, 3, 2, 1, 0); `0` means the slot has just been deleted. A request that
+fails the ts window, proof of work or form checks gets `400`/`403` and is not an attempt.
+Every PIN change is written to disk before the reply, so restarting the server never resets a
+counter.
+
+`pin` is exactly 4 or 6 ASCII digits and is hashed as its UTF-8 bytes. `Argon2id` is version
+0x13 with a 32-byte output; the cost parameters are the fixed values above (the test vector
+uses smaller ones and says so). The pin file is 116 bytes; its AEAD plaintext is the 32-byte
+vault key. Opening needs one Argon2 run: derive `T`, send the verifier, then wrap with `T || S`.
+
+What this protects: a stolen device cannot be brute-forced offline, because `S` is not on it.
+What it does not: the server operator together with the stolen device can try all PINs. The
+server alone has no ciphertext. Each unlock tells the server that this slot was used and when.
+Unlocking with a PIN needs a connection to the server; offline, use the password.
+
+## 21. Notifications
+
+No push service (no Google or Apple servers) is used. Clients poll.
+- Android: a background job polls the inbox queue (derived from the public `x_pk`, section 6)
+  and the official channel queue at most every 15 minutes while the vault is locked, and shows
+  "New message" without sender or text. Group and channel queues are polled only while the vault
+  is open, because their ids need the vault secrets.
+- Desktop: while the app runs and the window is not focused, new messages show a system
+  notification with the sender's display name; the text is hidden by default.
+
+## 22. Profile card
+
+Display name, an "about" line and a particle effect are shared with contacts only (not with
+the directory, which keeps just the display name). Envelope type `prof` (frame `0x01`), sent
+to each contact when the profile changes and on first message to a new contact. `body`:
+
+```
+0 PF1
+1 display name   ≤ 64 chars
+2 about          ≤ 140 chars, no \n
+3 particles      none | dust | snow | embers | orbit | rain
+```
+
+Parsing is strict: exactly four lines, no control characters (Unicode category Cc) in any
+field, name ≤ 64 and about ≤ 140 characters (code points), and a particle value outside the
+list makes the whole card invalid (it is dropped, not shown as `none`). A `prof` is accepted only from a pinned
+contact (same sender checks as `dm`) and only if its `ts_ms` is newer than the stored one.
+
+Media sanitizing (section 16) is always on and cannot be disabled.
+
+## 23. Sealed transport
+
+Every API call (sections 3, 4, 14, 20) can be wrapped so that a TLS terminator in front of the
+server (Cloudflare with the default address) sees only one path, bucketed sizes and timing:
+no queue ids, usernames, blob ids or request types. Clients use it by default.
+
+The server has a long-term X25519 key pair (`srv_sk`, `srv_pk`), generated on first start and
+kept in the data directory. `GET /api/v2/key` → `{"x":"<hex srv_pk>"}`. The client pins
+`srv_pk`: compiled in for the default server, first-use pinning for other servers; a changed
+key stops the client with an error instead of falling back.
+
+```
+e      = fresh X25519 key pair per request
+dh     = X25519(e_sk, srv_pk)              // all-zero → reject
+k_req  = HKDF(dh, e_pk || srv_pk, "aegis-v2 sealed-req", 32)
+k_resp = HKDF(dh, e_pk || srv_pk, "aegis-v2 sealed-resp", 32)
+inner  = method || "\n" || path_and_query || "\n" || body
+outer  = e_pk || AEAD(k_req, nonce = 0^12, aad = "aegis-v2 sealed-req" || e_pk, pad(inner))
+```
+
+`POST /api/v2/s` with body `outer` (octet-stream). The server decrypts, runs the inner request
+exactly as if it had arrived directly (same limits, proof of work, status codes), and replies
+`200` with `AEAD(k_resp, nonce = 0^12, aad = "aegis-v2 sealed-resp", pad(BE16(status) || body))`.
+Undecryptable requests get `400` with no body. The body limit is the largest bucket + 32 + 16;
+the inner request may not be `/api/v2/s` (sealed `400`). `pad` is `BE32(len) || data || zeros` to the
+smallest bucket in `[1024, 4096, 16384, 65536, 262144, 1048576, 1114112]`.
+Each `e` is used once, so the fixed nonce is safe. The inner request carries no cookies or
+identifying headers. A replayed outer request is treated as a replay of the inner one: the
+proof-of-work or signature replay rules of the inner route reject it. Responses to `POST
+/api/v2/nop` (section 26) are padded like any other response of the same body length.
+
+The key is stored in `server-x25519.key` (32 raw bytes, created atomically with owner-only
+permissions where the platform has them). An unreadable or wrongly sized key file stops the
+server; it is never regenerated.
+
+What this hides from the TLS terminator: everything except the client IP, sizes (bucketed),
+timing and the fact that Aegis is used. To hide the IP as well, use Tor (section 24).
+
+## 24. Tor
+
+- The server can be published as a Tor onion service (the server listens on 127.0.0.1; the
+  operator adds a `HiddenServiceDir`/`HiddenServicePort` to their torrc). Clients accept
+  `http://<56 chars>.onion` endpoints; the onion address authenticates the server.
+- Desktop and Android include a Tor client (desktop: Arti; Android: the Guardian Project
+  Tor library). Setting "Connect through Tor" sends all traffic through it; with an onion
+  endpoint neither Cloudflare nor the server operator learns the client IP.
+- An external SOCKS5 proxy (section 10) remains available.
+
+## 25. Traffic shape and device hardening
+
+- Polling runs on a fixed interval with ±30% random jitter whether or not anything is
+  expected, and outgoing messages are delayed by a random 0–2 s, so timing says less about who
+  talks to whom.
+- Screen capture is blocked (Android `FLAG_SECURE`, which also hides the app in Recents; Windows
+  `WDA_EXCLUDEFROMCAPTURE`), on by default.
+- Android text fields ask the keyboard not to learn (`IME_FLAG_NO_PERSONALIZED_LEARNING`).
+- Duress PIN (optional): a second PIN that, when entered on the lock screen, deletes the vault,
+  the pin file and the media folder on this device, then shows the normal "wrong PIN" result.
+  It cannot remove copies already exported or messages held by other people. The duress PIN has
+  no server slot. It is kept locally as `"AGD1" || salt(16) || slot(32) || verifier(32)` with
+  the same Argon2id and verifier derivation as section 20; the lock screen checks it first and
+  must refuse a duress PIN equal to the real one at setup.
+- Auto-lock after a chosen idle time drops all key material from memory.
+
+## 26. Cover traffic
+
+Goal: an observer of the client's connection (ISP, TLS terminator, Tor guard) sees requests at
+a rate that does not depend on whether the user is reading, writing or idle.
+
+While the app is unlocked and in the foreground, the client sends sealed requests (section 23)
+on a schedule of slots with exponentially distributed gaps (mean 20 s on desktop, 30 s on
+Android; minimum 2 s). Each slot carries exactly one request:
+
+1. the oldest queued real request (send, blob put/get, profile, channel post), if any;
+2. otherwise a due poll (polls are scheduled into slots instead of running on their own timer);
+3. otherwise a dummy request.
+
+Real requests are not sent outside slots, except a user-visible action that would otherwise
+wait more than 2 s: it takes the next slot early and the slot after it is skipped, so the
+average rate stays the same. When the queue holds more than one request, slots run at the
+2 s minimum until it is empty.
+
+Dummy request: inner `POST /api/v2/nop` with body `BE32(resp_len) || random bytes`. The body
+length is drawn from the sizes of the last 16 real requests (1024 bytes if none), so the
+sealed request lands in the same bucket mix. `resp_len` is drawn the same way from the last
+16 real response sizes, capped at 65536. The server checks only the length field and answers
+`200` with `resp_len` zero bytes, so the sealed response has the same size as a real one. The
+server keeps no state, writes no log line and applies the usual rate limit.
+
+Settings → Connection → Cover traffic: Off, Standard (above, default), High (mean 8 s on
+desktop, 12 s on Android). Cover traffic stops when the app is locked or in the background; the
+background poll of section 21 still runs on its own jittered timer.
+
+Cost at Standard: about 180 requests per hour on desktop, about 1–2 MB per hour.
+
+Limits. This hides activity inside a session, not the session itself: an observer still sees
+when the app is open. It does not defeat an adversary who watches both ends and can delay or
+drop traffic. Combine it with Tor (section 24) to hide the IP.
+
+## 27. Sessions with forward secrecy (X3DH and Double Ratchet)
+
+Direct messages, group and channel invites, sender keys, profile cards and attachment
+descriptors between two users travel inside a pairwise session. A stolen identity key does
+not decrypt past messages, and a session heals after a key compromise once both sides have
+sent again. This follows the Signal X3DH and Double Ratchet specifications; only the
+encodings and labels below are ours. Frame type 0x01 is still accepted on receive and is
+never sent.
+
+### 27.1 Prekeys (server)
+
+Each user keeps a signed prekey `spk` (X25519, rotated every 7 days, the old secret kept 14 more
+days) and up to 100 one-time prekeys `opk` (X25519, refilled to 50 when fewer than 10 remain).
+
+```
+spk_sig = Ed25519(ed_sk, "aegis-v2 spk\n" || hex(spk_pk) || "\n" || spk_ts)
+```
+
+`POST /api/v2/prekeys/put`, form fields `u`, `spk`, `spk_ts`, `spk_sig`, `opks`
+(comma-separated hex, may be empty, at most 100), `ts`, `sig`, each exactly once. `sig` is
+Ed25519 by the directory `ed` of `u` over
+`"aegis-v2 prekeys\n" || u || "\n" || spk || "\n" || spk_ts || "\n" || spk_sig || "\n" || opks || "\n" || ts`.
+Rules: `|ts − now| ≤ 600`; the signed message is remembered for 20 minutes and a repeat is
+rejected; `spk_sig` must be valid; `spk_ts` must be no more than 600 s in the future and newer
+than the stored one. The server replaces the stored `spk` and appends the `opks` (duplicates
+ignored, total capped at 100, oldest dropped). Response `200 {"opks":N}` with the number now
+stored.
+
+`POST /api/v2/prekeys/take`, form fields `u`, `ts`, `pow`, where `pow` is the proof of work of
+section 4 with `scope = "pk:" || u` and `body_hash` = hex SHA-256 of `u || "\n" || ts`.
+Response `200 {"spk":…,"spk_ts":…,"spk_sig":…,"opk":"<hex or empty>"}`; the returned `opk` is
+deleted from the server. `404` for an unknown user or one with no `spk`. The proof of work
+makes draining someone's one-time prekeys expensive. Without an `opk` the handshake still
+works, with weaker replay protection for the first message.
+
+Prekey records live in the server state file next to the directory.
+
+### 27.2 Handshake
+
+Initiator `A`, responder `B`. `A` fetches B's prekeys, checks `spk_sig` against B's pinned
+`ed_pk` and that `spk_ts` is within the last 30 days, and refuses otherwise.
+
+```
+EK   = fresh X25519 key pair
+DH1  = X25519(A.x_sk, B.spk)
+DH2  = X25519(EK_sk, B.x_pk)
+DH3  = X25519(EK_sk, B.spk)
+DH4  = X25519(EK_sk, B.opk)                       // omitted when there is no opk
+SK   = HKDF(0xFF*32 || DH1 || DH2 || DH3 || DH4, salt = 0^32, "aegis-v2 x3dh", 32)
+AD   = A.ed_pk || A.x_pk || B.ed_pk || B.x_pk     // 128 bytes, initiator first
+```
+
+Any all-zero DH result aborts. Both sides erase `EK_sk` and the DH outputs as soon as `SK` is
+computed. B erases the used `opk` secret after the first frame of the session decrypts.
+
+### 27.3 Double Ratchet
+
+```
+KDF_RK(rk, dh)  = HKDF(dh, salt = rk, "aegis-v2 ratchet", 64)   → rk' (first 32), ck (last 32)
+KDF_CK(ck)      = mk = HMAC-SHA256(ck, 0x01), ck' = HMAC-SHA256(ck, 0x02)
+msg_keys(mk)    = HKDF(mk, salt = 0^32, "aegis-v2 msg-key", 44)  → key (32) || nonce (12)
+header          = dh_pk (32) || BE32(pn) || BE32(n)               // 40 bytes
+ratchet_msg     = header || AEAD(key, nonce, aad = AD || header, envelope)
+```
+
+Initial state. A: `DHs` = fresh key pair, `DHr = B.spk`, `(rk, CKs) = KDF_RK(SK, X25519(DHs_sk, B.spk))`.
+B: `DHs` = the spk key pair, `rk = SK`, no chains until the first message arrives.
+From there the Double Ratchet algorithm runs unchanged (RatchetEncrypt, RatchetDecrypt,
+DHRatchet, skipped message keys). An all-zero DH output is rejected. Limits: at most 1000
+skipped keys per step and 2000 per session; skipped keys are deleted after 30 days; a message
+that would need more is dropped. Decryption works on a copy of the state, which replaces the
+stored state only when the AEAD check succeeds.
+
+State is written to the vault before a sent frame leaves the device and after a received
+frame is processed. The poll cursor moves past a frame only after that write.
+
+### 27.4 Frames
+
+Every session frame is frame type `0x03`, sent to the recipient's inbox queue (section 6) with
+the same sealed-sender construction as section 6, using `0x03` in place of `0x01` in both aads.
+The server sees the recipient's inbox, as before, and nothing about the sender, the session or
+whether this is the first message. The inner plaintext of `c2` is one of:
+
+- `0x00 || EK_pk (32) || spk_pk (32) || opk_pk (32, zeros when none) || ratchet_msg`: start.
+- `0x01 || ratchet_msg`: message on an existing session.
+
+The recipient first opens `c1` to get `S.x_pk` and finds the pinned contact with that key (an
+unknown sender is looked up and pinned as in section 6). For a start it recomputes SK from the
+referenced prekeys; an unknown `spk_pk` or an `opk_pk` it does not hold drops the frame. For a
+message it tries the sessions held for that contact, newest first. After decryption,
+`sender_ed` and `sender` in the envelope must match that contact.
+
+All frames are padded as in section 4. The envelope rules of section 5 still apply, including
+`msg_id` deduplication.
+
+### 27.5 Session lifecycle
+
+- A sends starts until it receives any message from B on that session, then switches to
+  messages. Each start repeats the same `EK`/prekey triple with a fresh ratchet message.
+- Each client remembers the last 1000 `EK_pk` values it has accepted. A start with a known
+  `EK_pk` is handled on the existing session for it and never resets that session. This stops
+  replayed starts.
+- A start with a new `EK_pk` from a pinned contact creates a new session. That session becomes
+  the one used for sending. Older sessions are kept for receiving for 30 days, then deleted.
+- If both sides start at the same time, both sessions are kept for receiving. For sending, both
+  use the one whose `EK_pk` is bytewise smaller.
+- Recovery: after 3 frames from a pinned contact whose sealed sender verifies but whose ratchet
+  message does not decrypt on any held session (for example after the peer restored an old
+  vault export), the client starts a new session with that contact. It does this at most once
+  per contact per 24 hours. Messages lost before that are shown as one "Some messages could
+  not be decrypted" line.
+- If `prekeys/take` returns `404`, the client does not send, and shows
+  "This contact needs to update the app". There is no fallback to frame type 0x01.
+- A key change in the directory (section 8) blocks new sessions until the user confirms it.
+- A session with no traffic for 180 days is deleted; the next message starts a new one.
+- Clients publish prekeys right after registration and on every start, and refill them per
+  section 27.1.
+
+## 28. Groups and channels with sender keys
+
+Every member of a group (and the owner of a channel) has a sender chain per group:
+`chain_id` (16 random bytes), `n` (starts at 0) and chain key `ck` (32 random bytes).
+
+The chain is given to each other member as an envelope of type `skey` through the pairwise
+session (section 27). Fields: `group_id`, `group_key = hex(ck)`,
+`body = hex(chain_id) || ":" || n` (decimal), everything else as in section 5.
+
+```
+mk, ck'          = KDF_CK(ck)                          // section 27.3
+key || nonce     = HKDF(mk, salt = 0^32, "aegis-v2 group-key", 44)
+sig              = Ed25519(sender ed_sk, "aegis-v2 gmsg\n" || envelope)
+hk               = HKDF(G, "", "aegis-v2 group-hdr", 32)
+hdr              = hnonce (12, random) || AEAD(hk, hnonce, aad = 0x05, chain_id || BE32(n))   // 48 bytes
+frame (0x05)     = 0x05 || hdr || AEAD(key, nonce, aad = 0x05 || chain_id || BE32(n), envelope || sig)
+```
+
+The header is encrypted so that the server cannot tell senders apart or count their messages.
+
+The frame goes to the group queue of section 7 (for channels, section 15). The sender
+advances its chain after each message and erases `mk` and the old `ck`. Receivers advance their
+copy, keep at most 2000 skipped message keys per chain for 30 days, and erase used keys. The
+`sender` of the envelope must be the member who distributed that `chain_id`.
+
+New chains: when a member is removed, every remaining member makes a new chain and
+distributes it, and nobody encrypts with an old chain after that. A sender also replaces its
+chain every 7 days or 1000 messages. Receivers drop an old chain 30 days after a newer one from
+the same sender arrives. A removed member can still read the queue but cannot decrypt anything
+sent under the new chains. To also hide traffic volume from it, the creator can move the group
+to a new `G` with a fresh `ginv`.
+
+Channels use the same scheme with the owner as the only sender. When a subscriber leaves,
+the owner makes a new chain.
+
+The official channel (section 19) keeps the static key of section 15. It is public
+broadcast content with no subscriber list.
+
+Limits: the server still sees which queues are active and when. A removed member who still
+holds `G` can read headers (who sends how often) but not content. Sender keys give forward
+secrecy per chain step, but no post-compromise security until the next chain rotation.
+
+Implementations expose deterministic variants (`*_with` taking the ephemeral keys and random
+values as arguments) so that X3DH, ratchet steps and group frames have test vectors.

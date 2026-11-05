@@ -48,7 +48,7 @@ Rust core.
 
 ## Running a server
 
-`aegis-serverd --bind 127.0.0.1 --port 8443 --data-dir <dir>`. It speaks plain HTTP and must be
+`aegis-serverd --bind 127.0.0.1 --port 8443 --data-dir <dir> [--blob-quota-mib 4096]`. It speaks plain HTTP and must be
 put behind a TLS terminator (Cloudflare Tunnel, Caddy, nginx) if it is reachable from outside;
 clients refuse `http://` to anything but loopback and `.onion`. See `builds/server/`.
 
