@@ -383,24 +383,25 @@ impl Session {
     /// Serialized form for the vault. The buffer is wiped on drop.
     pub fn snapshot(&mut self) -> Result<Zeroizing<Vec<u8>>, Failure> {
         self.data.seen = self.seen.ids().cloned().collect();
-        self.data.sessions = self.store.encode();
+        self.data.sessions = self.store.encode().map_err(|_| Failure::new("err.generic"))?;
         self.data.skeys = self
             .chains
             .iter()
             .filter(|(id, _)| self.data.groups.contains_key(*id) || self.data.channels.contains_key(*id))
             .map(|(id, c)| {
-                (
+                let recv = c.recv.as_ref().map(RecvSet::encode).transpose().map_err(|_| Failure::new("err.generic"))?;
+                Ok((
                     id.clone(),
                     SkeyState {
                         send: c.send.as_ref().map(SendChain::encode).unwrap_or_default(),
-                        recv: c.recv.as_ref().map(RecvSet::encode).unwrap_or_default(),
+                        recv: recv.unwrap_or_default(),
                         given: c.given.clone(),
                         rotate: c.rotate,
                         held: c.held.clone(),
                     },
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<_, Failure>>()?;
         let out = serde_json::to_vec(&self.data).map_err(|_| Failure::new("err.generic"));
         self.data.seen.clear();
         self.data.sessions = Zeroizing::default();
@@ -1711,7 +1712,7 @@ mod tests {
         assert!(!data.sessions.is_empty());
         let again = Session::new(data, "pw-pw-pw-pw-pw").expect("reopen");
         assert!(again.data.contacts.contains_key("bob"));
-        assert!(again.store.encode().len() > 4);
+        assert!(again.store.encode().unwrap().len() > 4);
     }
 
     #[test]

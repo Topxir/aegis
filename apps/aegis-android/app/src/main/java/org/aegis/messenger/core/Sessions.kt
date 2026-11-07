@@ -29,14 +29,18 @@ class SessionStore {
         const val RECOVERY_AFTER_FAILURES = 3
         const val RECOVERY_MIN_GAP_SECS = 24L * 3600
         private const val SEEN_FRAME_CAP = 1024
+        private const val SEEN_EK_PER_CONTACT = 64
+        private const val OLD_CHAINS_PER_CONTACT = 256
         private const val MAX_SESSIONS_PER_CONTACT = 8
         private const val MAX_OPKS_HELD = 200
         private const val START_LEN = 1 + 96
         private const val HEADER_LEN = Ratchet.HEADER_LEN
 
+        /** Reads AGS2 and the older AGS1, which has no per-contact replay state. */
         fun decode(bytes: ByteArray): SessionStore {
             val r = StateReader(bytes)
-            r.magic("AGS1")
+            val v2 = bytes.size >= 4 && Bytes.eq(bytes.copyOfRange(0, 4), Text.utf8("AGS2"))
+            r.magic(if (v2) "AGS2" else "AGS1")
             val st = SessionStore()
             repeat(r.u16()) { st.spks.add(SpkEntry(r.take(32), r.u64(), r.optU64())) }
             repeat(r.u16()) { st.opks.add(r.take(32)) }
@@ -54,6 +58,13 @@ class SessionStore {
                 c.needStart = r.flag()
                 c.failCount = r.u32()
                 c.lastRecovery = r.optU64()
+                if (v2) {
+                    repeat(r.u16()) { c.seenEk.addLast(Hex.encode(r.take(32))) }
+                    repeat(r.u16()) { c.oldChains.addLast(r.take(32) to r.u32()) }
+                    if (c.seenEk.size > SEEN_EK_PER_CONTACT || c.oldChains.size > OLD_CHAINS_PER_CONTACT) {
+                        throw AegisException.Session("state")
+                    }
+                }
                 repeat(r.u8()) {
                     val ek = r.take(32)
                     val f = r.u8()
@@ -86,11 +97,19 @@ class SessionStore {
         var lastActive: Long,
         var supersededAt: Long?,
     ) {
-        fun tryDecrypt(newDhsSk: ByteArray, msg: ByteArray, now: Long): ByteArray? {
+        /** A receiving chain left behind by a DH step goes to [old] with its final counter. */
+        fun tryDecrypt(newDhsSk: ByteArray, msg: ByteArray, now: Long, old: ArrayDeque<Pair<ByteArray, Long>>): ByteArray? {
+            val before = ratchet.recvChain()
             val plain = try {
                 ratchet.decryptWith(newDhsSk, msg, now)
             } catch (_: AegisException) {
                 return null
+            }
+            if (before != null) {
+                val after = ratchet.recvChain()
+                if (after != null && !Bytes.eq(after.first, before.first)) {
+                    pushCapped(old, before.first to maxOf(before.second, Bytes.be32(msg, 32)), OLD_CHAINS_PER_CONTACT)
+                }
             }
             receivedAny = true
             start = null
@@ -98,6 +117,11 @@ class SessionStore {
             // A superseded session the peer still uses stays until it has been idle for the keep time.
             if (supersededAt != null) supersededAt = now
             return plain
+        }
+
+        /** Keeps the receiving chain of a session that is being dropped. */
+        fun retire(old: ArrayDeque<Pair<ByteArray, Long>>) {
+            ratchet.recvChain()?.let { pushCapped(old, it, OLD_CHAINS_PER_CONTACT) }
         }
     }
 
@@ -107,6 +131,18 @@ class SessionStore {
         var needStart = false
         var failCount = 0L
         var lastRecovery: Long? = null
+        val seenEk = ArrayDeque<String>()
+        val oldChains = ArrayDeque<Pair<ByteArray, Long>>()
+
+        /** True if msg names a receiving chain we hold or held, at a counter whose key is spent. */
+        fun isReplay(msg: ByteArray): Boolean {
+            if (msg.size < HEADER_LEN) return false
+            val dh = msg.copyOfRange(0, 32)
+            val n = Bytes.be32(msg, 36)
+            if (sessions.any { it.ratchet.hasSkipped(dh, n) }) return false
+            val spent = { c: Pair<ByteArray, Long> -> Bytes.eq(c.first, dh) && n < c.second }
+            return sessions.mapNotNull { it.ratchet.recvChain() }.any(spent) || oldChains.any(spent)
+        }
 
         fun sendIndex(): Int? {
             if (needStart) return null
@@ -133,7 +169,7 @@ class SessionStore {
             }
             while (sessions.size > MAX_SESSIONS_PER_CONTACT) {
                 val i = sessions.indexOfLast { !Bytes.eq(it.ekPk, chosen) }
-                if (i >= 0) sessions.removeAt(i) else break
+                if (i >= 0) sessions.removeAt(i).retire(oldChains) else break
             }
         }
 
@@ -157,11 +193,6 @@ class SessionStore {
     private val seenEk = ArrayDeque<String>()
     private val seenFrames = ArrayDeque<String>()
     private val contacts = ArrayList<ContactSessions>()
-
-    private fun pushCapped(q: ArrayDeque<String>, v: String, cap: Int) {
-        q.addLast(v)
-        while (q.size > cap) q.removeFirst()
-    }
 
     /** Registers a pinned contact. Different keys for a known name are an error. */
     fun addContact(u: String, ed: ByteArray, x: ByteArray) {
@@ -280,11 +311,12 @@ class SessionStore {
             plain = r.first
             created = r.second
         } else {
-            plain = contacts[ci].sessions.firstNotNullOfOrNull { it.tryDecrypt(newDhsSk, msg, now) }
+            val cs = contacts[ci]
+            plain = cs.sessions.firstNotNullOfOrNull { it.tryDecrypt(newDhsSk, msg, now, cs.oldChains) }
         }
         val c = contacts[ci]
         if (plain == null) {
-            if (start == null && c.sessions.any { it.ratchet.isReplay(msg) }) return Received()
+            if (c.isReplay(msg)) return Received()
             return c.failed(now)
         }
         if (created) c.needStart = false
@@ -301,9 +333,9 @@ class SessionStore {
     ): Pair<ByteArray?, Boolean>? {
         val c = contacts[ci]
         val known = c.sessions.firstOrNull { Bytes.eq(it.ekPk, ek) }
-        if (known != null) return known.tryDecrypt(newDhsSk, msg, now) to false
+        if (known != null) return known.tryDecrypt(newDhsSk, msg, now, c.oldChains) to false
         val ekHex = Hex.encode(ek)
-        if (seenEk.contains(ekHex)) return null
+        if (seenEk.contains(ekHex) || c.seenEk.contains(ekHex) || c.isReplay(msg)) return null
         val sp = spks.firstOrNull { Bytes.eq(Crypto.x25519Public(it.sk), spk) } ?: return null
         var opkIdx = -1
         if (!Bytes.eq(opk, ByteArray(32))) {
@@ -313,8 +345,9 @@ class SessionStore {
         val sk = X3dh.respond(me.xSecret, sp.sk, if (opkIdx >= 0) opks[opkIdx] else null, c.x, ek)
         val ad = X3dh.Parties(c.ed, c.x, me.edPublic, me.xPublic).ad()
         val session = Session(Ratchet.initResponder(sk, ad, sp.sk), ek.copyOf(), false, false, null, now, null)
-        val plain = session.tryDecrypt(newDhsSk, msg, now) ?: return null to false
+        val plain = session.tryDecrypt(newDhsSk, msg, now, ArrayDeque()) ?: return null to false
         pushCapped(seenEk, ekHex, SEEN_EK_CAP)
+        pushCapped(c.seenEk, ekHex, SEEN_EK_PER_CONTACT)
         if (opkIdx >= 0) opks.removeAt(opkIdx)
         c.install(session, false, now)
         return plain to true
@@ -326,7 +359,9 @@ class SessionStore {
         for (c in contacts) {
             for (s in c.sessions) s.ratchet.expire(now)
             c.sessions.removeAll { s ->
-                now >= s.lastActive + SESSION_IDLE_SECS || (s.supersededAt?.let { now >= it + SUPERSEDED_KEEP_SECS } ?: false)
+                val drop = now >= s.lastActive + SESSION_IDLE_SECS || (s.supersededAt?.let { now >= it + SUPERSEDED_KEEP_SECS } ?: false)
+                if (drop) s.retire(c.oldChains)
+                drop
             }
             val ek = c.sendEk
             if (ek != null && c.sessions.none { Bytes.eq(it.ekPk, ek) }) c.sendEk = null
@@ -339,7 +374,7 @@ class SessionStore {
     private fun len16(n: Int) = minOf(n, 0xFFFF)
 
     fun encode(): ByteArray {
-        val w = StateWriter().raw(Text.utf8("AGS1"))
+        val w = StateWriter().raw(Text.utf8("AGS2"))
         w.u16(len16(spks.size))
         for (s in spks) w.raw(s.sk).u64(s.ts).optU64(s.retiredAt)
         w.u16(len16(opks.size))
@@ -351,6 +386,10 @@ class SessionStore {
         w.u16(len16(contacts.size))
         for (c in contacts) {
             w.str(c.u).raw(c.ed).raw(c.x).opt32(c.sendEk).flag(c.needStart).u32(c.failCount).optU64(c.lastRecovery)
+            w.u16(len16(c.seenEk.size))
+            for (e in c.seenEk) w.raw(Hex.decode(e))
+            w.u16(len16(c.oldChains.size))
+            for ((dh, n) in c.oldChains) w.raw(dh).u32(n)
             w.u8(minOf(c.sessions.size, 255))
             for (s in c.sessions) {
                 val f = (if (s.weInitiated) 1 else 0) or (if (s.receivedAny) 2 else 0) or (if (s.start != null) 4 else 0)
@@ -363,6 +402,11 @@ class SessionStore {
         }
         return w.finish()
     }
+}
+
+private fun <T> pushCapped(q: ArrayDeque<T>, v: T, cap: Int) {
+    q.addLast(v)
+    while (q.size > cap) q.removeFirst()
 }
 
 private fun minEk(a: ByteArray, b: ByteArray): ByteArray {

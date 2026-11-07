@@ -14,11 +14,15 @@
 
 use super::*;
 use aegis_core::cover::{Mode, OsCoverRng, Platform, Scheduler, Slot, Tick};
+use aegis_core::hex;
+use serde_json::json;
 use std::sync::Condvar;
 use std::thread::ThreadId;
 
 /// How long a real request waits for its slot before it goes out regardless.
 const GATE_WAIT: Duration = Duration::from_secs(12);
+/// Body of the server's 404 answer, `{"error":"not found"}`.
+const NOT_FOUND_LEN: usize = 21;
 
 #[derive(Debug, Default)]
 struct GateState {
@@ -165,6 +169,10 @@ pub enum Step {
     Dummy { req_len: u32, resp_len: u32 },
 }
 
+fn json_len(v: &serde_json::Value) -> usize {
+    v.to_string().len()
+}
+
 fn mode_of(level: u8) -> Mode {
     match level {
         0 => Mode::Off,
@@ -290,14 +298,14 @@ impl Engine {
     }
 
     /// The network calls of the app. Each waits for its slot first and reports the size of the
-    /// response afterwards (an estimate from what came back; the client does not expose the
-    /// wire size), so that the dummies' sizes follow the real ones.
+    /// response body afterwards, rebuilt from what came back in the server's own JSON, so that
+    /// the dummies' sizes follow the real ones.
     pub(super) fn net_poll(&self, c: &Client, q: &[u8; 32], after: u64) -> Result<aegis_core::net::Poll, Error> {
         self.slot(0);
         let r = c.poll(q, after);
         if let Ok(p) = &r {
-            // {"frames":[{"seq":N,"d":"hex"},...],"next":N,"has_more":false}
-            self.got(60 + p.frames.iter().map(|(_, d)| 2 * d.len() + 24).sum::<usize>());
+            let frames: Vec<_> = p.frames.iter().map(|(seq, d)| json!({"seq": seq, "d": hex::encode(d)})).collect();
+            self.got(json_len(&json!({"frames": frames, "next": p.next, "has_more": p.has_more})));
         }
         r
     }
@@ -305,9 +313,12 @@ impl Engine {
     pub(super) fn net_lookup(&self, c: &Client, u: &str) -> Result<Option<DirEntry>, Error> {
         self.slot(0);
         let r = c.lookup(u);
-        if let Ok(Some(e)) = &r {
-            // {"u":..,"title":..,"x":64 hex,"ed":64 hex}
-            self.got(60 + 2 * 64 + e.u.len() + e.title.len());
+        match &r {
+            Ok(Some(e)) => self.got(json_len(
+                &json!({"u": e.u, "title": e.title, "x": hex::encode(&e.x), "ed": hex::encode(&e.ed)}),
+            )),
+            Ok(None) => self.got(NOT_FOUND_LEN),
+            Err(_) => {}
         }
         r
     }
@@ -324,8 +335,15 @@ impl Engine {
     pub(super) fn net_prekeys_take(&self, c: &Client, u: &str) -> Result<Option<aegis_core::x3dh::Bundle>, Error> {
         self.slot(0);
         let r = c.prekeys_take(u);
-        if r.is_ok() {
-            self.got(400);
+        match &r {
+            Ok(Some(b)) => self.got(json_len(&json!({
+                "spk": hex::encode(&b.spk),
+                "spk_ts": b.spk_ts,
+                "spk_sig": hex::encode(&b.spk_sig),
+                "opk": b.opk.map(|o| hex::encode(&o)).unwrap_or_default(),
+            }))),
+            Ok(None) => self.got(NOT_FOUND_LEN),
+            Err(_) => {}
         }
         r
     }
@@ -335,7 +353,7 @@ impl Engine {
         self.slot(2 * padded.len());
         let r = c.send(q, padded);
         if let Ok(seq) = &r {
-            self.got(format!("{{\"seq\":{seq}}}").len());
+            self.got(json_len(&json!({"seq": seq})));
         }
         r
     }
@@ -344,7 +362,7 @@ impl Engine {
         self.slot(data.len());
         let r = c.blob_put(id, data);
         if r.is_ok() {
-            self.got(2);
+            self.got(json_len(&json!({})));
         }
         r
     }
@@ -543,5 +561,12 @@ mod tests {
         g.grant();
         h.join().unwrap();
         assert!(g.start_poll(), "a finished cycle can be followed by another");
+    }
+
+    #[test]
+    fn reported_sizes_match_the_server_bodies() {
+        assert_eq!(NOT_FOUND_LEN, json_len(&json!({ "error": "not found" })));
+        assert_eq!(json_len(&json!({"seq": 12})), r#"{"seq":12}"#.len());
+        assert_eq!(json_len(&json!({})), 2);
     }
 }

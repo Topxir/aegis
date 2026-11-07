@@ -6,7 +6,7 @@ use aegis_core::identity::is_valid_username;
 use aegis_core::text::parse_u64;
 use aegis_core::{hex, pad, pow};
 use serde_json::json;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -52,6 +52,9 @@ pub struct Config {
     pub blob_ttl_secs: u64,
     /// Owner `ed_pk`. Only this key may register `owner` and append to the official queue.
     pub owner_ed_pk: Option<[u8; 32]>,
+    /// Reply bytes `nop` may hand out per second, shared by all clients; up to
+    /// `NOP_BURST_SECS` seconds of it can be spent at once.
+    pub nop_bytes_per_sec: u64,
 }
 
 impl Default for Config {
@@ -71,6 +74,7 @@ impl Default for Config {
             blob_quota_bytes: DEFAULT_BLOB_QUOTA_BYTES,
             blob_ttl_secs: DEFAULT_BLOB_TTL_SECS,
             owner_ed_pk: None,
+            nop_bytes_per_sec: 8 * 1024 * 1024,
         }
     }
 }
@@ -102,15 +106,32 @@ impl From<std::io::Error> for ServerError {
     }
 }
 
+#[derive(Clone)]
 struct DirEntry {
     title: String,
     x: [u8; 32],
     ed: [u8; 32],
 }
 
-/// Most remembered sealed-request keys; the oldest go first.
-const SEALED_SEEN_CAP: usize = 262_144;
+/// Most sealed requests accepted per timestamp second. A full second refuses further requests
+/// with that `ts` only; the next second starts empty.
+const SEALED_PER_SECOND: usize = 2048;
+/// Seconds of `nop` budget that may be spent at once.
+pub const NOP_BURST_SECS: u64 = 4;
 
+/// What to put back when a change could not be written to disk.
+enum Undo {
+    Dir(String, Option<DirEntry>),
+    Pin([u8; 32], Option<PinSlot>),
+    Prekeys(String, Option<Prekeys>),
+    PrekeyPut(String),
+    Frame([u8; 32], u64),
+}
+
+/// Changes made by one request, newest last.
+pub(crate) struct Changes(Vec<Undo>);
+
+#[derive(Clone)]
 struct PinSlot {
     v: [u8; 32],
     s: [u8; 32],
@@ -120,6 +141,7 @@ struct PinSlot {
     last_attempt: u64,
 }
 
+#[derive(Clone)]
 struct Prekeys {
     spk: [u8; 32],
     spk_ts: u64,
@@ -137,10 +159,6 @@ struct Expiring {
 impl Expiring {
     fn contains_key(&self, k: &[u8; 32]) -> bool {
         self.map.contains_key(k)
-    }
-
-    fn len(&self) -> usize {
-        self.map.len()
     }
 
     fn insert(&mut self, k: [u8; 32], exp: u64) {
@@ -177,12 +195,16 @@ pub struct ServerState {
     prekey_puts: HashMap<String, VecDeque<u64>>,
     next_seq: u64,
     replay: Expiring,
-    sealed_seen: Expiring,
+    /// Ephemeral keys of sealed requests (first 16 bytes), by the request's `ts`.
+    sealed_seen: BTreeMap<u64, HashSet<[u8; 16]>>,
     blobs: Option<Arc<BlobStore>>,
     pins: HashMap<[u8; 32], PinSlot>,
     prekeys: HashMap<String, Prekeys>,
     srv_sk: Option<[u8; 32]>,
     dirty: bool,
+    journal: Vec<Undo>,
+    /// `nop` reply bytes left, and the second they were counted at.
+    nop_budget: (u64, u64),
 }
 
 impl fmt::Debug for ServerState {
@@ -263,12 +285,14 @@ impl ServerState {
             prekey_puts: HashMap::new(),
             next_seq: 1,
             replay: Expiring::default(),
-            sealed_seen: Expiring::default(),
+            sealed_seen: BTreeMap::new(),
             blobs: None,
             pins: HashMap::new(),
             prekeys: HashMap::new(),
             srv_sk: aegis_core::random_bytes::<32>().ok(),
             dirty: false,
+            journal: Vec::new(),
+            nop_budget: (0, 0),
         }
     }
 
@@ -280,15 +304,63 @@ impl ServerState {
         self.path.as_deref()
     }
 
+    /// [`Self::handle`], also returning what the request changed so it can be undone.
+    pub(crate) fn handle_tracked(&mut self, req: &Request, now: u64) -> (Response, Changes) {
+        let resp = self.handle(req, now);
+        (resp, Changes(std::mem::take(&mut self.journal)))
+    }
+
+    /// Puts back what `changes` replaced, newest first. Spent proofs of work stay spent.
+    fn undo(&mut self, changes: Changes) {
+        for u in changes.0.into_iter().rev() {
+            match u {
+                Undo::Dir(u, Some(e)) => {
+                    self.dir.insert(u, e);
+                }
+                Undo::Dir(u, None) => {
+                    self.dir.remove(&u);
+                }
+                Undo::Pin(slot, Some(p)) => {
+                    self.pins.insert(slot, p);
+                }
+                Undo::Pin(slot, None) => {
+                    self.pins.remove(&slot);
+                }
+                Undo::Prekeys(u, Some(p)) => {
+                    self.prekeys.insert(u, p);
+                }
+                Undo::Prekeys(u, None) => {
+                    self.prekeys.remove(&u);
+                }
+                Undo::PrekeyPut(u) => {
+                    if let Some(t) = self.prekey_puts.get_mut(&u) {
+                        t.pop_back();
+                    }
+                }
+                Undo::Frame(q, seq) => {
+                    if let Some(fr) = self.queues.get_mut(&q) {
+                        if let Some(i) = fr.iter().rposition(|f| f.seq == seq) {
+                            fr.remove(i);
+                        }
+                        if fr.is_empty() {
+                            self.queues.remove(&q);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Routes one request. `now` is unix seconds.
     pub fn handle(&mut self, req: &Request, now: u64) -> Response {
+        self.journal.clear();
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/health") => json_resp(200, &json!({"status": "ok", "protocol": 2})),
             ("GET", "/api/v2/key") => match self.server_public_key() {
                 Some(pk) => json_resp(200, &json!({"x": hex::encode(&pk)})),
                 None => err(503, "no server key"),
             },
-            ("POST", "/api/v2/nop") => nop(&req.body),
+            ("POST", "/api/v2/nop") => self.nop(&req.body, now),
             ("POST", "/api/v2/pin/create") => self.pin_create(&req.body, now),
             ("POST", "/api/v2/pin/open") => self.pin_verify(&req.body, now, false),
             ("POST", "/api/v2/pin/delete") => self.pin_verify(&req.body, now, true),
@@ -343,10 +415,11 @@ impl ServerState {
             None => {}
         }
         self.replay.insert(hash, self.replay_expiry(reg.ts, now));
-        self.dir.insert(
-            reg.u,
+        let old = self.dir.insert(
+            reg.u.clone(),
             DirEntry { title: reg.title, x: reg.x, ed: reg.ed },
         );
+        self.journal.push(Undo::Dir(reg.u, old));
         self.dirty = true;
         json_resp(200, &json!({"ok": true}))
     }
@@ -393,10 +466,19 @@ impl ServerState {
         let body_hash = pow::body_hash_hex(body);
         self.purge_queue(&qid, now);
         let len = self.queues.get(&qid).map_or(0, VecDeque::len);
+        let base = self.config.pow_bits;
         if len >= self.config.max_frames_per_queue {
+            // Fullness is told only for a fresh base proof of work, which is then spent.
+            if !pow::verify(&qhex, ts, &body_hash, nonce, base) {
+                return err(403, "insufficient proof of work");
+            }
+            let hash = pow::pow_hash(&qhex, ts, &body_hash, nonce);
+            if self.pow_spent(hash, now) {
+                return err(403, "proof of work already used");
+            }
+            self.replay.insert(hash, self.replay_expiry(ts, now));
             return err(429, "queue full");
         }
-        let base = self.config.pow_bits;
         let need = base + fill_extra_bits(len, self.config.max_frames_per_queue);
         if !pow::verify(&qhex, ts, &body_hash, nonce, need) {
             if need > base && pow::verify(&qhex, ts, &body_hash, nonce, base) {
@@ -434,6 +516,7 @@ impl ServerState {
             .entry(qid)
             .or_default()
             .push_back(Frame { seq, stored_at: now, data: frame });
+        self.journal.push(Undo::Frame(qid, seq));
         self.dirty = true;
         json_resp(200, &json!({"seq": seq}))
     }
@@ -491,24 +574,31 @@ impl ServerState {
         }
     }
 
-    /// Records the ephemeral key of a sealed request. False when it was already seen, when the
-    /// timestamp is outside the window, or when the set is full.
+    /// Records the ephemeral key of a sealed request. False when the request has no timestamp,
+    /// when it is outside the window, when the key was already seen, or when that timestamp
+    /// second is full. A key is kept until its `ts` can no longer pass the window check, and a
+    /// replay carries the same `ts`, so only that second has to be searched.
     pub fn sealed_admit(&mut self, e_pk: [u8; 32], ts: Option<u64>, now: u64) -> bool {
-        if ts.is_some_and(|t| !pow::ts_in_window(t, now)) {
+        let Some(ts) = ts.filter(|&t| pow::ts_in_window(t, now)) else {
+            return false;
+        };
+        self.expire_sealed(now);
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&e_pk[..16]);
+        let second = self.sealed_seen.entry(ts).or_default();
+        if second.len() >= SEALED_PER_SECOND {
             return false;
         }
-        self.sealed_seen.expire(now);
-        if self.sealed_seen.contains_key(&e_pk) || self.sealed_seen.len() >= SEALED_SEEN_CAP {
-            return false;
-        }
-        let exp = ts.map_or(now + self.config.replay_secs, |t| self.replay_expiry(t, now));
-        self.sealed_seen.insert(e_pk, exp);
-        true
+        second.insert(key)
     }
 
-    /// [`Self::sealed_admit`] for a request without a timestamp.
-    pub fn sealed_first_use(&mut self, e_pk: [u8; 32], now: u64) -> bool {
-        self.sealed_admit(e_pk, None, now)
+    fn expire_sealed(&mut self, now: u64) {
+        while let Some(e) = self.sealed_seen.first_entry() {
+            if e.key().saturating_add(pow::MAX_SKEW_SECS + 1) > now {
+                break;
+            }
+            e.remove();
+        }
     }
 
     /// A spent proof of work stays remembered until its `ts` can no longer pass the window check.
@@ -529,7 +619,7 @@ impl ServerState {
             !fr.is_empty()
         });
         self.replay.expire(now);
-        self.sealed_seen.expire(now);
+        self.expire_sealed(now);
         self.prekey_puts.retain(|_, t| t.back().is_some_and(|b| b.saturating_add(3600) > now));
         let before = self.pins.len();
         self.pins.retain(|_, p| p.last_used.saturating_add(PIN_TTL_SECS) > now);
@@ -601,6 +691,8 @@ impl ServerState {
             }
             times.push_back(now);
         }
+        self.journal.push(Undo::PrekeyPut(put.u.clone()));
+        self.journal.push(Undo::Prekeys(put.u.clone(), self.prekeys.get(&put.u).cloned()));
         self.replay.insert(hash, self.replay_expiry(put.ts, now));
         let rec = self.prekeys.entry(put.u).or_insert_with(|| Prekeys {
             spk: put.spk,
@@ -649,8 +741,10 @@ impl ServerState {
         let Some(rec) = self.prekeys.get_mut(&take.u) else {
             return err(404, "not found");
         };
+        let before = rec.clone();
         let opk = rec.opks.pop_front();
         if opk.is_some() {
+            self.journal.push(Undo::Prekeys(take.u.clone(), Some(before)));
             self.dirty = true;
         }
         json_resp(
@@ -722,6 +816,7 @@ impl ServerState {
         }
         self.replay.insert(hash, self.replay_expiry(ts, now));
         self.pins.insert(slot, PinSlot { v, s, fails: 0, last_used: now, last_attempt: 0 });
+        self.journal.push(Undo::Pin(slot, None));
         self.dirty = true;
         json_resp(200, &json!({}))
     }
@@ -757,6 +852,7 @@ impl ServerState {
             return err(429, "too many attempts");
         }
         self.replay.insert(hash, expiry);
+        self.journal.push(Undo::Pin(slot, Some(entry.clone())));
         let Some(entry) = self.pins.get_mut(&slot) else {
             return err(404, "not found");
         };
@@ -1050,14 +1146,27 @@ fn is_reserved_name(u: &str) -> bool {
     RESERVED_NAMES.iter().any(|r| sk.contains(&name_skeleton(r)))
 }
 
-fn nop(body: &[u8]) -> Response {
-    let Some(len) = body.first_chunk::<4>().map(|b| u32::from_be_bytes(*b) as usize) else {
-        return err(400, "short body");
-    };
-    if len > aegis_core::cover::max_resp_len(body.len()) as usize {
-        return err(400, "bad length");
+impl ServerState {
+    /// Cover traffic (section 26). Replies draw on a byte budget shared by everyone, so cheap
+    /// requests cannot be turned into a bandwidth amplifier.
+    fn nop(&mut self, body: &[u8], now: u64) -> Response {
+        let Some(len) = body.first_chunk::<4>().map(|b| u32::from_be_bytes(*b) as usize) else {
+            return err(400, "short body");
+        };
+        if len > aegis_core::cover::max_resp_len(body.len()) as usize {
+            return err(400, "bad length");
+        }
+        let rate = self.config.nop_bytes_per_sec;
+        let cap = rate.saturating_mul(NOP_BURST_SECS);
+        let (left, at) = self.nop_budget;
+        let left = if at == 0 { cap } else { left.saturating_add(rate.saturating_mul(now.saturating_sub(at))).min(cap) };
+        let Some(rest) = left.checked_sub(len as u64) else {
+            self.nop_budget = (left, now);
+            return err(429, "busy");
+        };
+        self.nop_budget = (rest, now);
+        Response { status: 200, body: "\0".repeat(len) }
     }
-    Response { status: 200, body: " ".repeat(len) }
 }
 
 fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
@@ -1139,6 +1248,16 @@ impl<'a> Reader<'a> {
 
 /// Writes the state to disk if it changed since the last call.
 pub fn persist_now(state: &Mutex<ServerState>) -> Result<(), ServerError> {
+    persist(state, None)
+}
+
+/// [`persist_now`] for a request that must be on disk before its reply. If the write fails,
+/// `changes` are taken back out of memory before any other snapshot can include them.
+pub(crate) fn persist_or_undo(state: &Mutex<ServerState>, changes: Changes) -> Result<(), ServerError> {
+    persist(state, Some(changes))
+}
+
+fn persist(state: &Mutex<ServerState>, changes: Option<Changes>) -> Result<(), ServerError> {
     // One writer at a time: a snapshot taken later is always written later.
     static PERSIST: Mutex<()> = Mutex::new(());
     let _one = PERSIST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1148,10 +1267,11 @@ pub fn persist_now(state: &Mutex<ServerState>) -> Result<(), ServerError> {
         .take_snapshot();
     if let Some((path, bytes)) = snap {
         if let Err(e) = aegis_core::vault::write_atomic(&path, &bytes) {
-            state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .dirty = true;
+            let mut s = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            s.dirty = true;
+            if let Some(c) = changes {
+                s.undo(c);
+            }
             return Err(ServerError::Io(e.to_string()));
         }
     }
@@ -1397,8 +1517,8 @@ mod tests {
         let all = poll(&mut s, &q, 0, NOW);
         assert_eq!(all["frames"].as_array().unwrap().len(), 3);
         assert_eq!(all["frames"][0]["d"], hex::encode(&[0u8; 256]));
-        // a 429 does not burn the proof of work
-        assert_eq!(s.handle(&send_req(&q, 256, NOW + 9, 0, 9), NOW).status, 429);
+        // the proof of work behind a 429 is spent like any other
+        assert_eq!(s.handle(&send_req(&q, 256, NOW + 9, 0, 9), NOW).status, 403);
     }
 
     #[test]

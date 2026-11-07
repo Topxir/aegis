@@ -46,8 +46,8 @@ object Channel {
 /** The built-in official channel (spec section 19): channel framing with a public secret. */
 object Official {
     const val OWNER = "owner"
-    /** Owner key compiled into the build. None is built in yet, so the official channel is unavailable (spec section 19). */
-    val OWNER_ED_PK: ByteArray? = null
+    /** Owner key compiled into the build; never taken from the directory or the server (spec section 19). */
+    val OWNER_ED_PK: ByteArray? = Hex.decode("9b714d3e9f6b7d248a15c7302d3b1ff391ca416c98ccc935bb4349f00eec5884")
 
     val available: Boolean get() = OWNER_ED_PK != null
 

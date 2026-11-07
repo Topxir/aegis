@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Adds, removes and polices peers on an Aegis VPN node. Installed by setup-node.sh.
+#
+#   aegis-vpn-peer add <client-public-key>   prints a client config (without the private key)
+#   aegis-vpn-peer del <client-public-key>
+#   aegis-vpn-peer prune <idle-minutes>      quota enforcement and idle removal (systemd timer)
+#   aegis-vpn-peer stats                     counts only, no identifiers
+#
+# The node never sees or stores client private keys. All per-client state lives in /run
+# (RAM) and is gone after a reboot: per key, only a hash of the key, the calendar month,
+# bytes used this month and when it was added. No client IPs, no destinations, no times of use.
+#
+# The quota is per key. A client that makes a new key gets a new quota; stopping that needs
+# per-account tokens from aegis-server (next stage). MAX_PEERS caps the damage until then.
+
+# shellcheck source=/dev/null
+. /etc/aegis-vpn/node.env
+
+STATE_DIR=/run/aegis-vpn
+PEER_DIR="$STATE_DIR/peers"
+QUOTA_BYTES=$((FREE_QUOTA_MB * 1024 * 1024))
+
+die() { echo "error: $*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "run as root"
+
+valid_key() {
+  # 32 bytes in base64: 43 characters, the last one limited to the values that leave the
+  # low 2 bits zero, then '='.
+  [[ "$1" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$ ]]
+}
+
+key_id() { printf '%s' "$1" | sha256sum | cut -c1-32; }
+
+this_month() { date -u +%Y-%m; }
+
+# State line per key: <month> <bytes used before the current wg counters> <counter offset> <added at>
+load_state() {
+  local f="$PEER_DIR/$1"
+  if [ -s "$f" ]; then
+    read -r S_MONTH S_BASE S_OFFSET S_ADDED < "$f"
+  else
+    S_MONTH="$(this_month)"; S_BASE=0; S_OFFSET=0; S_ADDED="$(date +%s)"
+  fi
+  if [ "$S_MONTH" != "$(this_month)" ]; then
+    S_MONTH="$(this_month)"; S_BASE=0; S_OFFSET="${2:-0}"
+  fi
+}
+
+save_state() {
+  printf '%s %s %s %s\n' "$S_MONTH" "$S_BASE" "$S_OFFSET" "$S_ADDED" > "$PEER_DIR/$1.tmp"
+  mv -f "$PEER_DIR/$1.tmp" "$PEER_DIR/$1"
+}
+
+# rx + tx bytes of a peer that is currently configured, 0 if absent.
+peer_bytes() {
+  wg show "$WG_IF" transfer | awk -v k="$1" '$1 == k { print $2 + $3; found = 1 } END { if (!found) print 0 }'
+}
+
+peer_ip() {
+  wg show "$WG_IF" allowed-ips | awk -v k="$1" '$1 == k { sub("/32", "", $2); print $2 }'
+}
+
+remove_peer() {
+  local key="$1" id="$2" bytes
+  bytes="$(peer_bytes "$key")"
+  S_BASE=$((S_BASE + bytes - S_OFFSET))
+  [ "$S_BASE" -ge 0 ] || S_BASE=0
+  S_OFFSET=0
+  wg set "$WG_IF" peer "$key" remove
+  save_state "$id"
+}
+
+random_free_ip() {
+  local used n idx ip
+  used="$(wg show "$WG_IF" allowed-ips | awk '{ print $2 }')"
+  for _ in $(seq 1 200); do
+    # Random address in 10.8.0.0/17, so the address says nothing about when a client joined.
+    n="$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')"
+    idx=$((n % 32768))
+    ip="10.8.$((idx >> 8)).$((idx & 255))"
+    case "$ip" in 10.8.0.0|10.8.0.1|*.0|*.255) continue ;; esac
+    if ! grep -qxF "$ip/32" <<< "$used"; then
+      echo "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+print_config() {
+  local ip="$1"
+  cat <<CONF
+[Interface]
+PrivateKey = <client private key>
+Address = $ip/32
+DNS = 9.9.9.9
+
+[Peer]
+PublicKey = $(cat /etc/aegis-vpn/server.pub)
+Endpoint = ${VPN_ENDPOINT:-<server address>:$VPN_PORT}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+CONF
+}
+
+mkdir -p "$PEER_DIR"
+chmod 700 "$STATE_DIR"
+exec 9> "$STATE_DIR/lock"
+flock 9
+
+cmd="${1:-}"
+case "$cmd" in
+  add)
+    key="${2:-}"
+    valid_key "$key" || die "bad public key"
+    id="$(key_id "$key")"
+    load_state "$id"
+
+    ip="$(peer_ip "$key")"
+    if [ -z "$ip" ]; then
+      [ "$S_BASE" -lt "$QUOTA_BYTES" ] || { echo "quota exhausted for this month" >&2; exit 3; }
+      count="$(wg show "$WG_IF" peers | grep -c . || true)"
+      [ "$count" -lt "$MAX_PEERS" ] || { echo "node is full" >&2; exit 4; }
+      ip="$(random_free_ip)" || { echo "no free addresses" >&2; exit 4; }
+      wg set "$WG_IF" peer "$key" allowed-ips "$ip/32"
+      S_OFFSET=0
+      S_ADDED="$(date +%s)"
+      save_state "$id"
+    fi
+    print_config "$ip"
+    ;;
+
+  del)
+    key="${2:-}"
+    valid_key "$key" || die "bad public key"
+    id="$(key_id "$key")"
+    load_state "$id"
+    if [ -n "$(peer_ip "$key")" ]; then
+      remove_peer "$key" "$id"
+    fi
+    ;;
+
+  prune)
+    idle_min="${2:-15}"
+    [[ "$idle_min" =~ ^[1-9][0-9]{0,4}$ ]] || die "bad idle minutes"
+    now="$(date +%s)"
+    idle_sec=$((idle_min * 60))
+    active=""
+
+    # dump: first line is the interface, then: key psk endpoint allowed-ips handshake rx tx keepalive
+    while read -r key _ _ _ handshake rx tx _; do
+      valid_key "$key" || continue
+      id="$(key_id "$key")"
+      active="$active $id"
+      load_state "$id" "$((rx + tx))"
+      used=$((S_BASE + rx + tx - S_OFFSET))
+
+      if [ "$used" -ge "$QUOTA_BYTES" ]; then
+        remove_peer "$key" "$id"
+      elif [ "$handshake" -eq 0 ] && [ $((now - S_ADDED)) -gt "$idle_sec" ]; then
+        remove_peer "$key" "$id"
+      elif [ "$handshake" -ne 0 ] && [ $((now - handshake)) -gt "$idle_sec" ]; then
+        remove_peer "$key" "$id"
+      else
+        save_state "$id"
+      fi
+    done < <(wg show "$WG_IF" dump | tail -n +2)
+
+    # Forget keys from past months that are not connected.
+    month="$(this_month)"
+    for f in "$PEER_DIR"/*; do
+      [ -f "$f" ] || continue
+      id="$(basename "$f")"
+      case "$active" in *" $id"*) continue ;; esac
+      read -r m _ < "$f" || m=""
+      [ "$m" = "$month" ] || rm -f "$f"
+    done
+    ;;
+
+  stats)
+    connected="$(wg show "$WG_IF" peers | grep -c . || true)"
+    exhausted=0
+    month="$(this_month)"
+    for f in "$PEER_DIR"/*; do
+      [ -f "$f" ] || continue
+      read -r m base _ < "$f"
+      if [ "$m" = "$month" ] && [ "$base" -ge "$QUOTA_BYTES" ]; then
+        exhausted=$((exhausted + 1))
+      fi
+    done
+    echo "connected: $connected / $MAX_PEERS"
+    echo "quota exhausted this month: $exhausted"
+    echo "quota: $FREE_QUOTA_MB MB per key per month"
+    ;;
+
+  *)
+    echo "usage: aegis-vpn-peer add|del <public-key> | prune <idle-minutes> | stats" >&2
+    exit 2
+    ;;
+esac

@@ -62,7 +62,9 @@ Queue id: 32 bytes, sent as 64 hex chars.
 
 - `POST /api/v2/queue/send?q=<hex>&ts=<unix>&pow=<u64>` body = hex of a padded frame →
   `200 {"seq":N}`. Padded length must be one of the buckets below, otherwise `400`.
-  Full queue → `429`. Bad, stale or reused proof of work, or `ts` outside the window → `403`.
+  Full queue → `429`, but only for a fresh proof of work at the base bits, which is then spent
+  like that of an accepted send. Bad, stale or reused proof of work, or `ts` outside the window
+  → `403`.
   The required work rises with the fill of the queue: the base 18 bits up to 50% full, then one
   more bit for every further 12.5% (`bits = 18 + max(0, floor(8 * len / max) − 4)`, so 19 from
   62.5%, up to 22 when full). A proof that meets the base but not the current requirement gets
@@ -240,7 +242,7 @@ reproduce it.
 - `seq` values come from one counter for the whole server, so they never repeat even when a
   queue is emptied and recreated. `after` defaults to `0`.
 - The proof-of-work replay cache is kept in memory only. A request rejected for a full queue
-  does not consume its proof of work.
+  consumes its proof of work, so one proof buys one answer.
 - Hex fields are lowercase only; percent-escapes in envelope fields are uppercase only.
 - State is stored in `server-v2.state` inside the data directory and replaced atomically
   (unique temporary name, `create_new`, mode 0600 on unix; one writer at a time).
@@ -479,7 +481,9 @@ waits a second and sends the same request again. `left` is the number of attempt
 after this mismatch (4, 3, 2, 1, 0); `0` means the slot has just been deleted. A request that
 fails the ts window, proof of work or form checks gets `400`/`403` and is not an attempt.
 Every PIN change is written to disk before the reply, so restarting the server never resets a
-counter.
+counter. If the write fails the server answers `503` and takes the change back in memory too:
+a refused create leaves no slot and a refused attempt is not counted. The same holds for
+`prekeys/put` and for a one-time prekey handed out by `prekeys/take`.
 
 `pin` is exactly 4 or 6 ASCII digits and is hashed as its UTF-8 bytes. `Argon2id` is version
 0x13 with a 32-byte output; the cost parameters are the fixed values above (the test vector
@@ -555,7 +559,7 @@ the inner request may not be `/api/v2/s` (sealed `400`). `pad` is `BE32(len) || 
 smallest bucket in `[1024, 4096, 16384, 65536, 262144, 1048576, 1114112]`.
 Each `e` is used once, so the fixed request nonce is safe; the response nonce is random because
 `k_resp` is a function of `e_pk` alone and a replayed outer request would otherwise reuse the
-keystream. The method line may carry the client clock: `method SP ts` with `ts` in decimal Unix seconds (for example `GET 1700000000`); clients always send it. The server answers an empty `400` when `ts` is more than 600 s away from its own clock, and keeps the `e_pk` until at least `ts + 601`, so a recorded request can never run twice. The server remembers every `e_pk` it has accepted for the replay window (20 minutes, in memory, at most 262144 entries) and answers a repeat with an empty `400` before running the inner request. When the set is full new sealed requests get an empty `400` until entries expire; nothing is dropped early. A request without `ts` (the older form) is still accepted and only gets the 20-minute guard. The inner request carries no cookies or identifying headers. Responses to `POST
+keystream. The method line may carry the client clock: `method SP ts` with `ts` in decimal Unix seconds (for example `GET 1700000000`); clients always send it. The server answers an empty `400` when `ts` is more than 600 s away from its own clock, and keeps the first 16 bytes of `e_pk` until `ts + 601`, so a recorded request can never run twice. A request without `ts` gets an empty `400`. Accepted keys are kept in memory, grouped by their `ts` second, at most 2048 per second, and a repeat gets an empty `400` before the inner request runs. A replay carries the same `ts`, so only that second is searched; when one second is full, further requests stamped with it get an empty `400`, while the next second, which honest clients move on to, is unaffected. Nothing is dropped early. The set is not persisted: for up to 600 s after a server restart a recorded request can run once more. The inner request carries no cookies or identifying headers. Responses to `POST
 /api/v2/nop` (section 26) are padded like any other response of the same body length.
 
 The key is stored in `server-x25519.key` (32 raw bytes, created atomically with owner-only
@@ -623,7 +627,11 @@ body-less `GET` for a blob or a large poll page has the smallest request bucket 
 response bucket, so a dummy must be able to ask for the same. A dummy request body is at most 64 KiB.
 The server checks only the length field and answers `200` with `resp_len` filler bytes, so the
 sealed response has the same size as a real one. The
-server keeps no state, writes no log line and applies the usual rate limit.
+server writes no log line. Filler bytes come from one budget for the whole server
+(`nop_bytes_per_sec`, default 8 MiB per second, at most 4 seconds' worth saved up); a dummy
+the budget cannot cover gets `429 {"error":"busy"}`, which clients ignore like any dummy
+failure. Clients record the real response sizes as the length of the JSON body the server
+sent (rebuilt from the parsed answer), not an estimate.
 
 Settings → Connection → Cover traffic: Off, Standard (above, default), High (mean 8 s on
 desktop, 12 s on Android). Cover traffic stops when the app is locked or in the background; the
@@ -744,9 +752,14 @@ All frames are padded as in section 4. The envelope rules of section 5 still app
 
 - A sends starts until it receives any message from B on that session, then switches to
   messages. Each start repeats the same `EK`/prekey triple with a fresh ratchet message.
-- Each client remembers the last 1000 `EK_pk` values it has accepted. A start with a known
-  `EK_pk` is handled on the existing session for it and never resets that session. This stops
-  replayed starts.
+- Each client remembers the last 1000 `EK_pk` values it has accepted, and per contact the last
+  64. A start with a known `EK_pk` is handled on the existing session for it and never resets
+  that session. This stops replayed starts.
+- A ratchet message (in a start or a message frame) whose DH key is a receiving chain the
+  client holds or held, at a counter whose key is already spent and not among the skipped
+  keys, is a replay: it is ignored without a state change and does not count toward recovery.
+  Per contact the client keeps the final counter of the last 256 receiving chains it left
+  behind (by a DH step or by deleting a session).
 - A start with a new `EK_pk` from a pinned contact creates a new session. That session becomes
   the one used for sending. Older sessions are kept for receiving until 30 days after they last decrypted a message (or were superseded, if never), then deleted.
 - If both sides start at the same time, both sessions are kept for receiving. For sending, both
@@ -765,15 +778,18 @@ All frames are padded as in section 4. The envelope rules of section 5 still app
 
 Implementation notes (`aegis_core::session::SessionStore`):
 
-- All state is local and versioned: a ratchet is stored as `AGR1`, the whole store as `AGS1`,
-  a sender chain as `AGC1` and a set of received chains as `AGK1`. Decoding is strict and a
-  failed decode never yields partial state.
+- All state is local and versioned: a ratchet is stored as `AGR1`, the whole store as `AGS2`,
+  a sender chain as `AGC1` and a set of received chains as `AGK2`. `AGS1` and `AGK1` (without
+  the per-contact replay state and the seen-post digests) are still read. Decoding is strict
+  and a failed decode never yields partial state. A name longer than 255 bytes is an encode
+  error, never truncated.
 - `decrypt` returns the envelope plus actions for the app. `LookupSender{x_pk}` means no contact
   has that key yet: the app looks the sender up, calls `add_contact`, and handles the same frame
   again. `NeedsPrekeysFetch`/`StartNewSession` ask the app to call `prekeys/take` and then
   `start_session`; `UndecryptableNotice` is the "Some messages could not be decrypted" line.
-- A frame whose SHA-256 is among the last 256 accepted frames is ignored (a replay by the server
-  or the network); this is in addition to the `EK_pk` rule above.
+- A frame whose SHA-256 is among the last 1024 accepted frames is ignored (a replay by the server
+  or the network); this is in addition to the `EK_pk` and spent-counter rules above, which do
+  not depend on this bounded set.
 - Recovery marks the contact as needing a new start: `encrypt` then returns `NeedsPrekeys`
   until `start_session` has been called.
 - Of several send sessions, the one whose `EK_pk` the store remembers as `send_ek` is used.
@@ -806,7 +822,16 @@ Implementation notes (`aegis_core::senderkey`): the `skey` envelope carries the 
 `n` and `ck`, so a chain given later starts where the sender is, not at 0. Envelope kind `skey`
 is sent only inside type 0x03 session frames; the legacy type 0x01 seal refuses it.
 A channel `RecvSet` is created with the owner's `ed_pk` and accepts chains from the owner
-only. A `SendChain` is rotated when `needs_rotation(now, member_removed)` says so.
+only; a group `RecvSet` takes no owner key. A set holds at most 1000 chains (8 per sender),
+and decoding rejects a larger count before reading the chains. A `SendChain` is rotated when
+`needs_rotation(now, member_removed)` says so.
+
+The signature does not cover `chain_id` or `n`, so anyone holding a chain key can re-encrypt
+an old signed post at another position. Receivers therefore keep, per chain, the first 16
+bytes of SHA-256(envelope || sig) for the last 2000 accepted posts, and ignore a post already
+accepted on any held chain of the same sender without changing state, so the key at that
+position stays for the real post. Residual gap: a post from a chain already dropped (30 days
+after it was superseded) can still be replayed onto a newer chain once.
 
 The frame goes to the group queue of section 7 (for channels, section 15). The sender
 advances its chain after each message and erases `mk` and the old `ck`. Receivers advance their

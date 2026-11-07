@@ -5,14 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
-pub const DEFAULT_ENDPOINT: &str = "https://freeoasis.space";
-/// The sealed-transport key of the default server, compiled in. The default endpoint accepts
-/// this key only; a different one shows the key-changed screen. Any other endpoint is pinned on
-/// first use. Set to `None`, every endpoint is pinned on first use.
-pub const DEFAULT_SERVER_X_PK: Option<[u8; 32]> = Some([
-    0x8e, 0x5b, 0x9b, 0x5c, 0x70, 0x9e, 0xc8, 0x93, 0xf1, 0x66, 0x24, 0xd0, 0x0d, 0x41, 0x0d, 0xc6,
-    0x97, 0x88, 0x7d, 0x4d, 0xee, 0x43, 0x4d, 0x5b, 0xcf, 0x5f, 0x70, 0x5a, 0x35, 0x06, 0x28, 0x60,
-]);
+pub const DEFAULT_ENDPOINT: &str = aegis_core::net::DEFAULT_SERVER_URL;
 pub const MAX_MESSAGES_PER_CHAT: usize = 1000;
 pub const SEEN_CAP: usize = 4096;
 pub const SCHEMA: u32 = 1;
@@ -128,22 +121,38 @@ fn no_particles() -> String {
     "none".to_owned()
 }
 
+/// The form an endpoint is stored in: trimmed, no trailing slash, scheme and host lowercase.
+/// An endpoint is only scheme, host and port, so all of it can be lowercased.
+pub fn normalize_endpoint(s: &str) -> String {
+    s.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+/// Whether two endpoints name the same server, so `https://Host/` matches `https://host:443`.
+pub fn same_endpoint(a: &str, b: &str) -> bool {
+    let (a, b) = (normalize_endpoint(a), normalize_endpoint(b));
+    match (aegis_core::net::Endpoint::parse(&a), aegis_core::net::Endpoint::parse(&b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 fn zero_key() -> Zeroizing<[u8; 32]> {
     Zeroizing::new([0; 32])
 }
 
 impl Settings {
-    /// The transport key we trust for the current endpoint, if one was pinned.
+    /// The transport key we trust for the current endpoint, if one was pinned. The default
+    /// server accepts only its compiled key; a different one shows the key-changed screen.
     pub fn pinned_key(&self) -> Option<[u8; 32]> {
-        self.pinned_key_in(DEFAULT_SERVER_X_PK)
+        self.pinned_key_in(aegis_core::net::DEFAULT_SERVER_X_PK)
     }
 
     /// `pinned_key` with the compiled key of the default server given explicitly.
     pub(crate) fn pinned_key_in(&self, compiled: Option<[u8; 32]>) -> Option<[u8; 32]> {
-        if compiled.is_some() && self.endpoint.trim_end_matches('/') == DEFAULT_ENDPOINT {
+        if compiled.is_some() && same_endpoint(&self.endpoint, DEFAULT_ENDPOINT) {
             return compiled;
         }
-        if self.server_key_for == self.endpoint {
+        if same_endpoint(&self.server_key_for, &self.endpoint) {
             self.server_key
         } else {
             None

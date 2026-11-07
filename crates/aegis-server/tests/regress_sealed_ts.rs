@@ -38,11 +38,12 @@ fn stale_and_future_timestamps_are_refused() {
 }
 
 #[test]
-fn legacy_request_without_timestamp_still_opens() {
-    let s = ServerState::ephemeral(Config::default());
+fn request_without_timestamp_opens_but_is_not_admitted() {
+    let mut s = ServerState::ephemeral(Config::default());
     let pk = s.server_public_key().unwrap();
     let sk = s.server_secret_key().unwrap();
     let (outer, _) = sealed::seal_request_with(&[8; 32], &pk, "POST", "/api/v2/nop", b"x").unwrap();
     let (inner, _) = sealed::open_request(&sk, &outer).unwrap();
     assert_eq!((inner.method.as_str(), inner.ts), ("POST", None));
+    assert!(!s.sealed_admit(e_pk(&outer), inner.ts, NOW));
 }

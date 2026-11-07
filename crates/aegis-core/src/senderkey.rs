@@ -6,7 +6,8 @@ use crate::group::group_id;
 use crate::identity::{ed25519_public, ed25519_sign, ed25519_verify};
 use crate::ratchet::{kdf_ck, msg_key, Reader, Writer};
 use crate::seal::{aead_open, aead_seal};
-use crate::{arr, hex, hkdf32, Error, Result};
+use crate::{arr, hex, hkdf32, sha256, Error, Result};
+use std::collections::VecDeque;
 use zeroize::Zeroizing;
 
 pub const FRAME_SENDER_KEY: u8 = 0x05;
@@ -18,6 +19,7 @@ pub const OLD_CHAIN_KEEP_SECS: u64 = 30 * 24 * 3600;
 const HDR_LEN: usize = 12 + 16 + 4 + 16;
 const MAX_CHAINS_PER_SENDER: usize = 8;
 const MAX_CHAINS: usize = 1000;
+const MAX_SEEN_PER_CHAIN: usize = 2 * ROTATE_AFTER_MESSAGES as usize;
 
 type Key = Zeroizing<[u8; 32]>;
 
@@ -202,6 +204,7 @@ struct RecvChain {
     ck: Key,
     skipped: Vec<(u32, Key, u64)>,
     superseded_at: Option<u64>,
+    seen: VecDeque<[u8; 16]>,
 }
 
 impl Clone for RecvChain {
@@ -214,6 +217,7 @@ impl Clone for RecvChain {
             ck: self.ck.clone(),
             skipped: self.skipped.clone(),
             superseded_at: self.superseded_at,
+            seen: self.seen.clone(),
         }
     }
 }
@@ -234,10 +238,12 @@ impl core::fmt::Debug for RecvSet {
 }
 
 impl RecvSet {
-    /// `owner_ed` is required for channels: only the owner's chains are accepted.
+    /// `owner_ed` is required for channels (only the owner's chains are accepted) and refused for groups.
     pub fn new(scope: Scope, g: &[u8; 32], owner_ed: Option<[u8; 32]>) -> Result<Self> {
-        if scope == Scope::Channel && owner_ed.is_none() {
-            return Err(Error::Session("channel needs an owner key"));
+        match (scope, owner_ed) {
+            (Scope::Channel, None) => return Err(Error::Session("channel needs an owner key")),
+            (Scope::Group, Some(_)) => return Err(Error::Session("group has no owner key")),
+            _ => {}
         }
         Ok(Self { scope, g: Zeroizing::new(*g), hk: header_key(g)?, owner_ed, chains: Vec::new() })
     }
@@ -292,6 +298,7 @@ impl RecvSet {
             ck: Zeroizing::new(*ck),
             skipped: Vec::new(),
             superseded_at: None,
+            seen: VecDeque::new(),
         });
         let mine: Vec<usize> =
             (0..self.chains.len()).filter(|&i| self.chains[i].sender_ed == sender_ed).collect();
@@ -347,6 +354,15 @@ impl RecvSet {
         if !ed25519_verify(&env.sender_ed, &sig_input(body), &arr(sig)?) {
             return Err(Error::BadSignature);
         }
+        // A signed post re-encrypted at another position must not use up that position's key.
+        let digest: [u8; 16] = arr(&sha256(&[body, sig])[..16])?;
+        if self.chains.iter().any(|c| c.sender_ed == chain.sender_ed && c.seen.contains(&digest)) {
+            return Err(Error::Session("replayed post"));
+        }
+        chain.seen.push_back(digest);
+        while chain.seen.len() > MAX_SEEN_PER_CHAIN {
+            chain.seen.pop_front();
+        }
         self.chains[i] = chain;
         Ok(env)
     }
@@ -359,17 +375,17 @@ impl RecvSet {
         self.chains.retain(|c| c.superseded_at.is_none_or(|t| now < t.saturating_add(OLD_CHAIN_KEEP_SECS)));
     }
 
-    /// Local encoding `AGK1`.
-    pub fn encode(&self) -> Zeroizing<Vec<u8>> {
+    /// Local encoding `AGK2`.
+    pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>> {
         let mut w = Writer::new();
-        w.raw(b"AGK1");
+        w.raw(b"AGK2");
         w.u8(u8::from(self.scope == Scope::Channel));
         w.raw(self.g.as_ref());
         w.opt32(self.owner_ed.as_ref());
         w.u16(u16::try_from(self.chains.len()).unwrap_or(u16::MAX));
         for c in &self.chains {
             w.raw(&c.chain_id);
-            w.str(&c.sender);
+            w.str(&c.sender)?;
             w.raw(&c.sender_ed);
             w.u32(c.next_n);
             w.raw(c.ck.as_ref());
@@ -380,17 +396,27 @@ impl RecvSet {
                 w.raw(k.as_ref());
                 w.u64(*ts);
             }
+            w.u16(u16::try_from(c.seen.len()).unwrap_or(u16::MAX));
+            for d in &c.seen {
+                w.raw(d);
+            }
         }
-        w.finish()
+        Ok(w.finish())
     }
 
+    /// Reads `AGK2` and the older `AGK1`, which has no seen-post digests.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut r = Reader::new(bytes);
-        r.magic(b"AGK1")?;
+        let v2 = bytes.starts_with(b"AGK2");
+        r.magic(if v2 { b"AGK2" } else { b"AGK1" })?;
         let scope = if r.flag()? { Scope::Channel } else { Scope::Group };
         let g: [u8; 32] = r.array()?;
         let mut set = Self::new(scope, &g, r.opt32()?)?;
-        for _ in 0..r.u16()? {
+        let chains = r.u16()?;
+        if usize::from(chains) > MAX_CHAINS {
+            return Err(Error::Session("state"));
+        }
+        for _ in 0..chains {
             let mut c = RecvChain {
                 chain_id: r.array()?,
                 sender: r.str()?,
@@ -399,6 +425,7 @@ impl RecvSet {
                 ck: Zeroizing::new(r.array()?),
                 superseded_at: r.opt_u64()?,
                 skipped: Vec::new(),
+                seen: VecDeque::new(),
             };
             let count = usize::from(r.u16()?);
             if count > MAX_SKIPPED {
@@ -406,6 +433,15 @@ impl RecvSet {
             }
             for _ in 0..count {
                 c.skipped.push((r.u32()?, Zeroizing::new(r.array()?), r.u64()?));
+            }
+            if v2 {
+                let seen = usize::from(r.u16()?);
+                if seen > MAX_SEEN_PER_CHAIN {
+                    return Err(Error::Session("state"));
+                }
+                for _ in 0..seen {
+                    c.seen.push_back(r.array()?);
+                }
             }
             let dup = set.chains.iter().any(|o| o.sender_ed == c.sender_ed && o.chain_id == c.chain_id);
             let per_sender = set.chains.iter().filter(|o| o.sender_ed == c.sender_ed).count();
@@ -416,9 +452,6 @@ impl RecvSet {
             set.chains.push(c);
         }
         r.end()?;
-        if set.chains.len() > MAX_CHAINS {
-            return Err(Error::Session("state"));
-        }
         Ok(set)
     }
 }
@@ -478,7 +511,7 @@ mod tests {
 
     fn setup(scope: Scope) -> (SendChain, RecvSet) {
         let chain = SendChain::new_with([1; 16], [2; 32], 100);
-        let mut set = RecvSet::new(scope, &G, Some(ed())).unwrap();
+        let mut set = RecvSet::new(scope, &G, (scope == Scope::Channel).then(ed)).unwrap();
         let skey = chain.skey_envelope("alice", "Alice", ed(), &scope.id(&G), 5).unwrap();
         set.add_from_skey(&skey, 100).unwrap();
         (chain, set)
@@ -613,9 +646,9 @@ mod tests {
         let a = chain.encrypt(Scope::Group, &G, &ED_SK, &msg(Scope::Group, "a")).unwrap();
         let b = chain.encrypt(Scope::Group, &G, &ED_SK, &msg(Scope::Group, "b")).unwrap();
         set.decrypt(&b, 100).unwrap();
-        let bytes = set.encode();
+        let bytes = set.encode().unwrap();
         let mut again = RecvSet::decode(&bytes).unwrap();
-        assert_eq!(*again.encode(), *bytes);
+        assert_eq!(*again.encode().unwrap(), *bytes);
         assert_eq!(again.decrypt(&a, 100).unwrap().body, "a");
         assert!(RecvSet::decode(&bytes[..bytes.len() - 1]).is_err());
         let cb = chain.encode();

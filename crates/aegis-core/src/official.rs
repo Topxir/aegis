@@ -7,13 +7,11 @@ use zeroize::Zeroizing;
 /// Username of the channel owner.
 pub const OFFICIAL_OWNER: &str = "owner";
 
-/// Owner `ed_pk` compiled into the clients.
-///
-/// TODO(author): set this to the real owner ed25519 public key before release. While it is
-/// `None` no official post verifies: clients must not fall back to a key learned from the
-/// directory or from the server (trust on first use would let whoever answers the lookup
-/// forge official posts).
-pub const OFFICIAL_OWNER_ED_PK: Option<[u8; 32]> = None;
+/// Owner `ed_pk` compiled into the clients. Clients never take this key from the directory or
+/// the server, so whoever answers a lookup cannot forge official posts.
+pub const OFFICIAL_OWNER_ED_PK: Option<[u8; 32]> = Some([
+    0x9b, 0x71, 0x4d, 0x3e, 0x9f, 0x6b, 0x7d, 0x24, 0x8a, 0x15, 0xc7, 0x30, 0x2d, 0x3b, 0x1f, 0xf3, 0x91, 0xca, 0x41, 0x6c, 0x98, 0xcc, 0xc9, 0x35, 0xbb, 0x43, 0x49, 0xf0, 0x0e, 0xec, 0x58, 0x84,
+]);
 
 /// `G = SHA256("aegis-v2 official-channel")`.
 pub fn official_g() -> [u8; 32] {

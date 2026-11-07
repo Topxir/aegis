@@ -59,7 +59,7 @@ fn decode_rejects_duplicate_chains() {
     let g = *new_group_secret().unwrap();
     let mut rs = RecvSet::new(Scope::Group, &g, None).unwrap();
     rs.add_chain("a", [1; 32], [1; 16], 0, &[9; 32], 1).unwrap();
-    let enc = rs.encode();
+    let enc = rs.encode().unwrap();
     assert!(RecvSet::decode(&enc).is_ok());
     // The same chain twice.
     let mut dup = enc.to_vec();
@@ -83,4 +83,75 @@ fn squatted_chain_id_does_not_block_the_real_sender() {
     // Re-distribution of an already known chain stays idempotent.
     rs.add_chain("alice", ed25519_public(&alice_sk), [0xA1; 16], 0, &[0x02; 32], 13).unwrap();
     assert!(rs.add_chain("eve", ed25519_public(&alice_sk), [0xA1; 16], 0, &[0x02; 32], 13).is_err());
+}
+
+fn chain_bytes(chain_id: [u8; 16], sender: &str, ed: [u8; 32], ck: [u8; 32], v2: bool) -> Vec<u8> {
+    let mut b = chain_id.to_vec();
+    b.push(u8::try_from(sender.len()).unwrap());
+    b.extend_from_slice(sender.as_bytes());
+    b.extend_from_slice(&ed);
+    b.extend_from_slice(&0u32.to_be_bytes());
+    b.extend_from_slice(&ck);
+    b.push(0);
+    b.extend_from_slice(&0u16.to_be_bytes());
+    if v2 {
+        b.extend_from_slice(&0u16.to_be_bytes());
+    }
+    b
+}
+
+fn set_bytes(magic: &[u8; 4], channel: bool, g: &[u8; 32], owner: Option<[u8; 32]>, count: u16, chains: &[u8]) -> Vec<u8> {
+    let mut b = magic.to_vec();
+    b.push(u8::from(channel));
+    b.extend_from_slice(g);
+    match owner {
+        Some(o) => {
+            b.push(1);
+            b.extend_from_slice(&o);
+        }
+        None => b.push(0),
+    }
+    b.extend_from_slice(&count.to_be_bytes());
+    b.extend_from_slice(chains);
+    b
+}
+
+#[test]
+fn group_set_refuses_an_owner_key() {
+    let g = [0x42u8; 32];
+    let owner = ed25519_public(&[0x10; 32]);
+    assert!(RecvSet::new(Scope::Group, &g, Some(owner)).is_err());
+    let chain = chain_bytes([1; 16], "alice", owner, [2; 32], true);
+    assert!(RecvSet::decode(&set_bytes(b"AGK2", false, &g, Some(owner), 1, &chain)).is_err());
+    assert!(RecvSet::decode(&set_bytes(b"AGK2", false, &g, None, 1, &chain)).is_ok());
+}
+
+#[test]
+fn decode_caps_total_chains() {
+    let g = [0x42u8; 32];
+    let mut chains = Vec::new();
+    for i in 0..1001u32 {
+        let mut sk = [0x33u8; 32];
+        sk[..4].copy_from_slice(&(i / 8).to_be_bytes());
+        let ed = ed25519_public(&sk);
+        let mut id = [0u8; 16];
+        id[..4].copy_from_slice(&i.to_be_bytes());
+        chains.push(chain_bytes(id, "m", ed, [9; 32], true));
+    }
+    let ok: Vec<u8> = chains[..1000].concat();
+    assert_eq!(RecvSet::decode(&set_bytes(b"AGK2", false, &g, None, 1000, &ok)).unwrap().chain_count(), 1000);
+    let over: Vec<u8> = chains.concat();
+    assert!(RecvSet::decode(&set_bytes(b"AGK2", false, &g, None, 1001, &over)).is_err());
+    assert!(RecvSet::decode(&set_bytes(b"AGK2", false, &g, None, u16::MAX, &[])).is_err());
+}
+
+#[test]
+fn v1_state_still_decodes() {
+    let g = [0x42u8; 32];
+    let ed = ed25519_public(&[0x10; 32]);
+    let v1 = set_bytes(b"AGK1", false, &g, None, 1, &chain_bytes([1; 16], "alice", ed, [2; 32], false));
+    let rs = RecvSet::decode(&v1).unwrap();
+    assert_eq!(rs.chain_count(), 1);
+    let v2 = set_bytes(b"AGK2", false, &g, None, 1, &chain_bytes([1; 16], "alice", ed, [2; 32], true));
+    assert_eq!(*rs.encode().unwrap(), *v2);
 }

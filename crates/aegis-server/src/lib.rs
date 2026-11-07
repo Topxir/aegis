@@ -15,5 +15,5 @@ pub use blob::{BlobStore, MAX_BLOB_BYTES};
 pub use http::{read_request, serve, write_response, BlobReply, HttpError, Request, Response};
 pub use state::{
     default_data_dir_from, handle_blob, persist_now, KEY_FILE, Config, ServerError, ServerState,
-    DEFAULT_QUEUE_TTL_SECS, STATE_FILE,
+    DEFAULT_QUEUE_TTL_SECS, NOP_BURST_SECS, STATE_FILE,
 };

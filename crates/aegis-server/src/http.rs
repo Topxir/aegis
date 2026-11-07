@@ -1,5 +1,5 @@
 use crate::blob::MAX_BLOB_BYTES;
-use crate::state::{handle_blob, persist_now, ServerState};
+use crate::state::{handle_blob, persist_or_undo, ServerState};
 use aegis_core::sealed;
 use aegis_core::text::parse_pairs;
 use std::fmt;
@@ -274,12 +274,12 @@ fn dispatch(state: &Mutex<ServerState>, req: &Request, now: u64) -> BlobReply {
     if req.path.starts_with("/api/v2/blob/") {
         return handle_blob(state, req, now);
     }
-    let resp = state
+    let (resp, changes) = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .handle(req, now);
+        .handle_tracked(req, now);
     let durable = req.path.starts_with("/api/v2/pin/") || req.path.starts_with("/api/v2/prekeys/");
-    if durable && persist_now(state).is_err() {
+    if durable && persist_or_undo(state, changes).is_err() {
         return json_err(503, "storage unavailable");
     }
     BlobReply::Json(resp)

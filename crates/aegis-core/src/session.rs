@@ -20,6 +20,8 @@ pub const SUPERSEDED_KEEP_SECS: u64 = 30 * 24 * 3600;
 pub const RECOVERY_AFTER_FAILURES: u32 = 3;
 pub const RECOVERY_MIN_GAP_SECS: u64 = 24 * 3600;
 const SEEN_FRAME_CAP: usize = 1024;
+const SEEN_EK_PER_CONTACT: usize = 64;
+const OLD_CHAINS_PER_CONTACT: usize = 256;
 const MAX_SESSIONS_PER_CONTACT: usize = 8;
 const MAX_OPKS_HELD: usize = 200;
 const START_LEN: usize = 1 + 96;
@@ -83,6 +85,8 @@ struct ContactSessions {
     need_start: bool,
     fail_count: u32,
     last_recovery: Option<u64>,
+    seen_ek: VecDeque<[u8; 32]>,
+    old_chains: VecDeque<([u8; 32], u32)>,
 }
 
 #[derive(Default)]
@@ -130,6 +134,8 @@ impl SessionStore {
             need_start: false,
             fail_count: 0,
             last_recovery: None,
+            seen_ek: VecDeque::new(),
+            old_chains: VecDeque::new(),
         });
         Ok(())
     }
@@ -290,7 +296,7 @@ impl SessionStore {
         };
         let c = &mut self.contacts[ci];
         let Some(plain) = plain else {
-            if start.is_none() && c.sessions.iter().any(|s| s.ratchet.is_replay(msg)) {
+            if c.is_replay(msg) {
                 return Ok(Received::default());
             }
             return Ok(c.failed(now));
@@ -325,10 +331,10 @@ impl SessionStore {
         let known = self.contacts[ci].sessions.iter().position(|s| s.ek_pk == ek);
         if let Some(i) = known {
             let c = &mut self.contacts[ci];
-            let plain = c.sessions[i].try_decrypt(new_dhs_sk, msg, now);
+            let plain = c.sessions[i].try_decrypt(new_dhs_sk, msg, now, &mut c.old_chains);
             return Ok(Some((plain, None)));
         }
-        if self.seen_ek.contains(&ek) {
+        if self.seen_ek.contains(&ek) || self.contacts[ci].seen_ek.contains(&ek) || self.contacts[ci].is_replay(msg) {
             return Ok(None);
         }
         let Some(sp) = self.spks.iter().find(|s| x25519_public(&s.sk) == spk) else {
@@ -354,10 +360,11 @@ impl SessionStore {
             last_active: now,
             superseded_at: None,
         };
-        let Some(plain) = session.try_decrypt(new_dhs_sk, msg, now) else {
+        let Some(plain) = session.try_decrypt(new_dhs_sk, msg, now, &mut VecDeque::new()) else {
             return Ok(Some((None, None)));
         };
         push_capped(&mut self.seen_ek, ek, SEEN_EK_CAP);
+        push_capped(&mut self.contacts[ci].seen_ek, ek, SEEN_EK_PER_CONTACT);
         if let Some(i) = opk_sk {
             self.opks.remove(i);
         }
@@ -367,7 +374,8 @@ impl SessionStore {
 
     fn open_message(&mut self, ci: usize, new_dhs_sk: &[u8; 32], msg: &[u8], now: u64) -> Option<Zeroizing<Vec<u8>>> {
         let c = &mut self.contacts[ci];
-        c.sessions.iter_mut().find_map(|s| s.try_decrypt(new_dhs_sk, msg, now))
+        let old = &mut c.old_chains;
+        c.sessions.iter_mut().find_map(|s| s.try_decrypt(new_dhs_sk, msg, now, old))
     }
 
     /// Deletes expired sessions, superseded sessions and old signed prekey secrets.
@@ -377,9 +385,14 @@ impl SessionStore {
             for s in &mut c.sessions {
                 s.ratchet.expire(now);
             }
+            let old = &mut c.old_chains;
             c.sessions.retain(|s| {
-                now < s.last_active.saturating_add(SESSION_IDLE_SECS)
-                    && s.superseded_at.is_none_or(|t| now < t.saturating_add(SUPERSEDED_KEEP_SECS))
+                let keep = now < s.last_active.saturating_add(SESSION_IDLE_SECS)
+                    && s.superseded_at.is_none_or(|t| now < t.saturating_add(SUPERSEDED_KEEP_SECS));
+                if !keep {
+                    s.retire(old);
+                }
+                keep
             });
             if let Some(ek) = c.send_ek {
                 if !c.sessions.iter().any(|s| s.ek_pk == ek) {
@@ -393,10 +406,10 @@ impl SessionStore {
         self.contacts.iter_mut().find(|c| c.u == u).ok_or(Error::Session("unknown contact"))
     }
 
-    /// Local store encoding `AGS1` (spec section 27.5, "Local state").
-    pub fn encode(&self) -> Zeroizing<Vec<u8>> {
+    /// Local store encoding `AGS2` (spec section 27.5, "Local state").
+    pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>> {
         let mut w = Writer::new();
-        w.raw(b"AGS1");
+        w.raw(b"AGS2");
         w.u16(len16(self.spks.len()));
         for s in &self.spks {
             w.raw(s.sk.as_ref());
@@ -417,13 +430,22 @@ impl SessionStore {
         }
         w.u16(len16(self.contacts.len()));
         for c in &self.contacts {
-            w.str(&c.u);
+            w.str(&c.u)?;
             w.raw(&c.ed);
             w.raw(&c.x);
             w.opt32(c.send_ek.as_ref());
             w.u8(u8::from(c.need_start));
             w.u32(c.fail_count);
             w.opt_u64(c.last_recovery);
+            w.u16(len16(c.seen_ek.len()));
+            for e in &c.seen_ek {
+                w.raw(e);
+            }
+            w.u16(len16(c.old_chains.len()));
+            for (dh, n) in &c.old_chains {
+                w.raw(dh);
+                w.u32(*n);
+            }
             w.u8(u8::try_from(c.sessions.len()).unwrap_or(u8::MAX));
             for s in &c.sessions {
                 w.raw(&s.ek_pk);
@@ -439,12 +461,14 @@ impl SessionStore {
                 w.raw(&r);
             }
         }
-        w.finish()
+        Ok(w.finish())
     }
 
+    /// Reads `AGS2` and the older `AGS1`, which has no per-contact replay state.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut r = Reader::new(bytes);
-        r.magic(b"AGS1")?;
+        let v2 = bytes.starts_with(b"AGS2");
+        r.magic(if v2 { b"AGS2" } else { b"AGS1" })?;
         let mut st = Self::new();
         for _ in 0..r.u16()? {
             let sk = Zeroizing::new(r.array::<32>()?);
@@ -469,6 +493,18 @@ impl SessionStore {
             let need_start = r.flag()?;
             let fail_count = r.u32()?;
             let last_recovery = r.opt_u64()?;
+            let (mut seen_ek, mut old_chains) = (VecDeque::new(), VecDeque::new());
+            if v2 {
+                for _ in 0..r.u16()? {
+                    seen_ek.push_back(r.array()?);
+                }
+                for _ in 0..r.u16()? {
+                    old_chains.push_back((r.array()?, r.u32()?));
+                }
+                if seen_ek.len() > SEEN_EK_PER_CONTACT || old_chains.len() > OLD_CHAINS_PER_CONTACT {
+                    return Err(Error::Session("state"));
+                }
+            }
             let mut sessions = Vec::new();
             for _ in 0..r.u8()? {
                 let ek_pk = r.array()?;
@@ -503,6 +539,8 @@ impl SessionStore {
                 need_start,
                 fail_count,
                 last_recovery,
+                seen_ek,
+                old_chains,
             });
         }
         r.end()?;
@@ -515,9 +553,23 @@ fn len16(n: usize) -> u16 {
 }
 
 impl Session {
-    /// Decrypts on a copy of the ratchet; commits and updates flags only on success.
-    fn try_decrypt(&mut self, new_dhs_sk: &[u8; 32], msg: &[u8], now: u64) -> Option<Zeroizing<Vec<u8>>> {
+    /// Decrypts on a copy of the ratchet; commits and updates flags only on success. A receiving
+    /// chain left behind by a DH step goes to `old` with its final counter.
+    fn try_decrypt(
+        &mut self,
+        new_dhs_sk: &[u8; 32],
+        msg: &[u8],
+        now: u64,
+        old: &mut VecDeque<([u8; 32], u32)>,
+    ) -> Option<Zeroizing<Vec<u8>>> {
+        let before = self.ratchet.recv_chain();
         let plain = self.ratchet.decrypt_with(new_dhs_sk, msg, now).ok()?;
+        if let Some((dh, nr)) = before {
+            if self.ratchet.recv_chain().is_some_and(|(d, _)| d != dh) {
+                let pn = msg.get(32..36).and_then(|b| arr::<4>(b).ok()).map_or(0, u32::from_be_bytes);
+                push_capped(old, (dh, nr.max(pn)), OLD_CHAINS_PER_CONTACT);
+            }
+        }
         self.received_any = true;
         self.start = None;
         self.last_active = now;
@@ -527,9 +579,32 @@ impl Session {
         }
         Some(plain)
     }
+
+    /// Keeps the receiving chain of a session that is being dropped.
+    fn retire(&self, old: &mut VecDeque<([u8; 32], u32)>) {
+        if let Some(rc) = self.ratchet.recv_chain() {
+            push_capped(old, rc, OLD_CHAINS_PER_CONTACT);
+        }
+    }
 }
 
 impl ContactSessions {
+    /// True if `msg` names a receiving chain we hold or held, at a counter whose key is spent.
+    fn is_replay(&self, msg: &[u8]) -> bool {
+        let Some(h) = msg.get(..HEADER_LEN) else {
+            return false;
+        };
+        let (Ok(dh), Ok(n)) = (arr::<32>(&h[..32]), arr::<4>(&h[36..]).map(u32::from_be_bytes)) else {
+            return false;
+        };
+        if self.sessions.iter().any(|s| s.ratchet.has_skipped(&dh, n)) {
+            return false;
+        }
+        let spent = |c: &([u8; 32], u32)| c.0 == dh && n < c.1;
+        self.sessions.iter().filter_map(|s| s.ratchet.recv_chain()).any(|c| spent(&c))
+            || self.old_chains.iter().any(spent)
+    }
+
     fn send_index(&self) -> Option<usize> {
         if self.need_start {
             return None;
@@ -562,7 +637,8 @@ impl ContactSessions {
         }
         while self.sessions.len() > MAX_SESSIONS_PER_CONTACT {
             if let Some(i) = self.sessions.iter().rposition(|s| s.ek_pk != send_ek) {
-                self.sessions.remove(i);
+                let gone = self.sessions.remove(i);
+                gone.retire(&mut self.old_chains);
             } else {
                 break;
             }
@@ -847,13 +923,13 @@ mod tests {
         let f = send(&mut a, "bob", "one", T0);
         recv(&mut b, &f, T0);
         for s in [&a, &b] {
-            let bytes = s.store.encode();
+            let bytes = s.store.encode().unwrap();
             let again = SessionStore::decode(&bytes).unwrap();
-            assert_eq!(*again.encode(), *bytes);
+            assert_eq!(*again.encode().unwrap(), *bytes);
             assert!(SessionStore::decode(&bytes[..bytes.len() - 1]).is_err());
             assert!(SessionStore::decode(&[bytes.as_slice(), &[0]].concat()).is_err());
         }
-        let mut b2 = SessionStore::decode(&b.store.encode()).unwrap();
+        let mut b2 = SessionStore::decode(&b.store.encode().unwrap()).unwrap();
         let reply = send(&mut b, "alice", "r", T0 + 1);
         let again = b2.decrypt(&b.id, &send(&mut a, "bob", "two", T0 + 1), T0 + 1).unwrap();
         assert_eq!(again.envelope.unwrap().body, "two");

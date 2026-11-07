@@ -922,6 +922,7 @@ impl Engine {
     }
 
     pub fn test_connection(&self, endpoint: &str, socks5: &str, tor: bool) -> Result<(), Failure> {
+        let endpoint = &crate::model::normalize_endpoint(endpoint);
         let mut socks = socks5.to_owned();
         if tor {
             if socks.is_empty() {
@@ -937,7 +938,7 @@ impl Engine {
             let app = self.app();
             app.session
                 .as_ref()
-                .filter(|s| s.data.settings.endpoint == endpoint)
+                .filter(|s| crate::model::same_endpoint(&s.data.settings.endpoint, endpoint))
                 .and_then(|s| s.data.settings.pinned_key())
         };
         let proxy = (!socks.is_empty()).then_some(socks.as_str());
@@ -961,7 +962,7 @@ impl Engine {
         tor: bool,
         cover: &str,
     ) -> Result<(), Failure> {
-        let endpoint = endpoint.trim().trim_end_matches('/').to_owned();
+        let endpoint = crate::model::normalize_endpoint(endpoint);
         let mut socks5 = socks5.trim().to_owned();
         aegis_core::net::Endpoint::parse(&endpoint)?;
         if tor && socks5.is_empty() {
@@ -973,7 +974,7 @@ impl Engine {
         let cover = cover_level(cover);
         self.mutate(|s| {
             let st = &mut s.data.settings;
-            if st.endpoint != endpoint {
+            if !crate::model::same_endpoint(&st.endpoint, &endpoint) {
                 st.server_key = None;
                 st.server_key_for.clear();
             }
@@ -1975,7 +1976,7 @@ mod tests {
         // Other endpoints are not affected.
         st.endpoint = "https://other.example".into();
         assert!(st.pinned_key_in(Some([9; 32])).is_none());
-        assert!(crate::model::DEFAULT_SERVER_X_PK.is_some());
+        assert!(aegis_core::net::DEFAULT_SERVER_X_PK.is_some());
     }
 
     #[test]

@@ -170,15 +170,14 @@ impl Ratchet {
         Ok(plain)
     }
 
-    /// True if `msg` belongs to the current receiving chain at a counter whose key is already spent.
-    pub(crate) fn is_replay(&self, msg: &[u8]) -> bool {
-        let (Some(h), Some(dhr)) = (msg.get(..HEADER_LEN), self.dhr) else {
-            return false;
-        };
-        let (Ok(dh_pk), Ok(n)) = (arr::<32>(&h[..32]), arr::<4>(&h[36..]).map(u32::from_be_bytes)) else {
-            return false;
-        };
-        dh_pk == dhr && n < self.nr && !self.skipped.iter().any(|s| s.dh == dh_pk && s.n == n)
+    /// The current receiving chain key and its next counter.
+    pub(crate) fn recv_chain(&self) -> Option<([u8; 32], u32)> {
+        self.dhr.map(|d| (d, self.nr))
+    }
+
+    /// True if the key for message `n` of chain `dh` is still held.
+    pub(crate) fn has_skipped(&self, dh: &[u8; 32], n: u32) -> bool {
+        self.skipped.iter().any(|s| s.dh == *dh && s.n == n)
     }
 
     /// Deletes skipped keys older than 30 days.
@@ -345,13 +344,11 @@ impl Writer {
             None => self.u8(0),
         }
     }
-    pub fn str(&mut self, s: &str) {
-        let mut n = s.len().min(usize::from(u8::MAX));
-        while !s.is_char_boundary(n) {
-            n -= 1;
-        }
-        self.u8(u8::try_from(n).unwrap_or(u8::MAX));
-        self.raw(&s.as_bytes()[..n]);
+    pub fn str(&mut self, s: &str) -> Result<()> {
+        let n = u8::try_from(s.len()).map_err(|_| Error::Session("name too long"))?;
+        self.u8(n);
+        self.raw(s.as_bytes());
+        Ok(())
     }
     pub fn finish(self) -> Zeroizing<Vec<u8>> {
         self.0

@@ -21,6 +21,7 @@ object SenderKey {
     const val HDR_LEN = 12 + 16 + 4 + 16
     const val MAX_CHAINS_PER_SENDER = 8
     const val MAX_CHAINS = 1000
+    const val MAX_SEEN_PER_CHAIN = 2 * ROTATE_AFTER_MESSAGES.toInt()
 
     internal fun headerKey(g: ByteArray) = Crypto.hkdf32(g, ByteArray(0), Text.utf8("aegis-v2 group-hdr"))
     internal fun sigInput(envelope: ByteArray) = Bytes.concat(Text.utf8("aegis-v2 gmsg\n"), envelope)
@@ -90,8 +91,9 @@ private class RecvChain(
     var ck: ByteArray,
     val skipped: MutableList<Triple<Long, ByteArray, Long>>,
     var supersededAt: Long?,
+    val seen: ArrayDeque<String> = ArrayDeque(),
 ) {
-    fun copy() = RecvChain(chainId, sender, senderEd, nextN, ck, skipped.toMutableList(), supersededAt)
+    fun copy() = RecvChain(chainId, sender, senderEd, nextN, ck, skipped.toMutableList(), supersededAt, ArrayDeque(seen))
 
     /** Key and nonce for message n, advancing the chain and storing skipped keys. */
     fun takeKey(n: Long, now: Long): Pair<ByteArray, ByteArray> {
@@ -120,10 +122,10 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
     private val g = g.copyOf()
     private val hk = SenderKey.headerKey(g)
     private val chains = ArrayList<RecvChain>()
-    private var lastNow = 0L
 
     init {
         if (scope == SkScope.Channel && ownerEd == null) throw AegisException.Session("channel needs an owner key")
+        if (scope == SkScope.Group && ownerEd != null) throw AegisException.Session("group has no owner key")
     }
 
     val chainCount: Int get() = chains.size
@@ -155,7 +157,6 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
     /** Decrypts a type 0x05 frame. State changes only if every check passes. */
     fun decrypt(frame: ByteArray, now: Long): Envelope {
         purge(now)
-        lastNow = now
         if (frame.size < 1 + SenderKey.HDR_LEN + 16 + 64) throw AegisException.Length()
         if (frame[0] != SenderKey.FRAME) throw AegisException.BadFrameType()
         val hnonce = frame.copyOfRange(1, 13)
@@ -167,7 +168,7 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
         var last: AegisException = AegisException.Session("unknown chain")
         for (i in chains.indices.filter { Bytes.eq(chains[it].chainId, chainId) }) {
             try {
-                return decryptWithChain(i, frame, chainId, n)
+                return decryptWithChain(i, frame, chainId, n, now)
             } catch (e: AegisException) {
                 last = e
             }
@@ -175,8 +176,7 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
         throw last
     }
 
-    private fun decryptWithChain(i: Int, frame: ByteArray, chainId: ByteArray, n: Long): Envelope {
-        val now = lastNow
+    private fun decryptWithChain(i: Int, frame: ByteArray, chainId: ByteArray, n: Long, now: Long): Envelope {
         val chain = chains[i].copy()
         val (key, nonce) = chain.takeKey(n, now)
         val plain = Crypto.aeadOpen(key, nonce, SenderKey.chainAad(chainId, n), frame.copyOfRange(1 + SenderKey.HDR_LEN, frame.size))
@@ -188,6 +188,13 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
         if (env.groupId != scope.id(g)) throw AegisException.GroupMismatch()
         if (!Bytes.eq(env.senderEd, chain.senderEd) || env.sender != chain.sender) throw AegisException.SenderMismatch()
         if (!Crypto.ed25519Verify(env.senderEd, SenderKey.sigInput(body), sig)) throw AegisException.BadSignature()
+        // A signed post re-encrypted at another position must not use up that position's key.
+        val digest = Hex.encode(Crypto.sha256(Bytes.concat(body, sig)).copyOfRange(0, 16))
+        if (chains.any { Bytes.eq(it.senderEd, chain.senderEd) && it.seen.contains(digest) }) {
+            throw AegisException.Session("replayed post")
+        }
+        chain.seen.addLast(digest)
+        while (chain.seen.size > SenderKey.MAX_SEEN_PER_CHAIN) chain.seen.removeFirst()
         chains[i] = chain
         return env
     }
@@ -198,24 +205,30 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
     }
 
     fun encode(): ByteArray {
-        val w = StateWriter().raw(Text.utf8("AGK1")).flag(scope == SkScope.Channel).raw(g).opt32(ownerEd)
+        val w = StateWriter().raw(Text.utf8("AGK2")).flag(scope == SkScope.Channel).raw(g).opt32(ownerEd)
         w.u16(minOf(chains.size, 0xFFFF))
         for (c in chains) {
             w.raw(c.chainId).str(c.sender).raw(c.senderEd).u32(c.nextN).raw(c.ck).optU64(c.supersededAt)
             w.u16(minOf(c.skipped.size, 0xFFFF))
             for ((n, k, ts) in c.skipped) w.u32(n).raw(k).u64(ts)
+            w.u16(minOf(c.seen.size, 0xFFFF))
+            for (d in c.seen) w.raw(Hex.decode(d))
         }
         return w.finish()
     }
 
     companion object {
+        /** Reads AGK2 and the older AGK1, which has no seen-post digests. */
         fun decode(bytes: ByteArray): RecvSet {
             val r = StateReader(bytes)
-            r.magic("AGK1")
+            val v2 = bytes.size >= 4 && Bytes.eq(bytes.copyOfRange(0, 4), Text.utf8("AGK2"))
+            r.magic(if (v2) "AGK2" else "AGK1")
             val scope = if (r.flag()) SkScope.Channel else SkScope.Group
             val g = r.take(32)
             val set = RecvSet(scope, g, r.opt32())
-            repeat(r.u16()) {
+            val chains = r.u16()
+            if (chains > SenderKey.MAX_CHAINS) throw AegisException.Session("state")
+            repeat(chains) {
                 val chainId = r.take(16)
                 val sender = r.str()
                 val ed = r.take(32)
@@ -226,14 +239,19 @@ class RecvSet(val scope: SkScope, g: ByteArray, private val ownerEd: ByteArray?)
                 if (count > SenderKey.MAX_SKIPPED) throw AegisException.Session("state")
                 val sk = ArrayList<Triple<Long, ByteArray, Long>>(count)
                 repeat(count) { sk.add(Triple(r.u32(), r.take(32), r.u64())) }
+                val seen = ArrayDeque<String>()
+                if (v2) {
+                    val m = r.u16()
+                    if (m > SenderKey.MAX_SEEN_PER_CHAIN) throw AegisException.Session("state")
+                    repeat(m) { seen.addLast(Hex.encode(r.take(16))) }
+                }
                 val dup = set.chains.any { Bytes.eq(it.senderEd, ed) && Bytes.eq(it.chainId, chainId) }
                 val perSender = set.chains.count { Bytes.eq(it.senderEd, ed) }
                 val foreign = scope == SkScope.Channel && set.ownerEd?.let { Bytes.eq(it, ed) } != true
                 if (dup || foreign || perSender >= SenderKey.MAX_CHAINS_PER_SENDER) throw AegisException.Session("state")
-                set.chains.add(RecvChain(chainId, sender, ed, next, ck, sk, sup))
+                set.chains.add(RecvChain(chainId, sender, ed, next, ck, sk, sup, seen))
             }
             r.end()
-            if (set.chains.size > SenderKey.MAX_CHAINS) throw AegisException.Session("state")
             return set
         }
     }

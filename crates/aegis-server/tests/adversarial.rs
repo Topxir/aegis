@@ -496,7 +496,7 @@ fn send_body_must_be_lowercase_hex_of_bucket_size() {
 }
 
 #[test]
-fn queue_full_returns_429_keeps_old_frames_and_does_not_burn_pow() {
+fn queue_full_returns_429_keeps_old_frames_and_spends_the_pow() {
     let s = start(Config { max_frames_per_queue: 3, ..cfg() });
     let q = q_hex(6);
     let other = q_hex(7);
@@ -508,7 +508,7 @@ fn queue_full_returns_429_keeps_old_frames_and_does_not_burn_pow() {
     let n = pow::mine(&q, ts, &pow::body_hash_hex(&body), BITS + 4);
     let t = send_target(&q, ts, n);
     assert_eq!(http(s.addr, "POST", &t, &[], &body).status, 429);
-    assert_eq!(http(s.addr, "POST", &t, &[], &body).status, 429, "pow not consumed by a rejected send");
+    assert_eq!(http(s.addr, "POST", &t, &[], &body).status, 403, "one proof bought two answers");
     let (frames, _) = poll_json(s.addr, &q, 0);
     let tags: Vec<u64> = frames
         .iter()
