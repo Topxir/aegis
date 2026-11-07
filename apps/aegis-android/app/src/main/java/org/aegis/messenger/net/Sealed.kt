@@ -113,7 +113,7 @@ class SealedTransport(private val inner: Transport, private val pins: KeyPins) :
 
     private fun serverKey(ep: Endpoint, refresh: Boolean): ByteArray {
         val origin = ep.origin
-        val builtIn = if (origin == Endpoint.DEFAULT) Endpoint.DEFAULT_SERVER_X_PK else null
+        val builtIn = Endpoint.builtInKey(origin)
         val pinned = builtIn ?: pins.get(origin)
         if (!refresh) {
             cached?.let { if (it.first == origin) return it.second }

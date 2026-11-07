@@ -22,6 +22,9 @@ interface Transport {
 const val MAX_RESPONSE = 1114112 + 64
 private const val TIMEOUT_MS = 20_000
 
+/** Onion services need a rendezvous first, so Tor requests get a longer budget. */
+const val TOR_TIMEOUT_MS = 60_000
+
 /** Direct connection through the platform stack; never uses a system proxy. */
 class DirectTransport : Transport {
     override fun request(ep: Endpoint, method: String, pathQuery: String, body: ByteArray?, contentType: String?): Response {
@@ -73,12 +76,12 @@ internal fun readCapped(input: InputStream, cap: Int): ByteArray {
  * SOCKS5 with the destination sent as a domain name (ATYP 3), so the proxy resolves it.
  * TLS runs over the proxied socket with SNI and hostname verification.
  */
-class SocksTransport(private val proxy: ProxyAddr) : Transport {
+class SocksTransport(private val proxy: ProxyAddr, private val timeoutMs: Int = TIMEOUT_MS) : Transport {
     override fun request(ep: Endpoint, method: String, pathQuery: String, body: ByteArray?, contentType: String?): Response {
         val raw = Socket()
         try {
-            raw.soTimeout = TIMEOUT_MS
-            raw.connect(InetSocketAddress(proxy.host, proxy.port), TIMEOUT_MS)
+            raw.soTimeout = timeoutMs
+            raw.connect(InetSocketAddress(proxy.host, proxy.port), timeoutMs)
             connectThroughProxy(raw, ep.host, ep.port)
             val sock: Socket = if (ep.https) wrapTls(raw, ep.host, ep.port) else raw
             val out = sock.getOutputStream()

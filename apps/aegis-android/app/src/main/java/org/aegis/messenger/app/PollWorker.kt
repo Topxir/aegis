@@ -16,13 +16,19 @@ import org.aegis.messenger.net.Client
 import org.aegis.messenger.net.DirectTransport
 import org.aegis.messenger.net.Endpoint
 import org.aegis.messenger.net.ProxyAddr
+import org.aegis.messenger.net.Route
 import org.aegis.messenger.net.SocksTransport
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
 fun clientFor(endpoint: String, proxy: String, gate: ((org.aegis.messenger.net.Transport) -> org.aegis.messenger.net.Transport)? = null): Client {
-    val ep = Endpoint.parse(endpoint)
-    val inner = if (proxy.isBlank()) DirectTransport() else SocksTransport(ProxyAddr.parse(proxy))
+    val route = Route.plan(Tor.enabled, endpoint, proxy)
+    val ep = Endpoint.parse(route.endpoint)
+    val inner = when {
+        route.viaTor -> TorTransport()
+        route.proxy.isBlank() -> DirectTransport()
+        else -> SocksTransport(ProxyAddr.parse(route.proxy))
+    }
     val t = KeyAlarmTransport(org.aegis.messenger.net.SealedTransport(inner, AppPins.pins))
     return Client(ep, gate?.invoke(t) ?: t)
 }

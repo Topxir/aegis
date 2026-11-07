@@ -97,6 +97,13 @@
     <string name="settings">Настройки</string>
     <string name="account">Аккаунт</string>
     <string name="not_registered">Ещё не опубликован на сервере. Попытка повторится в фоне.</string>
+    <string name="tor">Tor</string>
+    <string name="tor_connect">Подключаться через Tor</string>
+    <string name="tor_starting">Tor запускается. Первое подключение может занять минуту.</string>
+    <string name="tor_connected">Подключено к Tor.</string>
+    <string name="tor_failed">Tor не удалось подключиться. Запросы не выполняются, пока он не заработает; вне Tor ничего не отправляется.</string>
+    <string name="tor_note_on">Tor работает внутри приложения. Сервер по умолчанию доступен по onion-адресу, и все запросы, включая фоновые проверки, холостой трафик и вложения, идут через Tor.</string>
+    <string name="tor_note_off">Tor выключен. Сервер по умолчанию доступен напрямую по адресу freeoasis.space, поэтому он и Cloudflare видят ваш IP-адрес.</string>
     <string name="server">Сервер</string>
     <string name="server_cloudflare_note">Сервер по умолчанию работает за Cloudflare. Он видит метаданные соединений (ваш IP-адрес, время и размер запросов), но не содержимое сообщений. Чтобы это изменить, используйте прокси или собственный сервер.</string>
     <string name="field_proxy">SOCKS5-прокси (хост:порт, необязательно)</string>

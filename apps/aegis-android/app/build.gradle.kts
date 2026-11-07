@@ -22,6 +22,11 @@ android {
         targetSdk = 34
         versionCode = 2
         versionName = "0.2.0-alpha"
+
+        // tor-android ships one native library per ABI; 32-bit x86 devices are not worth the extra size.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
     }
 
     signingConfigs {
@@ -102,6 +107,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview:1.6.8")
     implementation("org.bouncycastle:bcprov-jdk18on:1.80")
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("info.guardianproject:tor-android:0.4.8.21") { exclude(group = "org.jetbrains.kotlin") }
+    implementation("info.guardianproject:jtorctl:0.4.5.7")
 
     testImplementation("junit:junit:4.13.2")
 }

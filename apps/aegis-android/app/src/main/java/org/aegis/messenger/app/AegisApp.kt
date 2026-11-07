@@ -28,6 +28,13 @@ object Boot {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("secure", on).apply()
     }
 
+    /** Route through the embedded Tor; on unless switched off. Read before unlock, so it lives outside the vault. */
+    fun tor(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("tor", true)
+
+    fun setTor(ctx: Context, on: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("tor", on).apply()
+    }
+
     fun backgroundPoll(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("bgpoll", false)
 
     fun setBackgroundPoll(ctx: Context, on: Boolean) {
@@ -145,6 +152,7 @@ class AegisApp : Application() {
         super.onCreate()
         LegacyWipe.run(this)
         AppPins.pins = PrefsPins(this)
+        Tor.init(this, Boot.tor(this))
         session = Session(this)
         Notifier.ensureChannels(this)
     }

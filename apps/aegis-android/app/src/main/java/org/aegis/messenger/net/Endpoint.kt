@@ -17,8 +17,15 @@ class Endpoint private constructor(val https: Boolean, val host: String, val por
     companion object {
         const val DEFAULT = "https://freeoasis.space"
 
+        /** Onion service of the default server; it answers with the same transport key as [DEFAULT]. */
+        const val ONION = "http://axwvmhfhymxuwwzegl4k3o4xfmlwfflaeunsnn557tjyiuy2wetlx7ad.onion"
+
         /** Transport key of the default server, compiled in: the default endpoint is never pinned from the network. */
         val DEFAULT_SERVER_X_PK: ByteArray? = ByteArray(32) { ("8e5b9b5c709ec893f16624d00d410dc697887d4dee434d5bcf5f705a35062860".substring(it * 2, it * 2 + 2)).toInt(16).toByte() }
+
+        /** Compiled-in key for [origin], or null when the origin has to be pinned on first use. */
+        fun builtInKey(origin: String): ByteArray? = if (origin == DEFAULT || origin == ONION) DEFAULT_SERVER_X_PK else null
+
         private val HOST = Regex("^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")
         private val PLAIN_HOSTS = setOf("127.0.0.1", "localhost")
 
@@ -64,6 +71,23 @@ class ProxyAddr(val host: String, val port: Int) {
                 ?: throw AegisException.InvalidEndpoint()
             if (port !in 1..65535 || !(host == "localhost" || V4.matches(host))) throw AegisException.InvalidEndpoint()
             return ProxyAddr(host, port)
+        }
+    }
+}
+
+/** Where a request goes: the settings endpoint and proxy, adjusted for the Tor switch. */
+class Route(val endpoint: String, val proxy: String, val viaTor: Boolean) {
+    companion object {
+        /**
+         * With Tor on the default server is reached at its onion address through the embedded Tor and a custom
+         * server goes through it too. With Tor off the onion address maps back to the default clearnet endpoint.
+         * Nothing is ever rerouted to a different transport than the switch says.
+         */
+        fun plan(tor: Boolean, endpoint: String, proxy: String): Route {
+            val origin = Endpoint.parse(endpoint).origin
+            val isDefault = origin == Endpoint.DEFAULT || origin == Endpoint.ONION
+            return if (tor) Route(if (isDefault) Endpoint.ONION else origin, "", true)
+            else Route(if (isDefault) Endpoint.DEFAULT else origin, proxy, false)
         }
     }
 }
