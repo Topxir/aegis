@@ -1872,6 +1872,11 @@ class Session(private val ctx: Context) {
         }
     }
 
+    fun setTor(on: Boolean) {
+        Boot.setTor(ctx, on)
+        Tor.setEnabled(on)
+    }
+
     fun setBackgroundPoll(on: Boolean) {
         Boot.setBackgroundPoll(ctx, on)
         if (on) data?.let { BgState.store(ctx, it.settings.endpoint, it.settings.proxy, it.xSk) } else BgState.clear(ctx)

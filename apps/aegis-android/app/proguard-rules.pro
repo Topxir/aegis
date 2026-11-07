@@ -2,3 +2,5 @@
 -keep class org.bouncycastle.crypto.** { *; }
 -dontwarn org.bouncycastle.**
 -dontwarn kotlin.**
+-keep class org.torproject.jni.** { *; }
+-keep class net.freehaven.tor.control.** { *; }

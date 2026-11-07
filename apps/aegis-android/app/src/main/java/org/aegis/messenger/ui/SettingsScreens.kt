@@ -29,6 +29,8 @@ import org.aegis.messenger.BuildConfig
 import org.aegis.messenger.R
 import org.aegis.messenger.app.Boot
 import org.aegis.messenger.app.Session
+import org.aegis.messenger.app.Tor
+import org.aegis.messenger.app.TorStatus
 import org.aegis.messenger.data.Settings
 import org.aegis.messenger.data.VaultData
 
@@ -47,6 +49,7 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
     var name by remember { mutableStateOf(s.displayName) }
     var endpoint by remember { mutableStateOf(s.endpoint) }
     var proxy by remember { mutableStateOf(s.proxy) }
+    var tor by remember { mutableStateOf(Boot.tor(ctx)) }
     var error by remember { mutableStateOf<Int?>(null) }
     var saved by remember { mutableStateOf(false) }
     var test by remember { mutableStateOf<Boolean?>(null) }
@@ -73,11 +76,31 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 Field(name, { name = it; saved = false }, stringResource(R.string.field_display_name))
             }
             Divider()
+            Section(stringResource(R.string.tor)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(stringResource(R.string.tor_connect), color = Ui.text, modifier = Modifier.weight(1f))
+                    Switch(
+                        tor, { tor = it; test = null; session.setTor(it) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = Ui.accent, checkedThumbColor = Ui.onAccent, uncheckedTrackColor = Ui.surface2, uncheckedThumbColor = Ui.muted, uncheckedBorderColor = Ui.border),
+                    )
+                }
+                if (tor) {
+                    when (Tor.status) {
+                        TorStatus.Connected -> Note(stringResource(R.string.tor_connected), Ui.accent)
+                        TorStatus.Failed -> Note(stringResource(R.string.tor_failed), Ui.danger)
+                        else -> Note(stringResource(R.string.tor_starting))
+                    }
+                }
+                Note(stringResource(if (tor) R.string.tor_note_on else R.string.tor_note_off))
+            }
+            Divider()
             Section(stringResource(R.string.server)) {
                 Field(endpoint, { endpoint = it; saved = false; test = null }, stringResource(R.string.field_server), keyboard = androidx.compose.ui.text.input.KeyboardType.Uri)
-                Note(stringResource(R.string.server_cloudflare_note))
-                Field(proxy, { proxy = it; saved = false; test = null }, stringResource(R.string.field_proxy), keyboard = androidx.compose.ui.text.input.KeyboardType.Uri)
-                Note(stringResource(R.string.proxy_note))
+                if (!tor) Note(stringResource(R.string.server_cloudflare_note))
+                if (!tor) {
+                    Field(proxy, { proxy = it; saved = false; test = null }, stringResource(R.string.field_proxy), keyboard = androidx.compose.ui.text.input.KeyboardType.Uri)
+                    Note(stringResource(R.string.proxy_note))
+                }
                 Secondary(stringResource(R.string.test_connection), enabled = !session.busy) {
                     // The test uses the saved settings, so save first.
                     session.saveSettings(current()) { e ->
