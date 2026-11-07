@@ -17,8 +17,8 @@ class Prepared(val kind: MediaKind, val bytes: ByteArray, val width: Long, val h
 
 /** Turns a picked item into sanitized bytes. The original is read into memory only. */
 object MediaPrep {
-    const val MAX_SIDE = 2560
-    const val JPEG_QUALITY = 85
+    const val MAX_SIDE = 1600
+    const val JPEG_QUALITY = 80
 
     fun fromUri(ctx: Context, uri: Uri): Prepared {
         val type = ctx.contentResolver.getType(uri) ?: ""

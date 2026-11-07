@@ -354,7 +354,7 @@ Both clients must do exactly this; failure at any step means nothing is sent.
 Images (input JPEG, PNG, WebP; Android also HEIC):
 - Input at most 40 MiB and 50 megapixels, checked before full decode.
 - Decode, apply the EXIF orientation, drop everything except pixels.
-- Scale so the longer side is at most 2560 px; encode JPEG quality 85, no metadata segments.
+- Scale so the longer side is at most 1600 px; encode JPEG quality 80, no metadata segments.
 - The output must contain no `APP1`..`APP15` segments (no Exif, XMP, ICC, maker notes).
 
 Videos (input ISO BMFF: MP4/MOV, at most 31 MiB):

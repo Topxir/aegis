@@ -13,8 +13,8 @@ use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageFormat, ImageRea
 
 pub const MAX_INPUT: usize = 40 << 20;
 pub const MAX_PIXELS: u64 = 50_000_000;
-pub const MAX_EDGE: u32 = 2560;
-const JPEG_QUALITY: u8 = 85;
+pub const MAX_EDGE: u32 = 1600;
+const JPEG_QUALITY: u8 = 80;
 const AAD: &[u8] = b"aegis-v2 media";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +33,7 @@ pub struct Clean {
 }
 
 /// Decodes a JPEG, PNG or WebP picture and re-encodes it as a plain JPEG:
-/// orientation applied, at most 2560 px on the long side, no APPn or comment segments.
+/// orientation applied, at most 1600 px on the long side, no APPn or comment segments.
 pub fn sanitize_image(input: &[u8]) -> Result<Clean, MediaError> {
     if input.len() > MAX_INPUT {
         return Err(MediaError::TooLarge);
