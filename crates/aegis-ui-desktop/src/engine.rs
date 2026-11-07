@@ -7,7 +7,8 @@
 use crate::config::Config;
 use crate::i18n::Lang;
 use crate::media;
-use crate::model::{Data, MediaRef, MsgState, Settings, SCHEMA};
+use crate::model::{route_endpoint, Data, MediaRef, MsgState, Settings, SCHEMA};
+use crate::tor;
 use crate::session::{
     ChainRx,
     now_ms, now_s, ChatRef, Draft, Failure, Need, Outbound, Outcome, Payload, Sendable, Session,
@@ -126,6 +127,8 @@ pub struct App {
     pub duress_on: bool,
     /// Tries left the server last reported for a wrong PIN (memory only).
     pub pin_left: Option<u32>,
+    /// State of the embedded Tor client.
+    pub tor: tor::Status,
 }
 
 impl App {
@@ -152,6 +155,7 @@ impl App {
             pin_on: false,
             duress_on: false,
             pin_left: None,
+            tor: tor::Status::Off,
         }
     }
 
@@ -278,6 +282,8 @@ pub struct Engine {
     visible: AtomicBool,
     /// Real requests wait here for their cover-traffic slot.
     pub gate: cover::Gate,
+    tor: tor::Tor,
+    me: std::sync::Weak<Engine>,
 }
 
 impl core::fmt::Debug for Engine {
@@ -297,8 +303,6 @@ fn identity_of(s: &Session) -> Identity {
     Identity::from_secrets(*s.data.x_sk, *s.data.ed_sk)
 }
 
-const TOR_DEFAULT: &str = "127.0.0.1:9050";
-
 /// 0 off, 1 standard, 2 high.
 pub fn cover_level(s: &str) -> u8 {
     match s {
@@ -306,25 +310,6 @@ pub fn cover_level(s: &str) -> u8 {
         "high" => 2,
         _ => 1,
     }
-}
-
-/// True when something accepts connections at `addr` (host:port).
-fn proxy_up(addr: &str) -> bool {
-    use std::net::ToSocketAddrs;
-    addr.to_socket_addrs()
-        .ok()
-        .and_then(|mut a| a.next())
-        .is_some_and(|sa| {
-            std::net::TcpStream::connect_timeout(&sa, Duration::from_millis(600)).is_ok()
-        })
-}
-
-/// Looks for a local Tor proxy: the daemon (9050) or Tor Browser (9150).
-fn detect_tor() -> Option<String> {
-    [TOR_DEFAULT, "127.0.0.1:9150"]
-        .into_iter()
-        .find(|a| proxy_up(a))
-        .map(str::to_owned)
 }
 
 fn valid_socks(s: &str) -> bool {
@@ -342,7 +327,9 @@ fn valid_socks(s: &str) -> bool {
 
 impl Engine {
     pub fn new(cfg: Config, on_change: impl Fn() + Send + Sync + 'static) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
+            tor: tor::Tor::default(),
+            me: me.clone(),
             cfg,
             app: Mutex::new(App::new()),
             save_lock: Mutex::new(()),
@@ -435,15 +422,46 @@ impl Engine {
         if self.key_alert.load(Ordering::SeqCst) {
             return Err(Failure::new("err.server_key_changed"));
         }
-        if s.tor && s.socks5.is_empty() {
-            return Err(Failure::new("err.tor_down"));
-        }
+        let socks = self.socks_for(s)?;
         let Some(key) = s.pinned_key() else {
             return Err(Failure::new("err.server_key_unset"));
         };
-        Ok(Client::new(&s.endpoint, s.proxy())?
+        Ok(Client::new(&s.connect_endpoint(), socks.as_deref())?
             .with_pow_bits(self.cfg.pow_bits)
             .with_server_key(key))
+    }
+
+    /// The SOCKS5 address for `s`. With Tor on this is always the embedded client, and while it
+    /// is still connecting nothing is sent: there is no fallback to a direct connection.
+    fn socks_for(&self, s: &Settings) -> Result<Option<String>, Failure> {
+        if s.tor {
+            return self
+                .tor
+                .socks_addr()
+                .map(Some)
+                .ok_or(Failure::new("err.tor_boot"));
+        }
+        Ok(s.proxy().map(str::to_owned))
+    }
+
+    /// Starts the embedded Tor client when the open account uses it. Never call with the app
+    /// lock held: status updates take it.
+    pub(crate) fn tor_sync(&self) {
+        let on = self.app().session.as_ref().is_some_and(|s| s.data.settings.tor);
+        self.tor_sync_for(on);
+    }
+
+    fn tor_sync_for(&self, on: bool) {
+        if !on {
+            return;
+        }
+        let me = self.me.clone();
+        self.tor.ensure_started(&self.cfg.data_dir.join("tor"), move |st| {
+            if let Some(e) = me.upgrade() {
+                e.app().tor = st;
+                e.changed();
+            }
+        });
     }
 
     /// Forgets the pinned key after the user confirmed twice; the next check pins whatever
@@ -479,7 +497,8 @@ impl Engine {
     /// different key later is a hard stop.
     fn pin_key(&self, st: &mut Settings) -> Result<(), Failure> {
         let known = st.pinned_key();
-        let client = Client::new(&st.endpoint, st.proxy())?
+        let socks = self.socks_for(st)?;
+        let client = Client::new(&st.connect_endpoint(), socks.as_deref())?
             .with_pow_bits(self.cfg.pow_bits)
             .with_pinned_server_key(known)
             .map_err(|e| {
@@ -548,6 +567,7 @@ impl Engine {
             app.key_checked = None;
         }
         self.refresh_pin();
+        self.tor_sync();
         self.kick_poll();
     }
 
@@ -676,6 +696,10 @@ impl Engine {
             .settings
             .endpoint
             .clone_from(&self.cfg.default_endpoint);
+        // Tor is on for the public server. A build pointed at another server, such as a local
+        // test one, starts without it, since Tor cannot reach a loopback address.
+        s.data.settings.tor =
+            crate::model::same_endpoint(&self.cfg.default_endpoint, crate::model::DEFAULT_ENDPOINT);
         let identity = identity_of(&s);
         let mut st = s.data.settings.clone();
         self.pin_key(&mut st)?;
@@ -922,23 +946,31 @@ impl Engine {
     }
 
     pub fn test_connection(&self, endpoint: &str, socks5: &str, tor: bool) -> Result<(), Failure> {
-        let endpoint = &crate::model::normalize_endpoint(endpoint);
-        let mut socks = socks5.to_owned();
-        if tor {
-            if socks.is_empty() {
-                socks = detect_tor().ok_or(Failure::new("err.tor_down"))?;
-            } else if !proxy_up(&socks) {
-                return Err(Failure::new("err.tor_down"));
+        let endpoint = route_endpoint(endpoint, tor);
+        let endpoint = endpoint.as_str();
+        let socks = if tor {
+            self.tor_sync_for(true);
+            let mut up = self.tor.socks_addr();
+            for _ in 0..180 {
+                if up.is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                up = self.tor.socks_addr();
             }
-        }
-        if !socks.is_empty() && !valid_socks(&socks) {
-            return Err(Failure::new("err.socks"));
-        }
+            up.ok_or(Failure::new("err.tor_boot"))?
+        } else {
+            let socks = socks5.to_owned();
+            if !socks.is_empty() && !valid_socks(&socks) {
+                return Err(Failure::new("err.socks"));
+            }
+            socks
+        };
         let known = {
             let app = self.app();
             app.session
                 .as_ref()
-                .filter(|s| crate::model::same_endpoint(&s.data.settings.endpoint, endpoint))
+                .filter(|s| crate::model::same_endpoint(&s.data.settings.connect_endpoint(), endpoint))
                 .and_then(|s| s.data.settings.pinned_key())
         };
         let proxy = (!socks.is_empty()).then_some(socks.as_str());
@@ -963,11 +995,8 @@ impl Engine {
         cover: &str,
     ) -> Result<(), Failure> {
         let endpoint = crate::model::normalize_endpoint(endpoint);
-        let mut socks5 = socks5.trim().to_owned();
+        let socks5 = socks5.trim().to_owned();
         aegis_core::net::Endpoint::parse(&endpoint)?;
-        if tor && socks5.is_empty() {
-            socks5 = detect_tor().unwrap_or_else(|| TOR_DEFAULT.to_owned());
-        }
         if !socks5.is_empty() && !valid_socks(&socks5) {
             return Err(Failure::new("err.socks"));
         }
@@ -985,6 +1014,7 @@ impl Engine {
         })
         .ok_or(Failure::new("err.locked"))?;
         self.app().key_checked = None;
+        self.tor_sync();
         self.kick_poll();
         Ok(())
     }
@@ -1980,16 +2010,36 @@ mod tests {
     }
 
     #[test]
-    fn client_needs_a_pinned_key_and_tor_needs_a_proxy() {
+    fn tor_switch_picks_the_default_server_address() {
+        use crate::model::{route_endpoint, DEFAULT_ENDPOINT, DEFAULT_ONION};
+        assert_eq!(route_endpoint(DEFAULT_ENDPOINT, true), DEFAULT_ONION);
+        assert_eq!(route_endpoint(&format!("{DEFAULT_ENDPOINT}/"), true), DEFAULT_ONION);
+        assert_eq!(route_endpoint(DEFAULT_ONION, false), DEFAULT_ENDPOINT);
+        assert_eq!(route_endpoint(DEFAULT_ONION, true), DEFAULT_ONION);
+        assert_eq!(route_endpoint(DEFAULT_ENDPOINT, false), DEFAULT_ENDPOINT);
+        assert_eq!(route_endpoint("https://other.example/", true), "https://other.example");
+        let mut st = Settings::new(Lang::En);
+        assert!(st.tor);
+        assert_eq!(st.connect_endpoint(), DEFAULT_ONION);
+        assert_eq!(st.pinned_key_in(Some([9; 32])), Some([9; 32]));
+        st.endpoint = DEFAULT_ONION.into();
+        assert_eq!(st.pinned_key_in(Some([9; 32])), Some([9; 32]));
+        st.tor = false;
+        assert_eq!(st.connect_endpoint(), DEFAULT_ENDPOINT);
+    }
+
+    #[test]
+    fn client_needs_a_pinned_key_and_tor_must_be_up() {
         let e = Engine::new(Config::production(std::env::temp_dir()), || {});
         let mut st = Settings::new(Lang::En);
+        st.tor = false;
         st.endpoint = "http://127.0.0.1:9".into();
         assert_eq!(e.client_for(&st).err().map(|f| f.key), Some("err.server_key_unset"));
         st.server_key = Some([1; 32]);
         st.server_key_for = st.endpoint.clone();
         assert!(e.client_for(&st).is_ok());
         st.tor = true;
-        assert_eq!(e.client_for(&st).err().map(|f| f.key), Some("err.tor_down"));
+        assert_eq!(e.client_for(&st).err().map(|f| f.key), Some("err.tor_boot"));
         st.tor = false;
         e.key_alert.store(true, Ordering::SeqCst);
         assert_eq!(e.client_for(&st).err().map(|f| f.key), Some("err.server_key_changed"));

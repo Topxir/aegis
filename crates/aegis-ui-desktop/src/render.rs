@@ -1437,6 +1437,18 @@ fn page_group_info(l: Lang, s: &Session, gid: &str) -> String {
     h
 }
 
+fn tor_html(app: &App, l: Lang, on: bool) -> String {
+    use crate::tor::Status;
+    let (class, text) = match (&app.tor, on) {
+        (_, false) => ("status", tr(l, "conn.tor_off").to_owned()),
+        (Status::Ready, _) => ("status okc", tr(l, "conn.tor_ready").to_owned()),
+        (Status::Starting(p), _) => ("status", format!("{} {p}%", tr(l, "conn.tor_start"))),
+        (Status::Failed(e), _) => ("status badc", format!("{} {e}", tr(l, "conn.tor_failed"))),
+        (Status::Off, _) => ("status", format!("{} 0%", tr(l, "conn.tor_start"))),
+    };
+    format!(r#"<p class="{class}">{}</p>"#, esc(&text))
+}
+
 fn conn_html(app: &App, l: Lang) -> String {
     match &app.conn {
         None => String::new(),
@@ -1625,6 +1637,7 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
                 esc(tr(l, "conn.cover")),
                 cover_options(l, st.cover)
             );
+            let status_html = format!("{}{}", tor_html(app, l, st.tor), conn_html(app, l));
             format!(
             r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}<p class="note">{}</p><div class="row"><button type="button" class="btn primary" data-act="save_connection" data-primary>{}</button><button type="button" class="btn" data-act="test_conn">{}</button></div>{}</section>"#,
             esc(tr(l, "acct.connection")),
@@ -1641,7 +1654,7 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
             esc(&[tr(l, "conn.tor_note"), tr(l, "conn.cover_note")].join(" ")),
             esc(tr(l, "common.save")),
             esc(tr(l, "set.test")),
-            conn_html(app, l)
+            status_html
             )
         }
         _ => format!(

@@ -35,7 +35,7 @@ pub mod vectors;
 pub mod x3dh;
 
 pub use error::{Error, Result};
-pub use net::{pinned_key_for, DEFAULT_SERVER_URL, DEFAULT_SERVER_X_PK};
+pub use net::{pinned_key_for, DEFAULT_ONION_URL, DEFAULT_SERVER_URL, DEFAULT_SERVER_X_PK};
 
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};

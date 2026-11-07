@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
 pub const DEFAULT_ENDPOINT: &str = aegis_core::net::DEFAULT_SERVER_URL;
+/// The onion service of the default server, used while Tor is on.
+pub const DEFAULT_ONION: &str = aegis_core::DEFAULT_ONION_URL;
 pub const MAX_MESSAGES_PER_CHAT: usize = 1000;
 pub const SEEN_CAP: usize = 4096;
 pub const SCHEMA: u32 = 1;
@@ -101,8 +103,8 @@ pub struct Settings {
     pub server_key: Option<[u8; 32]>,
     #[serde(default)]
     pub server_key_for: String,
-    /// Connect through a local Tor SOCKS5 proxy.
-    #[serde(default)]
+    /// Connect through the embedded Tor client.
+    #[serde(default = "yes")]
     pub tor: bool,
     /// Cover traffic: 0 off, 1 standard, 2 high.
     #[serde(default = "cover_std")]
@@ -140,6 +142,18 @@ fn zero_key() -> Zeroizing<[u8; 32]> {
     Zeroizing::new([0; 32])
 }
 
+/// Maps the default server between its two addresses by the Tor switch.
+pub fn route_endpoint(endpoint: &str, tor: bool) -> String {
+    let ep = normalize_endpoint(endpoint);
+    if tor && same_endpoint(&ep, DEFAULT_ENDPOINT) {
+        DEFAULT_ONION.to_owned()
+    } else if !tor && same_endpoint(&ep, DEFAULT_ONION) {
+        DEFAULT_ENDPOINT.to_owned()
+    } else {
+        ep
+    }
+}
+
 impl Settings {
     /// The transport key we trust for the current endpoint, if one was pinned. The default
     /// server accepts only its compiled key; a different one shows the key-changed screen.
@@ -149,7 +163,10 @@ impl Settings {
 
     /// `pinned_key` with the compiled key of the default server given explicitly.
     pub(crate) fn pinned_key_in(&self, compiled: Option<[u8; 32]>) -> Option<[u8; 32]> {
-        if compiled.is_some() && same_endpoint(&self.endpoint, DEFAULT_ENDPOINT) {
+        if compiled.is_some()
+            && (same_endpoint(&self.endpoint, DEFAULT_ENDPOINT)
+                || same_endpoint(&self.endpoint, DEFAULT_ONION))
+        {
             return compiled;
         }
         if same_endpoint(&self.server_key_for, &self.endpoint) {
@@ -157,6 +174,12 @@ impl Settings {
         } else {
             None
         }
+    }
+
+    /// The endpoint to connect to: the onion address of the default server while Tor is on, its
+    /// public name otherwise. Other servers are used as entered.
+    pub fn connect_endpoint(&self) -> String {
+        route_endpoint(&self.endpoint, self.tor)
     }
 
     /// The SOCKS5 address to use, if any. Empty means a direct connection.
@@ -175,7 +198,7 @@ impl Settings {
             protect: true,
             server_key: None,
             server_key_for: String::new(),
-            tor: false,
+            tor: true,
             cover: 1,
         }
     }
