@@ -62,6 +62,18 @@ $desktopSource = Join-Path $root "target\release\aegis-desktop.exe"
 $desktopDest = Join-Path $desktopDestDir "aegis-desktop.exe"
 Copy-Item -Path $desktopSource -Destination $desktopDest -Force
 
+# Bundle the official Tor client next to the desktop binary
+$torSource = Join-Path $env:USERPROFILE ".aegis-tools\tor\tor"
+$torDest = Join-Path $desktopDestDir "tor"
+if (-not (Test-Path (Join-Path $torSource "tor.exe"))) {
+    throw "tor.exe not found in $torSource"
+}
+if (Test-Path $torDest) {
+    Remove-Item -Path $torDest -Recurse -Force
+}
+New-Item -ItemType Directory -Path $torDest -Force | Out-Null
+Copy-Item -Path (Join-Path $torSource "*") -Destination $torDest -Recurse -Force
+
 # Copy server binary
 $serverDestDir = Join-Path $root "builds\server"
 if (-not (Test-Path $serverDestDir)) {
@@ -129,6 +141,7 @@ $filesToHash = @(
     (Join-Path $root "builds\android-apk\*.apk"),
     (Join-Path $root "builds\desktop\aegis-desktop.exe"),
     (Join-Path $root "builds\desktop\WebView2Loader.dll"),
+    (Join-Path $root "builds\desktop\tor\tor.exe"),
     (Join-Path $root "builds\server\aegis-serverd.exe")
 )
 

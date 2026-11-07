@@ -1,19 +1,13 @@
-//! Embedded Tor client. It bootstraps in the background and serves a SOCKS5 listener on the
-//! loopback interface, so the blocking HTTP client reaches the server through Tor without any
-//! name lookup or connection outside it.
+//! Tor through the official `tor.exe` shipped next to the app. The child process is the only
+//! thing that talks to the network in Tor mode: the app reaches it over a loopback SOCKS5
+//! port, so names are resolved inside Tor.
 
-use arti_client::config::TorClientConfigBuilder;
-use arti_client::{BootstrapBehavior, TorClient};
-use futures::StreamExt;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio_util::compat::FuturesAsyncReadCompatExt;
-use tor_rtcompat::PreferredRuntime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -26,15 +20,17 @@ pub enum Status {
 
 type Notify = Arc<dyn Fn(Status) + Send + Sync>;
 
-/// Handle to the embedded Tor client. Starting is lazy and happens at most once.
+/// Handle to the Tor child process. Starting is lazy and happens at most once.
 #[derive(Debug, Default)]
 pub struct Tor {
     port: Arc<AtomicU16>,
     started: Mutex<bool>,
+    stop: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
 }
 
 impl Tor {
-    /// The loopback SOCKS5 address once Tor is connected and listening.
+    /// The loopback SOCKS5 address once Tor has finished bootstrapping.
     pub fn socks_addr(&self) -> Option<String> {
         match self.port.load(Ordering::SeqCst) {
             0 => None,
@@ -46,7 +42,7 @@ impl Tor {
         *self.started.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Starts bootstrapping if it has not started yet. State and cache live under `dir`.
+    /// Starts `tor.exe` if it has not been started yet. Its state lives under `dir`.
     pub fn ensure_started(&self, dir: &Path, notify: impl Fn(Status) + Send + Sync + 'static) {
         let mut started = self.started.lock().unwrap_or_else(|e| e.into_inner());
         if *started {
@@ -54,139 +50,138 @@ impl Tor {
         }
         *started = true;
         let notify: Notify = Arc::new(notify);
-        let port = Arc::clone(&self.port);
-        let dir = dir.to_path_buf();
         notify(Status::Starting(0));
-        let spawned = std::thread::Builder::new().name("tor".into()).spawn(move || {
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => return notify(Status::Failed(e.to_string())),
-            };
-            rt.block_on(run(dir, port, notify));
-        });
+        let job = Job {
+            dir: dir.to_path_buf(),
+            port: Arc::clone(&self.port),
+            stop: Arc::clone(&self.stop),
+            child: Arc::clone(&self.child),
+            notify: Arc::clone(&notify),
+        };
+        let spawned = std::thread::Builder::new().name("tor".into()).spawn(move || job.run());
         if spawned.is_err() {
             *started = false;
+            notify(Status::Failed("thread".into()));
         }
     }
 }
 
-async fn run(dir: PathBuf, port: Arc<AtomicU16>, notify: Notify) {
-    loop {
-        match serve(&dir, &port, &notify).await {
-            Ok(()) => return,
-            Err(e) => {
-                port.store(0, Ordering::SeqCst);
-                notify(Status::Failed(e));
-                tokio::time::sleep(Duration::from_secs(15)).await;
+impl Drop for Tor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(mut c) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+struct Job {
+    dir: PathBuf,
+    port: Arc<AtomicU16>,
+    stop: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+    notify: Notify,
+}
+
+impl Job {
+    fn run(&self) {
+        while !self.stop.load(Ordering::SeqCst) {
+            let why = self.once().unwrap_or_else(|e| e);
+            self.port.store(0, Ordering::SeqCst);
+            if self.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            (self.notify)(Status::Failed(why));
+            for _ in 0..30 {
+                if self.stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            (self.notify)(Status::Starting(0));
+        }
+    }
+
+    /// Runs one Tor process until it exits and returns why it stopped.
+    fn once(&self) -> Result<String, String> {
+        let exe = locate().ok_or("tor.exe not found")?;
+        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        let torrc = self.dir.join("torrc");
+        std::fs::write(&torrc, "").map_err(|e| e.to_string())?;
+        let mut cmd = Command::new(&exe);
+        cmd.args(["--SocksPort", "127.0.0.1:auto", "--ClientOnly", "1", "--AvoidDiskWrites", "1"])
+            .args(["--Log", "notice stdout", "-f"])
+            .arg(&torrc)
+            .args(["--__OwningControllerProcess", &std::process::id().to_string()])
+            .arg("--DataDirectory")
+            .arg(&self.dir)
+            .current_dir(exe.parent().unwrap_or(Path::new(".")))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        hide_window(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+        let Some(out) = child.stdout.take() else {
+            let _ = child.kill();
+            return Err("no output".into());
+        };
+        *self.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        let mut socks = 0u16;
+        for line in BufReader::new(out).lines() {
+            let Ok(line) = line else { break };
+            if let Some(p) = socks_port(&line) {
+                socks = p;
+            }
+            if let Some(pct) = progress(&line) {
+                if pct >= 100 && socks != 0 {
+                    self.port.store(socks, Ordering::SeqCst);
+                    (self.notify)(Status::Ready);
+                } else {
+                    (self.notify)(Status::Starting(pct));
+                }
             }
         }
+        let taken = self.child.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(mut c) = taken {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        Ok("tor exited".into())
     }
 }
 
-fn client_config(dir: &Path) -> Result<arti_client::TorClientConfig, String> {
-    let mut b = TorClientConfigBuilder::from_directories(dir.join("state"), dir.join("cache"));
-    b.address_filter().allow_onion_addrs(true);
-    b.build().map_err(|e| e.to_string())
+/// `tor.exe` next to the app, or the path in `AEGIS_TOR_EXE` for development.
+pub fn locate() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("AEGIS_TOR_EXE") {
+        let p = PathBuf::from(p);
+        return p.is_file().then_some(p);
+    }
+    let p = std::env::current_exe().ok()?.parent()?.join("tor").join("tor.exe");
+    p.is_file().then_some(p)
 }
 
-async fn serve(dir: &Path, port: &AtomicU16, notify: &Notify) -> Result<(), String> {
-    let cfg = client_config(dir)?;
-    let rt = PreferredRuntime::current().map_err(|e| e.to_string())?;
-    let client = TorClient::with_runtime(rt)
-        .config(cfg)
-        .bootstrap_behavior(BootstrapBehavior::Manual)
-        .create_unbootstrapped()
-        .map_err(|e| e.to_string())?;
-    let mut events = client.bootstrap_events();
-    let progress = Arc::clone(notify);
-    tokio::spawn(async move {
-        while let Some(st) = events.next().await {
-            progress(Status::Starting(percent(st.as_frac())));
-        }
-    });
-    client.bootstrap().await.map_err(|e| e.to_string())?;
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-        .await
-        .map_err(|e| e.to_string())?;
-    let local = listener.local_addr().map_err(|e| e.to_string())?;
-    port.store(local.port(), Ordering::SeqCst);
-    notify(Status::Ready);
-    loop {
-        let (conn, peer) = listener.accept().await.map_err(|e| e.to_string())?;
-        if !peer.ip().is_loopback() {
-            continue;
-        }
-        let client = client.isolated_client();
-        tokio::spawn(async move {
-            let _ = relay(conn, client).await;
-        });
-    }
+#[cfg(windows)]
+fn hide_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x0800_0000);
 }
 
-fn percent(frac: f32) -> u8 {
-    (frac.clamp(0.0, 1.0) * 100.0) as u8
+#[cfg(not(windows))]
+fn hide_window(_: &mut Command) {}
+
+/// Percent from a `Bootstrapped N% (tag): text` notice.
+fn progress(line: &str) -> Option<u8> {
+    let rest = line.split("Bootstrapped ").nth(1)?;
+    let n: u32 = rest.split('%').next()?.trim().parse().ok()?;
+    Some(n.min(100) as u8)
 }
 
-/// Reads a SOCKS5 CONNECT request (no authentication) and returns host and port.
-async fn handshake(c: &mut TcpStream) -> std::io::Result<(String, u16)> {
-    let bad = |m: &'static str| std::io::Error::new(std::io::ErrorKind::InvalidData, m);
-    let mut h = [0u8; 2];
-    c.read_exact(&mut h).await?;
-    if h[0] != 5 {
-        return Err(bad("socks version"));
-    }
-    let mut methods = vec![0u8; usize::from(h[1])];
-    c.read_exact(&mut methods).await?;
-    if !methods.contains(&0) {
-        c.write_all(&[5, 0xff]).await?;
-        return Err(bad("socks auth"));
-    }
-    c.write_all(&[5, 0]).await?;
-    let mut r = [0u8; 4];
-    c.read_exact(&mut r).await?;
-    if r[0] != 5 || r[1] != 1 {
-        return Err(bad("socks command"));
-    }
-    let host = match r[3] {
-        1 => {
-            let mut a = [0u8; 4];
-            c.read_exact(&mut a).await?;
-            IpAddr::from(a).to_string()
-        }
-        4 => {
-            let mut a = [0u8; 16];
-            c.read_exact(&mut a).await?;
-            IpAddr::from(a).to_string()
-        }
-        3 => {
-            let mut l = [0u8; 1];
-            c.read_exact(&mut l).await?;
-            let mut n = vec![0u8; usize::from(l[0])];
-            c.read_exact(&mut n).await?;
-            String::from_utf8(n).map_err(|_| bad("socks host"))?
-        }
-        _ => return Err(bad("socks address type")),
-    };
-    let mut p = [0u8; 2];
-    c.read_exact(&mut p).await?;
-    Ok((host, u16::from_be_bytes(p)))
-}
-
-async fn relay(mut conn: TcpStream, client: Arc<TorClient<PreferredRuntime>>) -> std::io::Result<()> {
-    let (host, port) = handshake(&mut conn).await?;
-    match client.connect((host.as_str(), port)).await {
-        Ok(stream) => {
-            conn.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
-            let mut stream = stream.compat();
-            tokio::io::copy_bidirectional(&mut conn, &mut stream).await?;
-            Ok(())
-        }
-        Err(_) => conn.write_all(&[5, 4, 0, 1, 0, 0, 0, 0, 0, 0]).await,
-    }
+/// Port from `Opened Socks listener connection (ready) on 127.0.0.1:NNNN`.
+fn socks_port(line: &str) -> Option<u16> {
+    let rest = line.split("Socks listener").nth(1)?;
+    let addr = rest.rsplit(" on ").next()?.trim();
+    addr.strip_prefix("127.0.0.1:")?.parse().ok().filter(|p| *p != 0)
 }
 
 #[cfg(test)]
@@ -195,10 +190,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn progress_is_clamped_to_percent() {
-        assert_eq!(percent(-1.0), 0);
-        assert_eq!(percent(0.5), 50);
-        assert_eq!(percent(7.0), 100);
+    fn progress_is_read_and_clamped() {
+        let l = "Nov 07 10:00:00.000 [notice] Bootstrapped 45% (loading_descriptors): Loading";
+        assert_eq!(progress(l), Some(45));
+        assert_eq!(progress("Bootstrapped 100% (done): Done"), Some(100));
+        assert_eq!(progress("Bootstrapped 400% (x): y"), Some(100));
+        assert_eq!(progress("Opened Socks listener"), None);
+    }
+
+    #[test]
+    fn socks_port_is_read_from_the_listener_notice() {
+        let l = "Nov 07 [notice] Opened Socks listener connection (ready) on 127.0.0.1:49731";
+        assert_eq!(socks_port(l), Some(49731));
+        assert_eq!(socks_port("Opened Socks listener on 0.0.0.0:9050"), None);
+        assert_eq!(socks_port("Bootstrapped 5%"), None);
     }
 
     #[test]
@@ -206,34 +211,5 @@ mod tests {
         let t = Tor::default();
         assert!(t.socks_addr().is_none());
         assert!(!t.started());
-    }
-
-    #[test]
-    fn config_builds_with_onion_addresses_allowed() {
-        let dir = std::env::temp_dir().join("aegis-tor-cfg-test");
-        assert!(client_config(&dir).is_ok());
-    }
-
-    #[test]
-    fn socks_handshake_reads_domain_requests() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = l.local_addr().unwrap();
-            let srv = tokio::spawn(async move {
-                let (mut c, _) = l.accept().await.unwrap();
-                handshake(&mut c).await.unwrap()
-            });
-            let mut c = TcpStream::connect(addr).await.unwrap();
-            c.write_all(&[5, 1, 0]).await.unwrap();
-            let mut r = [0u8; 2];
-            c.read_exact(&mut r).await.unwrap();
-            assert_eq!(r, [5, 0]);
-            let mut req = vec![5, 1, 0, 3, 5];
-            req.extend_from_slice(b"a.com");
-            req.extend_from_slice(&80u16.to_be_bytes());
-            c.write_all(&req).await.unwrap();
-            assert_eq!(srv.await.unwrap(), ("a.com".to_owned(), 80));
-        });
     }
 }
