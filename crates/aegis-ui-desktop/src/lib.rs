@@ -11,5 +11,6 @@ pub mod media;
 pub mod model;
 pub mod render;
 pub mod session;
+pub mod tor;
 #[cfg(target_os = "windows")]
 pub mod ui;

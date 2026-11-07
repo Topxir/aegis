@@ -20,6 +20,10 @@ const MAX_POLL_FRAMES: usize = 100;
 /// The server clients use until the user picks another one.
 pub const DEFAULT_SERVER_URL: &str = "https://freeoasis.space";
 
+/// The onion service of the default server. It is the same server and the same transport key.
+pub const DEFAULT_ONION_URL: &str =
+    "http://axwvmhfhymxuwwzegl4k3o4xfmlwfflaeunsnn557tjyiuy2wetlx7ad.onion";
+
 /// X25519 public key of the default server, compiled into the clients so the first contact is
 /// already pinned. If it were `None`, even the default server would be pinned on first use.
 pub const DEFAULT_SERVER_X_PK: Option<[u8; 32]> = Some([
@@ -27,11 +31,15 @@ pub const DEFAULT_SERVER_X_PK: Option<[u8; 32]> = Some([
     0x97, 0x88, 0x7d, 0x4d, 0xee, 0x43, 0x4d, 0x5b, 0xcf, 0x5f, 0x70, 0x5a, 0x35, 0x06, 0x28, 0x60,
 ]);
 
-/// The compiled-in server key for `endpoint`, if it is the default server. Any other server
-/// (or an unparsable endpoint) gets `None` and is pinned on first use.
+/// The compiled-in server key for `endpoint`, if it is the default server (by name or onion
+/// address). Any other server (or an unparsable endpoint) gets `None` and is pinned on first use.
 pub fn pinned_key_for(endpoint: &str) -> Option<[u8; 32]> {
     let key = DEFAULT_SERVER_X_PK?;
-    (Endpoint::parse(endpoint).ok()? == Endpoint::parse(DEFAULT_SERVER_URL).ok()?).then_some(key)
+    let ep = Endpoint::parse(endpoint).ok()?;
+    [DEFAULT_SERVER_URL, DEFAULT_ONION_URL]
+        .iter()
+        .any(|d| Endpoint::parse(d).ok().as_ref() == Some(&ep))
+        .then_some(key)
 }
 
 /// Parsed `https://host[:port]` or (restricted) `http://host[:port]` endpoint.
@@ -772,6 +780,14 @@ mod tests {
         ] {
             assert!(Endpoint::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn onion_default_is_pinned() {
+        assert_eq!(pinned_key_for(DEFAULT_ONION_URL), DEFAULT_SERVER_X_PK);
+        assert_eq!(pinned_key_for(&format!("{DEFAULT_ONION_URL}/")), DEFAULT_SERVER_X_PK);
+        assert_eq!(pinned_key_for("http://other.onion"), None);
+        assert_eq!(pinned_key_for(&format!("{DEFAULT_ONION_URL}:8080")), None);
     }
 
     #[test]
