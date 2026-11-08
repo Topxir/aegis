@@ -55,6 +55,7 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
     var test by remember { mutableStateOf<Boolean?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmWipe by remember { mutableStateOf(false) }
+    var confirmTorOff by remember { mutableStateOf(false) }
     var info by remember { mutableStateOf<Int?>(null) }
 
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
@@ -80,7 +81,7 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(stringResource(R.string.tor_connect), color = Ui.text, modifier = Modifier.weight(1f))
                     Switch(
-                        tor, { tor = it; test = null; session.setTor(it) },
+                        tor, { if (it) { tor = true; test = null; session.setTor(true) } else confirmTorOff = true },
                         colors = SwitchDefaults.colors(checkedTrackColor = Ui.accent, checkedThumbColor = Ui.onAccent, uncheckedTrackColor = Ui.surface2, uncheckedThumbColor = Ui.muted, uncheckedBorderColor = Ui.border),
                     )
                 }
@@ -175,6 +176,10 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
             }
         }
     }
+    if (confirmTorOff) Confirm(
+        stringResource(R.string.tor_off_title), stringResource(R.string.tor_off_body), stringResource(R.string.tor_off_action),
+        { confirmTorOff = false; tor = false; test = null; session.setTor(false) }, { confirmTorOff = false },
+    )
     if (confirmWipe) Confirm(
         stringResource(R.string.wipe_chats), stringResource(R.string.delete_chats_body), stringResource(R.string.delete),
         { confirmWipe = false; session.wipeAllChats() }, { confirmWipe = false },

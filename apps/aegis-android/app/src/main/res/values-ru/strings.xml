@@ -104,6 +104,10 @@
     <string name="tor_failed">Tor не удалось подключиться. Запросы не выполняются, пока он не заработает; вне Tor ничего не отправляется.</string>
     <string name="tor_note_on">Tor работает внутри приложения. Сервер по умолчанию доступен по onion-адресу, и все запросы, включая фоновые проверки, холостой трафик и вложения, идут через Tor.</string>
     <string name="tor_note_off">Tor выключен. Сервер по умолчанию доступен напрямую по адресу freeoasis.space, поэтому он и Cloudflare видят ваш IP-адрес.</string>
+    <string name="tor_off_title">Выключить Tor?</string>
+    <string name="tor_off_body">Без Tor ваш IP-адрес становится виден серверу и Cloudflare, через который идёт подключение. Ваш провайдер тоже видит, что вы подключаетесь к Aegis.</string>
+    <string name="tor_off_action">Выключить Tor</string>
+    <string name="err_clearnet_tor">Этот адрес — вход через обычный интернет за Cloudflare. С Tor приложение использует onion-адрес сервера.</string>
     <string name="server">Сервер</string>
     <string name="server_cloudflare_note">Сервер по умолчанию работает за Cloudflare. Он видит метаданные соединений (ваш IP-адрес, время и размер запросов), но не содержимое сообщений. Чтобы это изменить, используйте прокси или собственный сервер.</string>
     <string name="field_proxy">SOCKS5-прокси (хост:порт, необязательно)</string>
