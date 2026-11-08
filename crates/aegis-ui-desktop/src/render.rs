@@ -1446,6 +1446,10 @@ fn tor_html(app: &App, l: Lang, on: bool) -> String {
         (Status::Failed(e), _) => ("status badc", format!("{} {e}", tr(l, "conn.tor_failed"))),
         (Status::Off, _) => ("status", format!("{} 0%", tr(l, "conn.tor_start"))),
     };
+    let text = match &app.session {
+        Some(s) if on => text + &crate::bridges::status_suffix(l, &s.data.settings),
+        _ => text,
+    };
     format!(r#"<p class="{class}">{}</p>"#, esc(&text))
 }
 
@@ -1632,10 +1636,11 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
         "connection" => {
             let socks = format!(r#"placeholder="127.0.0.1:9050" {}"#, val(&st.socks5));
             let cover_field = format!(
-                r#"{}<label class="f"><span>{}</span><select name="cover">{}</select></label>"#,
+                r#"{}<label class="f"><span>{}</span><select name="cover">{}</select></label>{}"#,
                 check("tor", tr(l, "conn.tor"), st.tor, false),
                 esc(tr(l, "conn.cover")),
-                cover_options(l, st.cover)
+                cover_options(l, st.cover),
+                crate::bridges::form_html(l, st)
             );
             let status_html = format!("{}{}", tor_html(app, l, st.tor), conn_html(app, l));
             format!(
@@ -1763,6 +1768,13 @@ pub fn overlay(app: &App) -> String {
             "delete_account",
             tr(l, "set.delete"),
             field(l, "confirm", "f.confirm_name", "text", "autofocus"),
+        ),
+        Dialog::TorOff(_) => (
+            tr(l, "dlg.tor_off"),
+            tr(l, "dlg.tor_off_text").to_owned(),
+            "confirm_tor_off",
+            tr(l, "dlg.tor_off_ok"),
+            String::new(),
         ),
     };
     format!(

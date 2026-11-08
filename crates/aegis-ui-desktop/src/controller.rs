@@ -273,11 +273,26 @@ impl Controller {
                 socks5,
                 tor,
                 cover,
+                bridges,
+                bridge_lines,
             } => {
-                let r = e.apply_connection(&endpoint, &socks5, tor, &cover);
-                self.saved(r);
-                e.app().conn = None;
-                self.local_change();
+                let form = crate::connection::ConnForm { endpoint, socks5, cover, bridges, bridge_lines };
+                let tor_was_on = e.app().session.as_ref().is_some_and(|s| s.data.settings.tor);
+                if !tor && tor_was_on {
+                    e.app().dialog = Some(Dialog::TorOff(form));
+                    e.changed();
+                    return;
+                }
+                self.save_connection(form, tor);
+            }
+            Cmd::ConfirmTorOff {} => {
+                let form = match e.app().dialog.take() {
+                    Some(Dialog::TorOff(f)) => Some(f),
+                    _ => None,
+                };
+                if let Some(f) = form {
+                    self.save_connection(f, false);
+                }
             }
             Cmd::SavePrivacy { idle_min, protect } => {
                 let r = match idle_min.trim().parse::<u32>() {
@@ -392,6 +407,14 @@ impl Controller {
                 self.job(Job::DeleteAccount(confirm));
             }
         }
+    }
+
+    fn save_connection(&self, f: crate::connection::ConnForm, tor: bool) {
+        let e = &self.engine;
+        let r = e.apply_connection(&f.endpoint, &f.socks5, tor, &f.cover, &f.bridges, &f.bridge_lines);
+        self.saved(r);
+        e.app().conn = None;
+        self.local_change();
     }
 
     fn saved(&self, r: Result<(), Failure>) {

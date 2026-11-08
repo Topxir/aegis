@@ -7,7 +7,7 @@
 use crate::config::Config;
 use crate::i18n::Lang;
 use crate::media;
-use crate::model::{route_endpoint, Data, MediaRef, MsgState, Settings, SCHEMA};
+use crate::model::{Data, MediaRef, MsgState, Settings, SCHEMA};
 use crate::tor;
 use crate::session::{
     ChainRx,
@@ -80,6 +80,8 @@ pub enum Dialog {
     LeaveChannel(String),
     ClearChat(ChatRef),
     DeleteAccount,
+    /// Turning Tor off, with the connection settings to save once confirmed.
+    TorOff(crate::connection::ConnForm),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,7 +428,7 @@ impl Engine {
         let Some(key) = s.pinned_key() else {
             return Err(Failure::new("err.server_key_unset"));
         };
-        Ok(Client::new(&s.connect_endpoint(), socks.as_deref())?
+        Ok(Client::new(&crate::connection::endpoint_for(&s.endpoint, s.tor)?, socks.as_deref())?
             .with_pow_bits(self.cfg.pow_bits)
             .with_server_key(key))
     }
@@ -447,7 +449,13 @@ impl Engine {
     /// Starts the embedded Tor client when the open account uses it. Never call with the app
     /// lock held: status updates take it.
     pub(crate) fn tor_sync(&self) {
-        let on = self.app().session.as_ref().is_some_and(|s| s.data.settings.tor);
+        let (on, torrc) = match self.app().session.as_ref() {
+            Some(s) => (s.data.settings.tor, crate::bridges::torrc_for(&s.data.settings)),
+            None => (false, String::new()),
+        };
+        if on {
+            self.tor.configure(torrc);
+        }
         self.tor_sync_for(on);
     }
 
@@ -498,7 +506,7 @@ impl Engine {
     fn pin_key(&self, st: &mut Settings) -> Result<(), Failure> {
         let known = st.pinned_key();
         let socks = self.socks_for(st)?;
-        let client = Client::new(&st.connect_endpoint(), socks.as_deref())?
+        let client = Client::new(&crate::connection::endpoint_for(&st.endpoint, st.tor)?, socks.as_deref())?
             .with_pow_bits(self.cfg.pow_bits)
             .with_pinned_server_key(known)
             .map_err(|e| {
@@ -946,7 +954,11 @@ impl Engine {
     }
 
     pub fn test_connection(&self, endpoint: &str, socks5: &str, tor: bool) -> Result<(), Failure> {
-        let endpoint = route_endpoint(endpoint, tor);
+        let saved_off = self.app().session.as_ref().is_some_and(|s| !s.data.settings.tor);
+        if !tor && !saved_off {
+            return Err(Failure::new("err.tor_off_first"));
+        }
+        let endpoint = crate::connection::endpoint_for(endpoint, tor)?;
         let endpoint = endpoint.as_str();
         let socks = if tor {
             self.tor_sync_for(true);
@@ -993,10 +1005,14 @@ impl Engine {
         socks5: &str,
         tor: bool,
         cover: &str,
+        bridges: &str,
+        bridge_lines: &str,
     ) -> Result<(), Failure> {
         let endpoint = crate::model::normalize_endpoint(endpoint);
         let socks5 = socks5.trim().to_owned();
         aegis_core::net::Endpoint::parse(&endpoint)?;
+        crate::connection::endpoint_for(&endpoint, tor)?;
+        let (bridges, bridge_lines) = crate::bridges::check(bridges, bridge_lines)?;
         if !socks5.is_empty() && !valid_socks(&socks5) {
             return Err(Failure::new("err.socks"));
         }
@@ -1011,6 +1027,8 @@ impl Engine {
             st.socks5 = socks5;
             st.tor = tor;
             st.cover = cover;
+            st.bridges = bridges.code().to_owned();
+            st.bridge_lines = bridge_lines;
         })
         .ok_or(Failure::new("err.locked"))?;
         self.app().key_checked = None;

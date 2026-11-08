@@ -11,6 +11,14 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Write;
 
+/// The only key clients accept update manifests from. The secret half stays offline with the owner.
+pub const TRUSTED_KEY_HEX: &str = "d0477ef7f2cd4618395408fc518c8691ff528ea290514dd50822cebbc41d6761";
+
+/// `TRUSTED_KEY_HEX` as bytes.
+pub fn trusted_key() -> Result<[u8; 32]> {
+    hex::decode_array(TRUSTED_KEY_HEX)
+}
+
 /// Domain separation for the manifest signature.
 pub const SIG_CONTEXT: &[u8] = b"aegis-update-v1\n";
 /// Largest signed manifest a client or the server accepts.
@@ -257,6 +265,14 @@ mod tests {
             min: "0.1.0".into(),
             code,
         }
+    }
+
+    #[test]
+    fn trusted_key_is_a_valid_point() {
+        let pk = trusted_key().unwrap();
+        let m = manifest_json(1, "0.1.0", &BTreeMap::new());
+        let signed = sign(&[1u8; 32], m.as_bytes());
+        assert_eq!(open(&signed, &pk), Err(Error::BadSignature));
     }
 
     #[test]

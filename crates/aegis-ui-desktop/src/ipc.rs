@@ -126,7 +126,12 @@ pub enum Cmd {
         tor: bool,
         #[serde(default)]
         cover: String,
+        #[serde(default)]
+        bridges: String,
+        #[serde(default)]
+        bridge_lines: String,
     },
+    ConfirmTorOff {},
     SavePrivacy {
         idle_min: String,
         protect: bool,
