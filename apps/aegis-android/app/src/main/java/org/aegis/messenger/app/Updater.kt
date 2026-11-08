@@ -64,7 +64,7 @@ fun stageUpdate(dir: File, a: Update.Artifact, chunk: (Long) -> ByteArray): File
 object Updater {
     private const val PREFS = "aegis_update"
     private const val CHANNEL = "updates"
-    private const val ID_NOTIFY = 2
+    private const val ID_NOTIFY = 3
     private const val INTERVAL_MS = 6 * 60 * 60 * 1000L
     private const val TICK_MIN = 15L
 

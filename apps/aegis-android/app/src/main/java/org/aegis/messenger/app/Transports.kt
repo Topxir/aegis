@@ -15,9 +15,6 @@ import java.io.IOException
 object Transports {
     private const val PREFS = "aegis_bridges"
 
-    /** Keeps Tor off the network when bridges are chosen but none of them can be used. */
-    private const val CLOSED = "DisableNetwork 1\n"
-
     private var controller: Controller? = null
     private val running = LinkedHashSet<String>()
 
@@ -44,7 +41,8 @@ object Transports {
 
     /**
      * Starts the transports the bridge settings need and writes the torrc that TorService reads on
-     * start. Called with the Tor lock held, before the service is bound.
+     * start. Called with the Tor lock held, before the service is bound. Throws when bridges are
+     * chosen but none can be used, so Tor never starts without them.
      */
     fun prepare(ctx: Context) {
         stop()
@@ -68,11 +66,11 @@ object Transports {
             }
         }
         val rc = Bridges.torrc(mode, custom) { t -> if (t in running) controller?.port(t)?.toInt() else null }
-        val text = if (mode != Bridges.Mode.Off && rc.isEmpty()) CLOSED else rc
+        if (mode != Bridges.Mode.Off && rc.isEmpty()) throw IllegalStateException("no usable bridge")
         try {
-            TorService.getTorrc(ctx).writeText(text)
+            TorService.getTorrc(ctx).writeText(rc)
         } catch (_: IOException) {
-            // Without the file Tor would start without bridges; fail closed instead.
+            // Without the file Tor would start without bridges.
             if (mode != Bridges.Mode.Off) throw IllegalStateException("torrc")
         }
     }
