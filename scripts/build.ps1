@@ -131,6 +131,31 @@ if (-not $SkipAndroid) {
     }
 }
 
+# Signed update: manifest and files for the server's <data-dir>/update
+$updateKey = if ($env:AEGIS_UPDATE_KEY) { $env:AEGIS_UPDATE_KEY } else { Join-Path $env:USERPROFILE ".aegis-update.key" }
+if (Test-Path $updateKey) {
+    Write-Host "Signing update manifest..."
+    $updateDir = Join-Path $root "builds\update"
+    $version = (Select-String -Path (Join-Path $root "Cargo.toml") -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+    # Seconds since 1970 keep the sequence growing even if builds/update was emptied.
+    $seq = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $signArgs = @("sign", "--key", $updateKey, "--out", $updateDir, "--version", $version, "--seq", "$seq", "--windows", $desktopDest)
+    $apk = Join-Path $root "builds\android-apk\aegis-messenger-release.apk"
+    if (-not $SkipAndroid -and (Test-Path $apk)) {
+        $gradle = Get-Content (Join-Path $root "apps\aegis-android\app\build.gradle.kts") -Raw
+        $code = [regex]::Match($gradle, 'versionCode = (\d+)').Groups[1].Value
+        $apkVersion = [regex]::Match($gradle, 'versionName = "([^"]+)"').Groups[1].Value
+        $signArgs += @("--android", $apk, "--android-code", $code, "--android-version", $apkVersion)
+    }
+    & (Join-Path $root "target\release\aegis-update.exe") @signArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Signing the update failed"
+    }
+}
+else {
+    Write-Warning "Update key not found ($updateKey); no signed update written"
+}
+
 # Generate SHA256SUMS.txt
 Write-Host "Generating checksums..."
 
@@ -168,3 +193,6 @@ if (-not $SkipAndroid) {
     Write-Host "  Android:  builds/android-apk/aegis-messenger-release.apk (or -unsigned.apk)"
 }
 Write-Host "  Checksums: builds/SHA256SUMS.txt"
+if (Test-Path (Join-Path $root "builds\update\manifest.signed")) {
+    Write-Host "  Update:    builds/update/ (copy into the server's <data-dir>/update)"
+}

@@ -198,6 +198,8 @@ pub struct ServerState {
     /// Ephemeral keys of sealed requests (first 16 bytes), by the request's `ts`.
     sealed_seen: BTreeMap<u64, HashSet<[u8; 16]>>,
     blobs: Option<Arc<BlobStore>>,
+    /// `<data-dir>/update`, read by the update routes (section 29).
+    update_dir: Option<PathBuf>,
     pins: HashMap<[u8; 32], PinSlot>,
     prekeys: HashMap<String, Prekeys>,
     srv_sk: Option<[u8; 32]>,
@@ -272,7 +274,13 @@ impl ServerState {
         let blobs = BlobStore::open(data_dir, s.config.blob_quota_bytes, s.config.blob_ttl_secs)?;
         blobs.purge(aegis_core::now_secs());
         s.blobs = Some(Arc::new(blobs));
+        s.update_dir = Some(data_dir.join(crate::update::UPDATE_DIR));
         Ok(s)
+    }
+
+    /// Directory of the published update, if this state has a data directory.
+    pub fn update_dir(&self) -> Option<PathBuf> {
+        self.update_dir.clone()
     }
 
     /// State that is never written to disk.
@@ -287,6 +295,7 @@ impl ServerState {
             replay: Expiring::default(),
             sealed_seen: BTreeMap::new(),
             blobs: None,
+            update_dir: None,
             pins: HashMap::new(),
             prekeys: HashMap::new(),
             srv_sk: aegis_core::random_bytes::<32>().ok(),

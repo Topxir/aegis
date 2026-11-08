@@ -272,11 +272,37 @@ impl Controller {
                 socks5,
                 tor,
                 cover,
+                bridges,
+                bridge_lines,
             } => {
-                let r = e.apply_connection(&endpoint, &socks5, tor, &cover);
-                self.saved(r);
-                e.app().conn = None;
+                let form = crate::connection::ConnForm { endpoint, socks5, cover, bridges, bridge_lines };
+                let tor_was_on = e.app().session.as_ref().is_some_and(|s| s.data.settings.tor);
+                if !tor && tor_was_on {
+                    e.app().dialog = Some(Dialog::TorOff(form));
+                    e.changed();
+                    return;
+                }
+                self.save_connection(form, tor);
+            }
+            Cmd::ConfirmTorOff {} => {
+                let form = match e.app().dialog.take() {
+                    Some(Dialog::TorOff(f)) => Some(f),
+                    _ => None,
+                };
+                if let Some(f) = form {
+                    self.save_connection(f, false);
+                }
+            }
+            Cmd::SaveUpdates { auto_update } => {
+                e.mutate(|s| s.data.settings.auto_update = auto_update);
+                self.saved(Ok(()));
                 self.local_change();
+            }
+            Cmd::UpdateNow {} => e.update_now(),
+            Cmd::InstallUpdate {} => {
+                if e.update_ready() {
+                    self.job(Job::InstallUpdate);
+                }
             }
             Cmd::SavePrivacy {
                 idle_min,
@@ -424,6 +450,14 @@ impl Controller {
         }
     }
 
+    fn save_connection(&self, f: crate::connection::ConnForm, tor: bool) {
+        let e = &self.engine;
+        let r = e.apply_connection(&f.endpoint, &f.socks5, tor, &f.cover, &f.bridges, &f.bridge_lines);
+        self.saved(r);
+        e.app().conn = None;
+        self.local_change();
+    }
+
     fn saved(&self, r: Result<(), Failure>) {
         self.engine.app().flash = Some(match r {
             Ok(()) => Flash {
@@ -442,6 +476,10 @@ impl Controller {
     pub fn lock(&self) {
         if let Some(s) = self.engine.detach() {
             self.job(Job::Persist(Box::new(s)));
+        }
+        // A verified update installs when the app locks; the vault is saved first, jobs run in order.
+        if self.engine.update_ready() {
+            self.job(Job::InstallUpdate);
         }
         self.engine.changed();
     }

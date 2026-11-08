@@ -16,6 +16,8 @@ pub enum Error {
     Media(&'static str),
     /// Session, ratchet or sender-key failure (sections 27 and 28).
     Session(&'static str),
+    /// Signed update manifest or update file rejected (section 29).
+    Update(&'static str),
     /// The server's pinned transport key changed (section 23).
     ServerKeyChanged,
     ZeroSharedSecret,
@@ -42,6 +44,7 @@ impl fmt::Display for Error {
             Error::InvalidEnvelope(why) => return write!(f, "invalid envelope: {why}"),
             Error::Media(why) => return write!(f, "invalid media: {why}"),
             Error::Session(why) => return write!(f, "session: {why}"),
+            Error::Update(why) => return write!(f, "update: {why}"),
             Error::ServerKeyChanged => "the server key changed",
             Error::Net(why) => return write!(f, "network error: {why}"),
             Error::Http(code) => return write!(f, "server answered {code}"),

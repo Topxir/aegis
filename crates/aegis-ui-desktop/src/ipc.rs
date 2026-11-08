@@ -135,7 +135,18 @@ pub enum Cmd {
         tor: bool,
         #[serde(default)]
         cover: String,
+        #[serde(default)]
+        bridges: String,
+        #[serde(default)]
+        bridge_lines: String,
     },
+    ConfirmTorOff {},
+    SaveUpdates {
+        #[serde(default)]
+        auto_update: bool,
+    },
+    UpdateNow {},
+    InstallUpdate {},
     SavePrivacy {
         idle_min: String,
         protect: bool,

@@ -1492,6 +1492,10 @@ fn tor_html(app: &App, l: Lang, on: bool) -> String {
         (Status::Failed(e), _) => ("status badc", format!("{} {e}", tr(l, "conn.tor_failed"))),
         (Status::Off, _) => ("status", format!("{} 0%", tr(l, "conn.tor_start"))),
     };
+    let text = match &app.session {
+        Some(s) if on => text + &crate::bridges::status_suffix(l, &s.data.settings),
+        _ => text,
+    };
     format!(r#"<p class="{class}">{}</p>"#, esc(&text))
 }
 
@@ -1680,14 +1684,15 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
         "connection" => {
             let socks = format!(r#"placeholder="127.0.0.1:9050" {}"#, val(&st.socks5));
             let cover_field = format!(
-                r#"{}<label class="f"><span>{}</span><select name="cover">{}</select></label>"#,
+                r#"{}<label class="f"><span>{}</span><select name="cover">{}</select></label>{}"#,
                 check("tor", tr(l, "conn.tor"), st.tor, false),
                 esc(tr(l, "conn.cover")),
-                cover_options(l, st.cover)
+                cover_options(l, st.cover),
+                crate::bridges::form_html(l, st)
             );
             let status_html = format!("{}{}", tor_html(app, l, st.tor), conn_html(app, l));
             format!(
-            r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}<p class="note">{}</p><div class="row"><button type="button" class="btn primary" data-act="save_connection" data-primary>{}</button><button type="button" class="btn" data-act="test_conn">{}</button></div>{}</section>"#,
+            r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}<p class="note">{}</p><div class="row"><button type="button" class="btn primary" data-act="save_connection" data-primary>{}</button><button type="button" class="btn" data-act="test_conn">{}</button></div>{}</section>{}"#,
             esc(tr(l, "acct.connection")),
             field(l, "endpoint", "f.endpoint", "text", &val(&st.endpoint)),
             field(
@@ -1702,7 +1707,8 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
             esc(&[tr(l, "conn.tor_note"), tr(l, "conn.cover_note")].join(" ")),
             esc(tr(l, "common.save")),
             esc(tr(l, "set.test")),
-            status_html
+            status_html,
+            crate::engine::update::card_html(app, l, st)
             )
         }
         _ => format!(
@@ -1807,6 +1813,13 @@ pub fn overlay(app: &App) -> String {
             "delete_account",
             tr(l, "set.delete"),
             field(l, "confirm", "f.confirm_name", "text", "autofocus"),
+        ),
+        Dialog::TorOff(_) => (
+            tr(l, "dlg.tor_off"),
+            tr(l, "dlg.tor_off_text").to_owned(),
+            "confirm_tor_off",
+            tr(l, "dlg.tor_off_ok"),
+            String::new(),
         ),
     };
     format!(
@@ -1919,7 +1932,7 @@ mod tests {
                 [
                     "div", "span", "button", "label", "input", "select", "option", "p", "h1", "h2",
                     "h3", "ul", "li", "strong", "time", "svg", "path", "circle", "rect", "section",
-                    "br"
+                    "br", "textarea"
                 ]
                 .contains(&name.as_str()),
                 "unexpected tag {name:?} in {t:?}"

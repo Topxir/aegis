@@ -113,6 +113,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
     let pending = Arc::new(AtomicBool::new(false));
     let pending_tx = Arc::clone(&pending);
     let web_dir = cfg.data_dir.join("webview");
+    crate::engine::update::cleanup(&cfg.data_dir);
     std::fs::create_dir_all(&web_dir).map_err(|e| format!("data directory: {e}"))?;
 
     let engine = Engine::new(cfg, move || {
@@ -165,6 +166,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
             if poll_engine.idle_expired() {
                 poll_ctl.lock();
             }
+            poll_engine.update_tick();
             // While cover traffic runs, its slots decide when to poll and when to send a dummy.
             let active = poll_engine.cover_active();
             poll_engine.gate.set_on(active.is_some_and(|l| l > 0));
@@ -301,6 +303,9 @@ pub fn run(cfg: Config) -> Result<(), String> {
                 tray.clear();
                 if let Some(s) = flush_engine.detach() {
                     flush_engine.persist(s);
+                }
+                if flush_engine.update_ready() {
+                    let _ = flush_engine.install_update(false);
                 }
                 let _ = jobs_tx.send(Job::Stop);
                 *flow = ControlFlow::Exit;

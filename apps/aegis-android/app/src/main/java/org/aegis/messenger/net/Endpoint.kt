@@ -31,6 +31,13 @@ class Endpoint private constructor(val https: Boolean, val host: String, val por
 
         fun isPlainHttpHost(h: String): Boolean = h in PLAIN_HOSTS || h.endsWith(".onion")
 
+        /** Whether [endpoint] is the clearnet entry of the default server (behind Cloudflare) or a name below it. */
+        fun isClearnetEntry(endpoint: String): Boolean {
+            val base = parse(DEFAULT).host
+            val host = try { parse(endpoint).host } catch (_: AegisException) { return false }
+            return host == base || host.endsWith(".$base")
+        }
+
         fun parse(input: String): Endpoint {
             val s = input.trim().lowercase()
             val https = when {
@@ -81,11 +88,13 @@ class Route(val endpoint: String, val proxy: String, val viaTor: Boolean) {
         /**
          * With Tor on the default server is reached at its onion address through the embedded Tor and a custom
          * server goes through it too. With Tor off the onion address maps back to the default clearnet endpoint.
-         * Nothing is ever rerouted to a different transport than the switch says.
+         * Nothing is ever rerouted to a different transport than the switch says, and with Tor on any other name
+         * under the clearnet domain is refused.
          */
         fun plan(tor: Boolean, endpoint: String, proxy: String): Route {
             val origin = Endpoint.parse(endpoint).origin
             val isDefault = origin == Endpoint.DEFAULT || origin == Endpoint.ONION
+            if (tor && !isDefault && Endpoint.isClearnetEntry(origin)) throw AegisException.Network("clearnet entry")
             return if (tor) Route(if (isDefault) Endpoint.ONION else origin, "", true)
             else Route(if (isDefault) Endpoint.DEFAULT else origin, proxy, false)
         }

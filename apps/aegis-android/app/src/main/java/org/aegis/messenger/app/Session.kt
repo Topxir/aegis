@@ -67,6 +67,7 @@ import org.aegis.messenger.net.DirEntry
 import org.aegis.messenger.net.DirectTransport
 import org.aegis.messenger.net.Endpoint
 import org.aegis.messenger.net.Response
+import org.aegis.messenger.net.Route
 import org.aegis.messenger.net.Transport
 import org.aegis.messenger.core.SlotGate
 import org.aegis.messenger.net.ProxyAddr
@@ -1970,6 +1971,7 @@ class Session(private val ctx: Context) {
 
     fun saveSettings(s: Settings, done: (Int?) -> Unit) {
         try { Endpoint.parse(s.endpoint) } catch (e: AegisException) { return done(R.string.err_endpoint_invalid) }
+        try { Route.plan(Tor.enabled, s.endpoint, "") } catch (e: AegisException.Network) { return done(R.string.err_clearnet_tor) }
         if (s.proxy.isNotBlank()) try { ProxyAddr.parse(s.proxy) } catch (e: AegisException) { return done(R.string.err_proxy_invalid) }
         val title = Text.sanitizeDisplay(s.displayName)
         val clean = s.copy(

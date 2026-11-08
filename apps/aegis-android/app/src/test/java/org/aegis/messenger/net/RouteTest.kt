@@ -47,6 +47,35 @@ class RouteTest {
     }
 
     @Test
+    fun torOnNeverReachesTheClearnetEntry() {
+        val seen = ArrayList<String>()
+        val record = object : Transport {
+            override fun request(ep: Endpoint, method: String, pathQuery: String, body: ByteArray?, contentType: String?): Response {
+                seen.add(ep.host)
+                return Response(404, ByteArray(0))
+            }
+        }
+        for (e in listOf(Endpoint.DEFAULT, "https://freeoasis.space:443", Endpoint.ONION)) {
+            val c = Client(Endpoint.parse(Route.plan(true, e, "127.0.0.1:9050").endpoint), record)
+            assertNull(c.updateManifest())
+            assertNull(c.lookup("alice"))
+        }
+        assertTrue(seen.isNotEmpty())
+        assertTrue(seen.all { it.endsWith(".onion") })
+        for (e in listOf("https://www.freeoasis.space", "https://api.FreeOasis.space:8443")) {
+            assertTrue(Endpoint.isClearnetEntry(e))
+            try {
+                Route.plan(true, e, "")
+                fail(e)
+            } catch (_: AegisException.Network) {
+            }
+            assertFalse(Route.plan(false, e, "").viaTor)
+        }
+        assertFalse(Endpoint.isClearnetEntry("https://notfreeoasis.space"))
+        assertFalse(Endpoint.isClearnetEntry(Endpoint.ONION))
+    }
+
+    @Test
     fun theOnionParsesAsPlainHttpOnTheDefaultPort() {
         val ep = Endpoint.parse(Endpoint.ONION)
         assertTrue(ep.isOnion)

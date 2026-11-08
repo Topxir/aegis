@@ -10,6 +10,7 @@ import org.aegis.messenger.core.Pow
 import org.aegis.messenger.core.Prekeys
 import org.aegis.messenger.core.Registration
 import org.aegis.messenger.core.Text
+import org.aegis.messenger.core.Update
 import org.aegis.messenger.core.X3dh
 
 class DirEntry(val u: String, val title: String, val x: ByteArray, val ed: ByteArray)
@@ -218,6 +219,26 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
         val r = transport.request(ep, "GET", "/api/v2/blob/get?id=" + Hex.encode(id), null, null)
         if (r.code == 404) return null
         if (r.code != 200) throw AegisException.Http(r.code)
+        return r.body
+    }
+
+    /** The signed update manifest (spec section 29), or null when none is published. */
+    fun updateManifest(): ByteArray? {
+        val r = transport.request(ep, "GET", "/api/v2/update/manifest", null, null)
+        return when {
+            r.code == 404 -> null
+            r.code != 200 -> throw AegisException.Http(r.code)
+            r.body.isEmpty() || r.body.size > Update.MAX_MANIFEST -> throw AegisException.BadResponse()
+            else -> r.body
+        }
+    }
+
+    /** Up to one chunk of a published update file, starting at byte [off]. */
+    fun updateChunk(name: String, off: Long): ByteArray {
+        if (!Update.validName(name)) throw AegisException.Update("file name")
+        val r = transport.request(ep, "GET", "/api/v2/update/file?name=$name&off=$off", null, null)
+        if (r.code != 200) throw AegisException.Http(r.code)
+        if (r.body.isEmpty() || r.body.size > Update.CHUNK) throw AegisException.BadResponse()
         return r.body
     }
 }

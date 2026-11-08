@@ -2,7 +2,9 @@
 //! WebView2 front end that is served from memory.
 
 pub mod assets;
+pub mod bridges;
 pub mod config;
+pub mod connection;
 pub mod controller;
 pub mod engine;
 pub mod guide;

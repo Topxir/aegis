@@ -4,3 +4,5 @@
 -dontwarn kotlin.**
 -keep class org.torproject.jni.** { *; }
 -keep class net.freehaven.tor.control.** { *; }
+-keep class go.** { *; }
+-keep class IPtProxy.** { *; }

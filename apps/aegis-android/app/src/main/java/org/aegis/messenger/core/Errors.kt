@@ -26,4 +26,5 @@ sealed class AegisException(message: String) : Exception(message) {
     class NeedsUpdate : AegisException("contact has no prekeys")
     class ServerKeyChanged : AegisException("server key changed")
     class Network(what: String) : AegisException("network: $what")
+    class Update(val why: String) : AegisException("update: $why")
 }

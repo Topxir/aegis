@@ -162,5 +162,6 @@ class AegisApp : Application() {
         Tor.init(this, Boot.tor(this))
         session = Session(this)
         Notifier.ensureChannels(this)
+        Updater.init(this) { session.data?.settings }
     }
 }

@@ -20,6 +20,12 @@ pub enum Status {
 
 type Notify = Arc<dyn Fn(Status) + Send + Sync>;
 
+/// Pluggable transport binary, relative to the directory of `tor.exe` (Tor starts it from there).
+#[cfg(windows)]
+pub const LYREBIRD_PATH: &str = r"pluggable_transports\lyrebird.exe";
+#[cfg(not(windows))]
+pub const LYREBIRD_PATH: &str = "pluggable_transports/lyrebird";
+
 /// Handle to the Tor child process. Starting is lazy and happens at most once.
 #[derive(Debug, Default)]
 pub struct Tor {
@@ -27,9 +33,32 @@ pub struct Tor {
     started: Mutex<bool>,
     stop: Arc<AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
+    /// torrc text (bridges), read at every start.
+    torrc: Arc<Mutex<String>>,
+    /// Set when the config changed and the running process was stopped on purpose.
+    restart: Arc<AtomicBool>,
 }
 
 impl Tor {
+    /// Sets the torrc for the next start. A running Tor with a different config is restarted.
+    pub fn configure(&self, torrc: String) {
+        {
+            let mut cur = self.torrc.lock().unwrap_or_else(|e| e.into_inner());
+            if *cur == torrc {
+                return;
+            }
+            *cur = torrc;
+        }
+        if !self.started() {
+            return;
+        }
+        self.port.store(0, Ordering::SeqCst);
+        self.restart.store(true, Ordering::SeqCst);
+        if let Some(c) = self.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            let _ = c.kill();
+        }
+    }
+
     /// The loopback SOCKS5 address once Tor has finished bootstrapping.
     pub fn socks_addr(&self) -> Option<String> {
         match self.port.load(Ordering::SeqCst) {
@@ -57,6 +86,8 @@ impl Tor {
             stop: Arc::clone(&self.stop),
             child: Arc::clone(&self.child),
             notify: Arc::clone(&notify),
+            torrc: Arc::clone(&self.torrc),
+            restart: Arc::clone(&self.restart),
         };
         let spawned = std::thread::Builder::new().name("tor".into()).spawn(move || job.run());
         if spawned.is_err() {
@@ -82,6 +113,8 @@ struct Job {
     stop: Arc<AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
     notify: Notify,
+    torrc: Arc<Mutex<String>>,
+    restart: Arc<AtomicBool>,
 }
 
 impl Job {
@@ -92,10 +125,17 @@ impl Job {
             if self.stop.load(Ordering::SeqCst) {
                 return;
             }
+            if self.restart.swap(false, Ordering::SeqCst) {
+                (self.notify)(Status::Starting(0));
+                continue;
+            }
             (self.notify)(Status::Failed(why));
             for _ in 0..30 {
                 if self.stop.load(Ordering::SeqCst) {
                     return;
+                }
+                if self.restart.swap(false, Ordering::SeqCst) {
+                    break;
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
@@ -108,7 +148,12 @@ impl Job {
         let exe = locate().ok_or("tor.exe not found")?;
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
         let torrc = self.dir.join("torrc");
-        std::fs::write(&torrc, "").map_err(|e| e.to_string())?;
+        let text = self.torrc.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let tor_dir = exe.parent().unwrap_or(Path::new("."));
+        if text.contains("ClientTransportPlugin") && !tor_dir.join(LYREBIRD_PATH).is_file() {
+            return Err("lyrebird.exe not found".into());
+        }
+        std::fs::write(&torrc, text).map_err(|e| e.to_string())?;
         let mut cmd = Command::new(&exe);
         cmd.args(["--SocksPort", "127.0.0.1:auto", "--ClientOnly", "1", "--AvoidDiskWrites", "1"])
             .args(["--Log", "notice stdout", "-f"])
@@ -116,7 +161,7 @@ impl Job {
             .args(["--__OwningControllerProcess", &std::process::id().to_string()])
             .arg("--DataDirectory")
             .arg(&self.dir)
-            .current_dir(exe.parent().unwrap_or(Path::new(".")))
+            .current_dir(tor_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -127,6 +172,11 @@ impl Job {
             return Err("no output".into());
         };
         *self.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        if self.restart.load(Ordering::SeqCst) {
+            if let Some(c) = self.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                let _ = c.kill();
+            }
+        }
         let mut socks = 0u16;
         for line in BufReader::new(out).lines() {
             let Ok(line) = line else { break };

@@ -121,6 +121,19 @@ pub struct Settings {
     /// The first-run tour was finished or skipped.
     #[serde(default)]
     pub guide_done: bool,
+    /// Tor bridges: "off", "snowflake", "obfs4" or "custom".
+    #[serde(default = "bridges_off")]
+    pub bridges: String,
+    /// Checked bridge lines for "custom", one per line.
+    #[serde(default)]
+    pub bridge_lines: String,
+    /// Install signed updates on their own.
+    #[serde(default = "yes")]
+    pub auto_update: bool,
+}
+
+fn bridges_off() -> String {
+    "off".to_owned()
 }
 
 fn yes() -> bool {
@@ -216,6 +229,9 @@ impl Settings {
             cover: 1,
             look: crate::look::Look::default(),
             guide_done: false,
+            bridges: bridges_off(),
+            bridge_lines: String::new(),
+            auto_update: true,
         }
     }
 }
