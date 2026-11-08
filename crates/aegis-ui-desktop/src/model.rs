@@ -109,6 +109,12 @@ pub struct Settings {
     /// Cover traffic: 0 off, 1 standard, 2 high.
     #[serde(default = "cover_std")]
     pub cover: u8,
+    /// Appearance, see look.rs.
+    #[serde(default, deserialize_with = "crate::look::lenient")]
+    pub look: crate::look::Look,
+    /// The first-run tour was finished or skipped.
+    #[serde(default)]
+    pub guide_done: bool,
 }
 
 fn yes() -> bool {
@@ -200,6 +206,8 @@ impl Settings {
             server_key_for: String::new(),
             tor: true,
             cover: 1,
+            look: crate::look::Look::default(),
+            guide_done: false,
         }
     }
 }

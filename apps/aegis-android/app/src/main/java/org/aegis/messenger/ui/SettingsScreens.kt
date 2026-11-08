@@ -43,8 +43,14 @@ private fun lockLabel(min: Int): String = when (min) {
 }
 
 @Composable
-fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: () -> Unit, onLanguage: () -> Unit) {
+fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: () -> Unit, onLanguage: () -> Unit, part: String = "") {
     val ctx = LocalContext.current
+    // One page of the settings hub, or every section when [part] is empty.
+    val all = part.isEmpty()
+    val acct = all || part == "account"
+    val net = all || part == "network"
+    val lock = all || part == "privacy"
+    val notify = all || part == "notifications"
     val s = d.settings
     var name by remember { mutableStateOf(s.displayName) }
     var endpoint by remember { mutableStateOf(s.endpoint) }
@@ -67,16 +73,16 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
     fun current() = Settings(endpoint, proxy, name, s.idleLockMin, s.backgroundLockMin, s.pollSeconds, s.notifications)
 
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
-        TopBar(stringResource(R.string.settings), onBack = onBack)
-        Divider()
+        TopBar(stringResource(SETTINGS_SECTIONS.firstOrNull { it.id == part }?.title ?: R.string.settings), onBack = onBack)
+        HeadLine()
         Column(Modifier.verticalScroll(rememberScrollState())) {
-            Section(stringResource(R.string.account)) {
+            if (acct) Section(stringResource(R.string.account)) {
                 Text("@" + d.username, style = MaterialTheme.typography.titleMedium, color = Ui.text)
                 if (!d.registered) Note(stringResource(R.string.not_registered), Ui.warning)
                 Field(name, { name = it; saved = false }, stringResource(R.string.field_display_name))
             }
-            Divider()
-            Section(stringResource(R.string.tor)) {
+            if (acct) Divider()
+            if (net) Section(stringResource(R.string.tor)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(stringResource(R.string.tor_connect), color = Ui.text, modifier = Modifier.weight(1f))
                     Switch(
@@ -93,8 +99,8 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 }
                 Note(stringResource(if (tor) R.string.tor_note_on else R.string.tor_note_off))
             }
-            Divider()
-            Section(stringResource(R.string.server)) {
+            if (net) Divider()
+            if (net) Section(stringResource(R.string.server)) {
                 Field(endpoint, { endpoint = it; saved = false; test = null }, stringResource(R.string.field_server), keyboard = androidx.compose.ui.text.input.KeyboardType.Uri)
                 if (!tor) Note(stringResource(R.string.server_cloudflare_note))
                 if (!tor) {
@@ -110,8 +116,8 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 }
                 test?.let { Note(stringResource(if (it) R.string.test_ok else R.string.test_fail), if (it) Ui.accent else Ui.danger) }
             }
-            Divider()
-            Section(stringResource(R.string.cover_traffic)) {
+            if (net) Divider()
+            if (net) Section(stringResource(R.string.cover_traffic)) {
                 val coverCtx = LocalContext.current
                 var cover by remember { mutableStateOf(Boot.coverMode(coverCtx)) }
                 Choices(
@@ -120,8 +126,9 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 ) { cover = it; Boot.setCoverMode(coverCtx, it); session.coverChanged() }
                 Note(stringResource(R.string.cover_note))
             }
-            Divider()
-            Section(stringResource(R.string.locking)) {
+            if (net) Divider()
+            if (part == "privacy") { PrivacySection(session); Divider() }
+            if (lock) Section(stringResource(R.string.locking)) {
                 Text(stringResource(R.string.lock_idle), color = Ui.text)
                 Choices(listOf(1, 5, 15, 60).map { it to lockLabel(it) }, s.idleLockMin) { save(current().withLocks(it, s.backgroundLockMin)) }
                 Text(stringResource(R.string.lock_background), color = Ui.text, modifier = Modifier.padding(top = 12.dp))
@@ -129,8 +136,8 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 Note(stringResource(R.string.lock_note))
                 Secondary(stringResource(R.string.lock_now)) { session.lock() }
             }
-            Divider()
-            Section(stringResource(R.string.notifications)) {
+            if (lock) Divider()
+            if (notify) Section(stringResource(R.string.notifications)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(stringResource(R.string.notifications_enable), color = Ui.text, modifier = Modifier.weight(1f))
                     Switch(
@@ -149,29 +156,29 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 }
                 Note(stringResource(R.string.background_check_note))
             }
-            Divider()
-            Section(stringResource(R.string.language)) {
+            if (notify) Divider()
+            if (all) Section(stringResource(R.string.language)) {
                 val cur = Boot.language(ctx)
                 Choices(
                     listOf("" to stringResource(R.string.lang_system), "en" to "English", "ru" to "Русский"),
                     cur,
                 ) { Boot.setLanguage(ctx, it); onLanguage() }
             }
-            Divider()
-            Section(stringResource(R.string.data)) {
+            if (all) Divider()
+            if (acct) Section(stringResource(R.string.data)) {
                 Secondary(stringResource(R.string.start_export)) { exporter.launch("aegis-" + d.username + ".vault") }
                 Note(stringResource(R.string.export_note))
                 Secondary(stringResource(R.string.wipe_chats), danger = true) { confirmWipe = true }
                 Secondary(stringResource(R.string.delete_account), danger = true) { confirmDelete = true }
                 info?.let { Note(stringResource(it), Ui.accent) }
             }
-            Divider()
+            if (acct) Divider()
             error?.let { Note(stringResource(it), Ui.danger) }
             if (saved) Note(stringResource(R.string.saved), Ui.accent)
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                Primary(stringResource(R.string.save)) { save(current()) }
-                Secondary(stringResource(R.string.about)) { onAbout() }
-                Note(stringResource(R.string.version_line, BuildConfig.VERSION_NAME))
+                if (acct || net) Primary(stringResource(R.string.save)) { save(current()) }
+                if (all) Secondary(stringResource(R.string.about)) { onAbout() }
+                if (all) Note(stringResource(R.string.version_line, BuildConfig.VERSION_NAME))
             }
         }
     }
@@ -189,7 +196,7 @@ private fun Settings.withLocks(idle: Int, bg: Int) = Settings(endpoint, proxy, d
 private fun Settings.withNotify(on: Boolean) = Settings(endpoint, proxy, displayName, idleLockMin, backgroundLockMin, pollSeconds, on)
 
 @Composable
-fun AboutScreen(onBack: () -> Unit) {
+fun AboutScreen(onBack: () -> Unit, onGuide: (() -> Unit)? = null) {
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         TopBar(stringResource(R.string.about), onBack = onBack)
         Divider()
@@ -202,6 +209,7 @@ fun AboutScreen(onBack: () -> Unit) {
             ).forEach { Text("• " + stringResource(it), style = MaterialTheme.typography.bodyMedium, color = Ui.text) }
             Text(stringResource(R.string.about_privacy), style = MaterialTheme.typography.bodyMedium, color = Ui.muted)
             Text(stringResource(R.string.about_font_license), style = MaterialTheme.typography.bodySmall, color = Ui.muted)
+            if (onGuide != null) Secondary(stringResource(R.string.guide_show), onClick = onGuide)
         }
     }
 }

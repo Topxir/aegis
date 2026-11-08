@@ -91,10 +91,10 @@ import java.text.DateFormat
 import java.util.Calendar
 import java.util.Date
 
-private enum class Kind { Dm, Group, Channel }
+internal enum class Kind { Dm, Group, Channel }
 private enum class Tab { All, Groups, Channels }
 
-private class Row_(
+internal class Row_(
     val key: String,
     val title: String,
     val seed: ByteArray,
@@ -106,7 +106,7 @@ private class Row_(
     val official: Boolean,
 )
 
-private fun rows(d: VaultData): List<Row_> {
+internal fun rows(d: VaultData): List<Row_> {
     val dms = d.contacts.map {
         val k = dmKey(it.username)
         val c = d.chat(k)
@@ -227,7 +227,7 @@ fun ChatListScreen(
                     }
                 } else {
                     Row(Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        BarIcon(AegisIcons.Menu, stringResource(R.string.menu)) { scope.launch { drawer.open() } }
+                        Box(Modifier.guideTarget("menu")) { BarIcon(AegisIcons.Menu, stringResource(R.string.menu)) { scope.launch { drawer.open() } } }
                         if (searching) {
                             ImeText(
                                 query, { query = it }, stringResource(R.string.search_hint),
@@ -242,15 +242,19 @@ fun ChatListScreen(
                             BarIcon(AegisIcons.Close, stringResource(R.string.cancel)) { searching = false; query = "" }
                         } else {
                             Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge, color = Ui.text, modifier = Modifier.weight(1f).padding(start = 8.dp))
-                            BarIcon(AegisIcons.Search, stringResource(R.string.search)) { searching = true }
+                            Box(Modifier.guideTarget("search")) { BarIcon(AegisIcons.Search, stringResource(R.string.search)) { searching = true } }
                         }
                     }
                 }
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                StatusStrip(session, d, remember { org.aegis.messenger.app.Boot.tor(ctx) }, onRoute)
                 FolderTabs(tab, { tab = it }, anim, unreadOf(Tab.All), unreadOf(Tab.Groups), unreadOf(Tab.Channels))
                 if (session.busy) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp), color = Ui.accent, trackColor = Ui.border)
-                LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(bottom = 96.dp)) {
+                val listState = rememberLazyListState()
+                val tilt = depthOn()
+                LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, contentPadding = PaddingValues(bottom = 96.dp)) {
                     items(shown, key = { it.key }) { r ->
-                        ChatRow(r, r.key in selected, selected.isNotEmpty(),
+                        ChatRow(r, r.key in selected, selected.isNotEmpty(), if (tilt) Modifier.depth(listState, r.key) else Modifier,
                             onClick = { if (selected.isNotEmpty()) { if (r.key in selected) selected.remove(r.key) else selected.add(r.key) } else onOpen(r.key) },
                             onLong = { if (!r.official || selected.isNotEmpty()) { if (r.key in selected) selected.remove(r.key) else selected.add(r.key) } else selected.add(r.key) })
                     }
@@ -300,15 +304,13 @@ fun ChatListScreen(
 @Composable
 private fun DrawerHeader(d: VaultData) {
     val ed = remember(d.edSk.toList()) { Crypto.ed25519Public(d.edSk) }
-    Box(Modifier.fillMaxWidth().height(172.dp).background(Ui.surface2)) {
-        ParticlesLayer(d.profile.particles, Modifier.fillMaxSize())
-        Column(Modifier.align(Alignment.BottomStart).padding(20.dp)) {
-            AvatarView(ed, 64)
-            Spacer(Modifier.height(10.dp))
-            Text(d.profile.name.ifBlank { d.settings.displayName }.ifBlank { "@" + d.username }, style = MaterialTheme.typography.titleMedium, color = Ui.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("@" + d.username, style = MaterialTheme.typography.bodySmall.copy(fontFamily = GeistMono), color = Ui.muted)
-        }
+    Column(Modifier.fillMaxWidth().statusBarsPadding().padding(20.dp)) {
+        AvatarView(ed, 64)
+        Spacer(Modifier.height(10.dp))
+        Text(d.profile.name.ifBlank { d.settings.displayName }.ifBlank { "@" + d.username }, style = MaterialTheme.typography.titleMedium, color = Ui.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text("@" + d.username, style = MaterialTheme.typography.bodySmall.copy(fontFamily = GeistMono), color = Ui.muted)
     }
+    HeadLine()
     Spacer(Modifier.height(8.dp))
 }
 
@@ -353,7 +355,7 @@ private fun FolderTabs(tab: Tab, onTab: (Tab) -> Unit, anim: Boolean, a: Int, g:
                 }
             }
             Box(Modifier.fillMaxWidth().height(2.dp)) {
-                Box(Modifier.offset(x = w * pos).width(w).height(2.dp).padding(horizontal = 24.dp).background(Ui.text))
+                Box(Modifier.offset(x = w * pos).width(w).height(2.dp).padding(horizontal = 24.dp).background(Ui.lightGradient))
             }
             Divider()
         }
@@ -362,15 +364,16 @@ private fun FolderTabs(tab: Tab, onTab: (Tab) -> Unit, anim: Boolean, a: Int, g:
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatRow(r: Row_, selected: Boolean, selecting: Boolean, onClick: () -> Unit, onLong: () -> Unit) {
+private fun ChatRow(r: Row_, selected: Boolean, selecting: Boolean, modifier: Modifier, onClick: () -> Unit, onLong: () -> Unit) {
+    val compact = Ui.look.compact
     Row(
-        Modifier.fillMaxWidth().height(72.dp).background(if (selected) Ui.surface2 else Color.Transparent)
+        modifier.fillMaxWidth().height(if (compact) 60.dp else 72.dp).background(if (selected) Ui.surface2 else Color.Transparent)
             .combinedClickable(onClick = onClick, onLongClick = onLong).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Box {
-            AvatarView(r.seed, 52)
+            AvatarView(r.seed, if (compact) 44 else 52)
             if (selected) Box(Modifier.align(Alignment.BottomEnd).size(20.dp).clip(CircleShape).background(Ui.accent), contentAlignment = Alignment.Center) {
                 Icon(AegisIcons.Check, null, tint = Ui.onAccent, modifier = Modifier.size(14.dp))
             }
@@ -389,7 +392,7 @@ private fun ChatRow(r: Row_, selected: Boolean, selecting: Boolean, onClick: () 
                 if (r.pinned && r.unread == 0) Icon(AegisIcons.Pin, null, tint = Ui.muted, modifier = Modifier.size(14.dp))
                 if (r.unread > 0) {
                     Spacer(Modifier.width(8.dp))
-                    Box(Modifier.clip(CircleShape).background(if (r.muted) Ui.border else Color(0xFFD6D6DA)).defaultMinSize(minWidth = 20.dp).padding(horizontal = 6.dp, vertical = 1.dp), contentAlignment = Alignment.Center) {
+                    Box(Modifier.clip(CircleShape).background(if (r.muted) Ui.border else Ui.accent).defaultMinSize(minWidth = 20.dp).padding(horizontal = 6.dp, vertical = 1.dp), contentAlignment = Alignment.Center) {
                         Text(r.unread.toString(), style = MaterialTheme.typography.labelMedium, color = if (r.muted) Ui.muted else Ui.onAccent)
                     }
                 }
@@ -400,14 +403,12 @@ private fun ChatRow(r: Row_, selected: Boolean, selecting: Boolean, onClick: () 
 
 // ---- chat screen ----------------------------------------------------------
 
-private val OutBubble = Color(0xFF2E2F35)
-private val InBubble = Color(0xFF18181B)
-private val Big = 16.dp
-private val Small = 4.dp
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(session: Session, d: VaultData, key: String, onBack: () -> Unit, onInfo: () -> Unit) {
+fun ChatScreen(
+    session: Session, d: VaultData, key: String, onBack: () -> Unit,
+    strip: (@Composable () -> Unit)? = null, onInfo: () -> Unit,
+) {
     val kind = when { key.startsWith("g:") -> Kind.Group; key.startsWith("c:") -> Kind.Channel; else -> Kind.Dm }
     val contact = if (kind == Kind.Dm) d.contact(key.removePrefix("dm:")) else null
     val group = if (kind == Kind.Group) d.group(key.removePrefix("g:")) else null
@@ -461,13 +462,16 @@ fun ChatScreen(session: Session, d: VaultData, key: String, onBack: () -> Unit, 
                 }
             }
         }
+        HeadLine()
+        strip?.invoke()
         if (blocked) {
             Banner(stringResource(R.string.key_changed_banner, contact!!.username), Ui.warning) {
                 Link(stringResource(R.string.key_changed_review), onInfo)
             }
         }
         if (session.busy) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp), color = Ui.accent, trackColor = Ui.border)
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = state, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
+        val tilt = depthOn()
+        LazyColumn(Modifier.weight(1f).fillMaxWidth().wallpaper(), state = state, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
             items(chat.messages.size, key = { chat.messages[it].id }) { i ->
                 val m = chat.messages[i]
                 val prev = chat.messages.getOrNull(i - 1)
@@ -477,9 +481,9 @@ fun ChatScreen(session: Session, d: VaultData, key: String, onBack: () -> Unit, 
                 val last = next == null || next.sender != m.sender || next.outgoing != m.outgoing || dayOf(next.tsMs) != dayOf(m.tsMs)
                 if (newDay) DatePill(m.tsMs)
                 Spacer(Modifier.height(if (first) 8.dp else 2.dp))
-                if (kind == Kind.Channel) {
+                if (kind == Kind.Channel) Box(if (tilt) Modifier.depth(state, m.id) else Modifier) {
                     PostCard(session, m, anim, seen, { viewer = it })
-                } else {
+                } else Box(if (tilt) Modifier.depth(state, m.id) else Modifier) {
                     val senderSeed = d.contact(m.sender)?.ed ?: seedOf("u:" + m.sender)
                     Bubble(session, m, first, last, kind == Kind.Group, senderSeed, anim, seen, { viewer = it }) { if (m.status == Status.FAILED) session.retry(key, m.id) }
                 }
@@ -572,12 +576,9 @@ private fun Bubble(
     animate: Boolean, seen: MutableSet<String>, onMedia: (Media) -> Unit, onFailedClick: () -> Unit,
 ) {
     val out = m.outgoing
-    val shape = RoundedCornerShape(
-        Big, Big,
-        if (out && last) Small else Big,
-        if (!out && last) Small else Big,
-    )
-    val sub = Ui.muted
+    val shape = bubbleShape(out, last)
+    val ink = bubbleInk(out)
+    val sub = bubbleSub(out)
     val showAvatar = group && !out
     Row(
         Modifier.fillMaxWidth().then(enterAnim(m, animate, seen)),
@@ -590,7 +591,7 @@ private fun Bubble(
         }
         val media = m.media
         Column(
-            Modifier.widthIn(max = 300.dp).clip(shape).background(if (out) OutBubble else InBubble)
+            Modifier.widthIn(max = 300.dp).clip(shape).background(bubbleFill(out)).bubbleEdge(out, shape)
                 .clickable(enabled = m.status == Status.FAILED, onClick = onFailedClick),
         ) {
             if (group && !out && first) {
@@ -599,12 +600,12 @@ private fun Bubble(
             if (media != null) {
                 MediaBody(session, m, media, onMedia, m.body.isNotEmpty())
                 if (m.body.isNotEmpty()) {
-                    Text(m.body, style = MaterialTheme.typography.bodyLarge, color = Ui.text, modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp))
+                    Text(m.body, style = MaterialTheme.typography.bodyLarge, color = ink, modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp))
                     TimeAndStatus(m, sub, Modifier.align(Alignment.End).padding(end = 10.dp, bottom = 5.dp))
                 }
             } else {
                 Column(Modifier.padding(start = 12.dp, end = 10.dp, top = 6.dp, bottom = 5.dp)) {
-                    Text(m.body, style = MaterialTheme.typography.bodyLarge, color = Ui.text)
+                    Text(m.body, style = MaterialTheme.typography.bodyLarge, color = ink)
                     TimeAndStatus(m, sub, Modifier.align(Alignment.End))
                 }
             }
@@ -615,7 +616,7 @@ private fun Bubble(
 @Composable
 private fun PostCard(session: Session, m: Message, animate: Boolean, seen: MutableSet<String>, onMedia: (Media) -> Unit) {
     val media = m.media
-    Column(Modifier.fillMaxWidth().then(enterAnim(m, animate, seen)).clip(RoundedCornerShape(Big)).background(InBubble)) {
+    Column(Modifier.fillMaxWidth().then(enterAnim(m, animate, seen)).clip(RoundedCornerShape(cardRadius())).background(InBubbleColor)) {
         if (media != null) MediaBody(session, m, media, onMedia, m.body.isNotEmpty())
         if (media == null || m.body.isNotEmpty()) {
             Column(Modifier.padding(start = 14.dp, end = 12.dp, top = 10.dp, bottom = 7.dp)) {
