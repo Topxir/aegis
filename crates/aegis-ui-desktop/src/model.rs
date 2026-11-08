@@ -109,6 +109,9 @@ pub struct Settings {
     /// Cover traffic: 0 off, 1 standard, 2 high.
     #[serde(default = "cover_std")]
     pub cover: u8,
+    /// Directory lookups of this name answer "not found" (spec section 29.4).
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 fn yes() -> bool {
@@ -200,6 +203,7 @@ impl Settings {
             server_key_for: String::new(),
             tor: true,
             cover: 1,
+            hidden: false,
         }
     }
 }
@@ -413,6 +417,20 @@ pub struct Pending {
     pub frames: Vec<String>,
 }
 
+/// An invite this user made and nobody has used yet (spec section 29).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OpenInvite {
+    #[serde(with = "hex32_secret")]
+    pub secret: Zeroizing<[u8; 32]>,
+    pub exp_s: u64,
+}
+
+impl core::fmt::Debug for OpenInvite {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OpenInvite").field("exp_s", &self.exp_s).finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Data {
     pub schema: u32,
@@ -459,6 +477,8 @@ pub struct Data {
     /// the slot without asking for the PIN. Empty when no PIN is set (or it predates this).
     #[serde(default)]
     pub pin_verifier: String,
+    #[serde(default)]
+    pub invites: Vec<OpenInvite>,
 }
 
 impl core::fmt::Debug for Data {

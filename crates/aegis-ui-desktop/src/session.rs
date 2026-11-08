@@ -25,6 +25,9 @@ use aegis_core::x3dh::Bundle;
 use aegis_core::{hex, pad, Error};
 use zeroize::Zeroizing;
 
+mod invites;
+pub use invites::Pinned;
+
 pub const TTL_CHOICES: [u64; 4] = [0, 3600, 86_400, 604_800];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,6 +379,7 @@ impl Session {
             deferred: Vec::new(),
             skeys: BTreeMap::new(),
             pin_verifier: String::new(),
+            invites: Vec::new(),
         };
         Self::new(data, password)
     }
@@ -434,6 +438,7 @@ impl Session {
             chat.msgs.retain(|m| !m.expired(now_ms));
             changed |= chat.msgs.len() != before;
         }
+        changed |= self.purge_invites(now_ms / 1000);
         self.dirty |= changed;
         changed
     }

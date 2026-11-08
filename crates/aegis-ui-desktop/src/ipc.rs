@@ -84,6 +84,14 @@ pub enum Cmd {
     AddContact {
         username: String,
     },
+    CreateInvite {},
+    RedeemInvite {
+        #[serde(deserialize_with = "secret")]
+        link: Zeroizing<String>,
+    },
+    SaveHidden {
+        hidden: bool,
+    },
     Send {
         text: String,
     },
@@ -241,10 +249,15 @@ mod tests {
             r#"{"cmd":"save_privacy","args":{"idle_min":"5","protect":true}}"#,
             r#"{"cmd":"save_notify","args":{"on":true,"name":false}}"#,
             r#"{"cmd":"save_profile","args":{"display":"d","about":"a","particles":"snow"}}"#,
+            r#"{"cmd":"create_invite","args":{}}"#,
+            r#"{"cmd":"redeem_invite","args":{"link":"aegis://invite/00"}}"#,
+            r#"{"cmd":"save_hidden","args":{"hidden":true}}"#,
         ] {
             assert!(parse(o, c).is_ok(), "{c}");
         }
         assert!(parse(o, r#"{"cmd":"save_profile","args":{"display":"d"}}"#).is_err());
+        assert!(parse(o, r#"{"cmd":"redeem_invite","args":{}}"#).is_err());
+        assert!(parse(o, r#"{"cmd":"save_hidden","args":{"hidden":"1"}}"#).is_err());
     }
 
     #[test]

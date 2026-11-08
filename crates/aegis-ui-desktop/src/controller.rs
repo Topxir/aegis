@@ -184,6 +184,21 @@ impl Controller {
                     self.job(Job::AddContact(username));
                 }
             }
+            Cmd::CreateInvite {} => {
+                if !self.is_busy() {
+                    self.job(Job::CreateInvite);
+                }
+            }
+            Cmd::RedeemInvite { link } => {
+                if !self.is_busy() {
+                    self.job(Job::RedeemInvite(link));
+                }
+            }
+            Cmd::SaveHidden { hidden } => {
+                if !self.is_busy() {
+                    self.job(Job::SetHidden(hidden));
+                }
+            }
             Cmd::Send { text } => {
                 if let Some(chat) = self.current_chat() {
                     self.job(Job::Send { chat, text });

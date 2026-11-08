@@ -155,7 +155,7 @@ An all-zero `dh1` or `dh2` is rejected.
 The recipient decrypts `c1` to get `S.x_pk`, then `c2`. The sender is authenticated by `dh2`,
 and the server cannot see who sent the frame. The recipient then checks that
 `S.x_pk` and `sender_ed` match the pinned contact for `sender`; only an unknown sender is
-looked up in the directory (and then pinned).
+looked up in the directory (and then pinned). `iacc` (section 29.3) is never looked up.
 On mismatch the message is dropped and the contact is flagged as "key changed".
 
 Each client also keeps its own copy of what it sent; nothing is sent to self.
@@ -174,7 +174,8 @@ frame    = 0x02 || nonce(12, random) || AEAD(k, nonce, aad = 0x02, envelope || s
 ```
 
 Receivers verify `sig` against `sender_ed`, which must match the pinned key for `sender`
-(unknown members are looked up once and pinned), and require `group_id` in the envelope to
+(a message from a member who is not a contact is dropped; clients never look group members up
+in the directory, since that would show the server who is in the group), and require `group_id` in the envelope to
 equal the id of the group whose queue delivered the frame. Group members are not anonymous to each other.
 
 Frame type 0x02 is the original group format. Clients send group messages as frame type 0x05
@@ -920,6 +921,11 @@ whose plaintext is not exactly the format above, is refused) and pins `u`, `x_pk
 contact without asking the directory. It fetches prekeys with `ed` set (section 27.1), so this
 works for a hidden inviter too.
 
+A bundle never replaces a pinned contact: if `u` is already a contact with other keys, or the
+keys belong to another contact, the bundle is refused. A client refuses its own link before
+calling `redeem`, so it does not burn the invite. An `iacc` that cannot be posted is kept and
+retried; the secret itself is not needed again.
+
 ### 29.3 Accepting
 
 The redeemer then sends the inviter an envelope of type `iacc` (frame `0x01`, section 6) with
@@ -941,7 +947,8 @@ where `u_r`, `x_r`, `ed_r` are the redeemer's username and keys (`x_r` is the se
 by the seal, `ed_r` is `sender_ed`). The inviter keeps its open secrets locally until they
 expire or are used. An `iacc` from an unknown sender is accepted only if the tag matches one of
 those secrets and the signature checks; the inviter then pins the sender without a directory
-lookup and forgets that secret. Any other `iacc` is dropped. Display name and avatar follow in
+lookup and forgets that secret. Any other `iacc` is dropped, as is one whose keys already
+belong to a contact. Frames the sender posted before its `iacc` arrived are then opened. Display name and avatar follow in
 the usual `prof` envelope.
 
 ### 29.4 Hidden profile
@@ -965,3 +972,8 @@ The server has no route that lists group members or answers whether a user is in
 Groups are only queues derived from `G` (section 7); membership is known only to members,
 carried inside `ginv` and `skey` envelopes. A non-member cannot even name the group's queue
 without `G`.
+
+Clients do not leak it either: a group frame from a member who is not a contact is dropped
+instead of looking the sender up, and a frame of type `0x03` from an unknown key waits as a
+request without any directory call (audit item wire-r2-4). A directory lookup only ever names
+a user the person typed in.

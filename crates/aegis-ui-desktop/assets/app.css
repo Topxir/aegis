@@ -397,3 +397,4 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; m
 }
 .auth.played .rise { animation: none; }
 .auth.played .hero h1 { animation: sheen 9s ease-in-out infinite; }
+.qr { display: block; width: 220px; height: 220px; border-radius: 8px; }

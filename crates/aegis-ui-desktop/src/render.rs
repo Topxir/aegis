@@ -10,6 +10,8 @@ use aegis_core::official;
 use aegis_core::text::sanitize_display_text;
 use serde_json::{json, Value};
 
+mod invite;
+
 /// Escapes text for use in element content and in quoted attribute values.
 pub fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 8);
@@ -1598,7 +1600,7 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
             )
         }
         "privacy" => format!(
-            r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}</section>{}"#,
+            r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}</section>{}{}"#,
             esc(tr(l, "acct.privacy")),
             field(
                 l,
@@ -1613,6 +1615,7 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
             check("protect", tr(l, "priv.protect"), st.protect, false),
             esc(tr(l, "priv.protect_note")),
             save_row(l, "save_privacy"),
+            invite::hidden_card(st, l),
             pin_card(app, l)
         ),
         "notifications" => format!(
@@ -1691,7 +1694,7 @@ pub fn page(app: &App) -> String {
     match &app.route {
         Route::Chat(_) => String::new(),
         Route::Welcome => page_welcome(l),
-        Route::NewChat => page_new_chat(l),
+        Route::NewChat => page_new_chat(l) + &invite::cards(app, l),
         Route::NewGroup => page_new_group(l, s),
         Route::NewChannel => page_new_channel(l, s),
         Route::ChannelInfo(c) => page_channel_info(l, s, c),
