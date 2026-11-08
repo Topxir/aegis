@@ -222,6 +222,7 @@ pub fn generate() -> Result<Value> {
         "session": session_vectors(&dm)?,
         "senderkey": senderkey_vectors(&dm, &g)?,
         "sealed_transport": sealed_vectors()?,
+        "update": update_vectors(),
     }))
 }
 
@@ -368,6 +369,32 @@ fn profile_vectors(dm: &Envelope) -> Result<Value> {
 }
 
 /// Argon2 cost is reduced here so that tests stay fast; real clients use 19456/2/1.
+fn update_vectors() -> Value {
+    use crate::update::{self, Artifact};
+    let sk = seq(0xc0);
+    let (exe, apk) = (b"aegis desktop build".as_slice(), b"aegis android build".as_slice());
+    let art = |name: &str, data: &[u8], version: &str, min: &str, code: u64| Artifact {
+        name: name.into(),
+        size: data.len() as u64,
+        sha256: sha256(&[data]),
+        version: version.into(),
+        min: min.into(),
+        code,
+    };
+    let mut files = std::collections::BTreeMap::new();
+    files.insert(update::WINDOWS.to_owned(), art("aegis-desktop.exe", exe, "0.2.0", "0.1.0", 0));
+    files.insert(update::ANDROID.to_owned(), art("aegis-messenger-release.apk", apk, "0.3.0-alpha", "0.2.0", 3));
+    let body = update::manifest_json(7, "0.3.0", &files);
+    json!({
+        "sk": h(&sk),
+        "pk": h(&update::public_key(&sk)),
+        "manifest_text": body,
+        "signed": h(&update::sign(&sk, body.as_bytes())),
+        "windows_file_text": "aegis desktop build",
+        "android_file_text": "aegis android build",
+    })
+}
+
 fn pin_vectors() -> Result<Value> {
     let params = PinParams { m_kib: 64, t: 1, p: 1 };
     let (salt, slot, s_secret, nonce) = (seq(0x10), seq(0x30), seq(0x50), seq(0x70));

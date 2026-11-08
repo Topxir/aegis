@@ -221,3 +221,22 @@ fn a16(v: &serde_json::Value, k: &str) -> [u8; 16] {
 fn s_<'a>(v: &'a serde_json::Value, k: &str) -> &'a str {
     v[k].as_str().unwrap()
 }
+
+#[test]
+fn update_vector_verifies() {
+    use aegis_core::update::{self, Offer};
+    let v = load();
+    let u = &v["update"];
+    let pk = a32(u, "pk");
+    let signed = hex::decode(s_(u, "signed")).unwrap();
+    assert_eq!(&signed[64..], s_(u, "manifest_text").as_bytes());
+    let m = update::open(&signed, &pk).unwrap();
+    assert_eq!(m.seq, 7);
+    let w = &m.files[update::WINDOWS];
+    assert_eq!(w.sha256, aegis_core::sha256(&[s_(u, "windows_file_text").as_bytes()]));
+    assert!(matches!(update::evaluate(&m, update::ANDROID, "0.2.0", 2, 7), Ok(Offer::Newer { required: false, .. })));
+    let mut bad = signed.clone();
+    let last = bad.len() - 2;
+    bad[last] ^= 1;
+    assert!(update::open(&bad, &pk).is_err());
+}
