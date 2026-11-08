@@ -3,12 +3,12 @@ package org.aegis.messenger.core
 enum class Kind(val wire: String) {
     Dm("dm"), Ginv("ginv"), Gmsg("gmsg"), Dmf("dmf"), Gmf("gmf"),
     Cinv("cinv"), Cmsg("cmsg"), Cmf("cmf"), Prof("prof"), Skey("skey"),
-    Ttl("ttl"), Gttl("gttl");
+    Ttl("ttl"), Gttl("gttl"), Iacc("iacc");
 
     /** Frame type that carries this kind: 0x01 sealed, 0x02 group or channel queue. */
     val frameType: Byte
         get() = when (this) {
-            Dm, Ginv, Dmf, Cinv, Prof, Skey, Ttl -> 0x01
+            Dm, Ginv, Dmf, Cinv, Prof, Skey, Ttl, Iacc -> 0x01
             Gmsg, Gmf, Cmsg, Cmf, Gttl -> 0x02
         }
 
@@ -56,6 +56,12 @@ class Envelope(
         when (kind) {
             Kind.Dm, Kind.Dmf, Kind.Prof -> if (groupId.isNotEmpty() || groupKey != null || members.isNotEmpty()) {
                 throw AegisException.InvalidEnvelope("dm carries group fields")
+            }
+            Kind.Iacc -> {
+                if (groupId.isNotEmpty() || groupKey != null || members.isNotEmpty()) {
+                    throw AegisException.InvalidEnvelope("iacc carries group fields")
+                }
+                if (!Hex.isHexLen(body, 96)) throw AegisException.InvalidEnvelope("iacc body")
             }
             Kind.Gmsg, Kind.Gmf, Kind.Cmsg, Kind.Cmf -> {
                 if (!Hex.isHexLen(groupId, 32)) throw AegisException.InvalidEnvelope("group_id")

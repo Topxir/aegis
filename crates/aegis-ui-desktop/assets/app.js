@@ -576,6 +576,10 @@
       if (bar.hidden) { closeMsgSearch(); } else { $('msgq').focus(); }
     }
     else if (what === 'lbclose') { closeLightbox(); }
+    else if (what === 'copy') {
+      var c = el.parentNode.querySelector('input');
+      if (c) { c.select(); document.execCommand('copy'); }
+    }
   }
 
   document.addEventListener('click', function (e) {

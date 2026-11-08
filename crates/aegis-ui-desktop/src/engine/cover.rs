@@ -332,9 +332,15 @@ impl Engine {
         r
     }
 
-    pub(super) fn net_prekeys_take(&self, c: &Client, u: &str) -> Result<Option<aegis_core::x3dh::Bundle>, Error> {
+    /// `ed` is the pinned key of a contact; a hidden user answers only with it (section 30.4).
+    pub(super) fn net_prekeys_take(
+        &self,
+        c: &Client,
+        u: &str,
+        ed: Option<&[u8; 32]>,
+    ) -> Result<Option<aegis_core::x3dh::Bundle>, Error> {
         self.slot(0);
-        let r = c.prekeys_take(u);
+        let r = c.prekeys_take_for(u, ed);
         match &r {
             Ok(Some(b)) => self.got(json_len(&json!({
                 "spk": hex::encode(&b.spk),
@@ -344,6 +350,35 @@ impl Engine {
             }))),
             Ok(None) => self.got(NOT_FOUND_LEN),
             Err(_) => {}
+        }
+        r
+    }
+
+    pub(super) fn net_invite_create(&self, c: &Client, id: &Identity, u: &str, secret: &[u8; 32]) -> Result<(), Error> {
+        self.slot(1024);
+        let r = c.invite_create(id, u, secret);
+        if r.is_ok() {
+            self.got(json_len(&json!({"ok": true})));
+        }
+        r
+    }
+
+    pub(super) fn net_invite_redeem(&self, c: &Client, secret: &[u8; 32]) -> Result<Option<aegis_core::invite::Bundle>, Error> {
+        self.slot(67);
+        let r = c.invite_redeem(secret);
+        match &r {
+            Ok(Some(_)) => self.got(json_len(&json!({"box": "0".repeat(2 * aegis_core::invite::BOX_LEN)}))),
+            Ok(None) => self.got(NOT_FOUND_LEN),
+            Err(_) => {}
+        }
+        r
+    }
+
+    pub(super) fn net_hide(&self, c: &Client, id: &Identity, u: &str, hidden: bool) -> Result<(), Error> {
+        self.slot(180);
+        let r = c.hide(id, u, hidden);
+        if r.is_ok() {
+            self.got(json_len(&json!({"ok": true})));
         }
         r
     }

@@ -77,15 +77,19 @@ fun NewChatScreen(session: Session, onBack: () -> Unit, onOpen: (String) -> Unit
     Column(Modifier.fillMaxSize().imePadding().navigationBarsPadding()) {
         TopBar(stringResource(R.string.new_chat), onBack = onBack)
         Divider()
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
-            Field(user, { user = it; error = null }, stringResource(R.string.field_contact_username), keyboard = androidx.compose.ui.text.input.KeyboardType.Ascii)
-            Note(stringResource(R.string.new_chat_note))
-            error?.let { Note(stringResource(it), Ui.danger) }
-            if (session.busy) Note(stringResource(R.string.working))
-            Primary(stringResource(R.string.find_and_add), enabled = user.isNotBlank() && !session.busy) {
-                session.addContact(user) { u, e -> error = e; if (u != null) onOpen(dmKey(u)) }
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            Column(Modifier.padding(16.dp)) {
+                Field(user, { user = it; error = null }, stringResource(R.string.field_contact_username), keyboard = androidx.compose.ui.text.input.KeyboardType.Ascii)
+                Note(stringResource(R.string.new_chat_note))
+                error?.let { Note(stringResource(it), Ui.danger) }
+                if (session.busy) Note(stringResource(R.string.working))
+                Primary(stringResource(R.string.find_and_add), enabled = user.isNotBlank() && !session.busy) {
+                    session.addContact(user) { u, e -> error = e; if (u != null) onOpen(dmKey(u)) }
+                }
+                Secondary(stringResource(R.string.new_group)) { onGroup() }
             }
-            Secondary(stringResource(R.string.new_group)) { onGroup() }
+            Divider()
+            InviteSections(session, onOpen)
         }
     }
 }

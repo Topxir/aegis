@@ -101,6 +101,8 @@ data class Settings(
     val appLock: Boolean = true,
     /** Show the chat, sender and text in notifications instead of only "New message". */
     val showContent: Boolean = false,
+    /** Directory lookups of this account answer "not found" (spec section 30.4). */
+    val hidden: Boolean = false,
 )
 
 class VaultData(
@@ -125,6 +127,8 @@ class VaultData(
     val officialOwnerEd: ByteArray? = null,
     val fs: FsState = FsState(),
     val look: Look = Look(),
+    /** Invite secrets handed out and not yet used (spec section 30). */
+    val invites: List<OpenInvite> = emptyList(),
 ) {
     fun contact(u: String): Contact? = contacts.firstOrNull { it.username == u }
     fun group(id: String): Group? = groups.firstOrNull { it.id == id }
@@ -147,9 +151,10 @@ class VaultData(
         profile: OwnProfile = this.profile,
         officialOwnerEd: ByteArray? = this.officialOwnerEd,
         look: Look = this.look,
+        invites: List<OpenInvite> = this.invites,
     ) = VaultData(
         username, xSk, edSk, registered, contacts, groups, chats, seen, cursors, settings,
-        channels, prefs, profile, mediaKey, officialOwnerEd, fs, look,
+        channels, prefs, profile, mediaKey, officialOwnerEd, fs, look, invites,
     )
 
     fun withChat(key: String, c: Chat): VaultData = copy(chats = chats + (key to c))
@@ -160,6 +165,7 @@ class VaultData(
         mediaKey.fill(0)
         groups.forEach { it.secret.fill(0) }
         channels.forEach { it.secret.fill(0) }
+        invites.forEach { it.secret.fill(0) }
     }
 }
 
@@ -216,7 +222,7 @@ object VaultCodec {
             "endpoint" to s.endpoint, "proxy" to s.proxy, "name" to s.displayName,
             "idle" to s.idleLockMin.toLong(), "bg" to s.backgroundLockMin.toLong(),
             "poll" to s.pollSeconds.toLong(), "notify" to s.notifications,
-            "app_lock" to s.appLock, "show_content" to s.showContent,
+            "app_lock" to s.appLock, "show_content" to s.showContent, "hidden" to s.hidden,
         )
         m["channels"] = v.channels.map { c ->
             mapOf(
@@ -230,6 +236,7 @@ object VaultCodec {
         m["official_owner_ed"] = v.officialOwnerEd?.let { Hex.encode(it) }
         m["fs"] = v.fs.toJson()
         m["look"] = v.look.toJson()
+        m["invites"] = v.invites.map { mapOf("s" to Hex.encode(it.secret), "exp" to it.expS) }
         return Text.utf8(Json.write(m))
     }
 
@@ -281,7 +288,7 @@ object VaultCodec {
             val settings = Settings(
                 str(st, "endpoint"), str(st, "proxy"), str(st, "name"), lng(st, "idle").toInt(), lng(st, "bg").toInt(),
                 lng(st, "poll").toInt(), bool(st, "notify"),
-                (st["app_lock"] as Boolean?) ?: true, (st["show_content"] as Boolean?) ?: false,
+                (st["app_lock"] as Boolean?) ?: true, (st["show_content"] as Boolean?) ?: false, (st["hidden"] as Boolean?) ?: false,
             )
             val channels = ((m["channels"] as List<Map<String, Any?>>?) ?: emptyList()).map {
                 Channel(
@@ -297,12 +304,15 @@ object VaultCodec {
             val mediaKey = (m["media_key"] as String?)?.let { Hex.decodeFixed(it, 32) }
                 ?: org.aegis.messenger.core.Crypto.randomBytes(32)
             val officialEd = (m["official_owner_ed"] as String?)?.let { Hex.decodeFixed(it, 32) }
+            val invites = ((m["invites"] as List<Map<String, Any?>>?) ?: emptyList()).map {
+                OpenInvite(Hex.decodeFixed(str(it, "s"), 32), lng(it, "exp"))
+            }
             return VaultData(
                 str(m, "username"), Hex.decodeFixed(str(m, "x_sk"), 32), Hex.decodeFixed(str(m, "ed_sk"), 32),
                 bool(m, "registered"), contacts, groups, chats, (m["seen"] as List<String>),
                 (m["cursors"] as Map<String, Long>), settings,
                 channels, prefs, pr, mediaKey, officialEd, FsState.fromJson(m["fs"] as Map<String, Any?>?),
-                Look.fromJson(m["look"] as? Map<String, Any?>),
+                Look.fromJson(m["look"] as? Map<String, Any?>), invites,
             )
         } catch (e: AegisException) {
             throw e

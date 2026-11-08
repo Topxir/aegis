@@ -105,8 +105,8 @@ fn put_take_roundtrip_and_opk_popped_once() {
 fn put_rejections() {
     let (_d, s, now) = setup();
     let put = |f: &str| call(&s, "/api/v2/prekeys/put", f, now).0;
-    // unknown user
-    assert_eq!(put(&put_form(&id(), "bobby", 3, now, vec![], now)), 404);
+    // unknown user: answers like a bad signature, so hidden users cannot be told apart
+    assert_eq!(put(&put_form(&id(), "bobby", 3, now, vec![], now)), 403);
     // signed by another key
     let other = Identity::from_secrets([7; 32], [8; 32]);
     assert_eq!(put(&put_form(&other, "alice", 3, now, vec![], now)), 403);
@@ -196,13 +196,13 @@ fn take_requires_pow_and_rejects_replay() {
     assert_eq!(call(&s, "/api/v2/prekeys/put", &put_form(&id(), "alice", 3, now, vec![opk(1), opk(2)], now), now).0, 200);
     let t = PrekeyTake::mine("alice", now, BITS);
     // a nonce that does not satisfy the work
-    let bad = (0..).find(|n| !PrekeyTake { u: "alice".into(), ts: now, pow: *n }.pow_ok(BITS)).unwrap();
+    let bad = (0..).find(|n| !PrekeyTake { u: "alice".into(), ts: now, pow: *n, ed: None }.pow_ok(BITS)).unwrap();
     assert_eq!(call(&s, "/api/v2/prekeys/take", &format!("u=alice&ts={now}&pow={bad}"), now).0, 403);
     // work for another user does not carry over
     // (skip work that happens to satisfy alice's puzzle too, which a low BITS allows by chance)
     let other = (0..)
         .map(|i| PrekeyTake::mine("bobby", now - i, BITS))
-        .find(|o| !PrekeyTake { u: "alice".into(), ts: now, pow: o.pow }.pow_ok(BITS))
+        .find(|o| !PrekeyTake { u: "alice".into(), ts: now, pow: o.pow, ed: None }.pow_ok(BITS))
         .unwrap();
     assert_eq!(call(&s, "/api/v2/prekeys/take", &format!("u=alice&ts={now}&pow={}", other.pow), now).0, 403);
     // stale ts
@@ -256,16 +256,26 @@ fn old_state_formats_still_load_and_corrupt_prekeys_are_refused() {
     }
     let path = d.0.join("server-v2.state");
     let good = std::fs::read(&path).unwrap();
-    assert_eq!(&good[..8], b"AEGSRV04");
+    assert_eq!(&good[..8], b"AEGSRV05");
     // truncated file
     std::fs::write(&path, &good[..good.len() - 1]).unwrap();
     assert!(ServerState::open_with(&d.0, cfg()).is_err());
     assert_eq!(std::fs::read(&path).unwrap().len(), good.len() - 1, "left untouched");
-    // a v3 file is the v4 layout without the prekey section (4 zero bytes before the queue count)
-    let mut v3 = good.clone();
+    // a v4 file stores a title after the username, has no hidden flag and no invite section
+    // (magic 8, next_seq 8, entry count 4, name length 4, "alice" 5, then x and ed)
+    let mut v4 = good.clone();
+    v4[..8].copy_from_slice(b"AEGSRV04");
+    v4.remove(29 + 64);
+    v4.splice(29..29, 0u32.to_be_bytes());
+    let n = v4.len();
+    // layout tail: prekey count (4), invite count (4), queue count (4)
+    v4.drain(n - 8..n - 4);
+    std::fs::write(&path, &v4).unwrap();
+    assert_eq!(ServerState::open_with(&d.0, cfg()).unwrap().directory_len(), 1);
+    // a v3 file is the v4 layout without the prekey section
+    let mut v3 = v4.clone();
     v3[..8].copy_from_slice(b"AEGSRV03");
     let n = v3.len();
-    // layout tail: prekey count (4) then queue count (4)
     v3.drain(n - 8..n - 4);
     std::fs::write(&path, &v3).unwrap();
     let s = ServerState::open_with(&d.0, cfg()).unwrap();

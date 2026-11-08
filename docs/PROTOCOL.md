@@ -32,7 +32,7 @@ Strings are UTF-8. `||` is concatenation. `hex` is lowercase.
 ## 3. Directory (server)
 
 `POST /api/v2/dir/register`, body `application/x-www-form-urlencoded`:
-`u`, `title` (display name, ≤ 64 chars, may be empty), `x` (hex x_pk), `ed` (hex ed_pk),
+`u`, `title` (legacy display name, ≤ 64 chars, clients send it empty), `x` (hex x_pk), `ed` (hex ed_pk),
 `ts` (unix seconds), `sig` (hex Ed25519 signature), `pow` (decimal u64, section 4).
 Reserved names: `owner`, `aegis`, `admin`, `support`, `official`, and any name that reads the
 same after dropping `_` and folding `0 1 l 3 4 5 6 7 8 9 2` to `o i i e a s b t b g z`, `rn` to `m` and
@@ -47,11 +47,18 @@ Signed message: `"aegis-v2 dir\n" || u || "\n" || title || "\n" || x || "\n" || 
 
 Server rules: valid username, valid signature, `|ts − now| ≤ 600`, valid proof of work
 (section 4) with `scope = "dir:" || u`. A username is bound to
-the first `ed` that registers it; later registrations are accepted only with the same `ed`
-(this is how the display name is updated). Different `ed` → `409`.
+the first `ed` that registers it; later registrations are accepted only with the same `ed`.
+Different `ed` → `409`. One `ed` holds at most one username: registering a second name with a
+key that already has one → `409` (names held twice from before this rule keep working).
 
-`GET /api/v2/dir/lookup?u=<username>` → `200 {"u":…,"title":…,"x":…,"ed":…}` or `404`.
-Exact match only: users cannot be listed or searched by prefix.
+The server does not store the display name. `title` is still covered by the signature so old
+clients keep working, but it is dropped on receipt; display name and avatar travel only end to
+end (section 22). State files written before this rule lose their stored titles on load.
+
+`GET /api/v2/dir/lookup?u=<username>` → `200 {"u":…,"title":"","x":…,"ed":…}` or `404`.
+Exact match only: users cannot be listed or searched by prefix. `title` is always empty and is
+kept only for old clients. A hidden profile (section 30.4) answers `404` exactly like an unknown
+name.
 
 Clients look up a username only on first contact and then use the pinned key
 (section 8); every lookup tells the server who is about to talk to whom.
@@ -178,7 +185,7 @@ An all-zero `dh1` or `dh2` is rejected.
 The recipient decrypts `c1` to get `S.x_pk`, then `c2`. The sender is authenticated by `dh2`,
 and the server cannot see who sent the frame. The recipient then checks that
 `S.x_pk` and `sender_ed` match the pinned contact for `sender`; only an unknown sender is
-looked up in the directory (and then pinned).
+looked up in the directory (and then pinned). `iacc` (section 30.3) is never looked up.
 On mismatch the message is dropped and the contact is flagged as "key changed".
 
 Each client also keeps its own copy of what it sent; nothing is sent to self.
@@ -197,7 +204,8 @@ frame    = 0x02 || nonce(12, random) || AEAD(k, nonce, aad = 0x02, envelope || s
 ```
 
 Receivers verify `sig` against `sender_ed`, which must match the pinned key for `sender`
-(unknown members are looked up once and pinned), and require `group_id` in the envelope to
+(a message from a member who is not a contact is dropped; clients never look group members up
+in the directory, since that would show the server who is in the group), and require `group_id` in the envelope to
 equal the id of the group whose queue delivered the frame. Group members are not anonymous to each other.
 
 Frame type 0x02 is the original group format. Clients send group messages as frame type 0x05
@@ -543,8 +551,8 @@ No push service (no Google or Apple servers) is used. Clients poll.
 
 ## 22. Profile card
 
-Display name, an "about" line and a particle effect are shared with contacts only (not with
-the directory, which keeps just the display name). Envelope type `prof` (frame `0x01`), sent
+Display name, an "about" line and a particle effect are shared with contacts only (the
+directory keeps no display name, section 3). Envelope type `prof` (frame `0x01`), sent
 to each contact when the profile changes and on first message to a new contact. `body`:
 
 ```
@@ -729,7 +737,11 @@ stored.
 `POST /api/v2/prekeys/take`, form fields `u`, `ts`, `pow`, where `pow` is the proof of work of
 section 4 with `scope = "pk:" || u` and `body_hash` = hex SHA-256 of `u || "\n" || ts`.
 Response `200 {"spk":…,"spk_ts":…,"spk_sig":…,"opk":"<hex or empty>"}`; the returned `opk` is
-deleted from the server. `404` for an unknown user or one with no `spk`. The proof of work
+deleted from the server. `404` for an unknown user or one with no `spk`. An optional fifth field
+`ed` (hex) names the key the caller has pinned for `u`; if present and not equal to the
+directory key the answer is `404`. A hidden user (section 30.4) gets `404` unless `ed` is given
+and matches, so existing contacts keep working while strangers see "not found". A `put` for an
+unknown user answers `403` like a bad signature, so it does not tell a hidden name apart. The proof of work
 makes draining someone's one-time prekeys expensive. Without an `opk` the handshake still
 works, with weaker replay protection for the first message.
 
@@ -943,3 +955,111 @@ Copy the contents of that folder into the server's `<data-dir>/update/`; no rest
 needed. By hand: `aegis-update sign --key <key> --out <dir> --version <v> --windows <exe>
 [--android <apk> --android-code <n>]`. A new key: `aegis-update keygen <path>` (never
 overwrites), then put the printed public key into both clients.
+
+## 30. Invites and hidden profiles
+
+A one-time invite lets two people connect without a directory lookup. The inviter makes a
+random 32-byte secret `s` and shares it as a link or QR code:
+
+```
+link   = "aegis://invite/" || hex(s)                 // 64 lowercase hex digits
+id     = SHA256("aegis-v2 invite-id" || s)
+k      = HKDF(s, salt = "", "aegis-v2 invite-key", 32)
+plain  = "AIV1
+" || u || "
+" || hex(x_pk) || "
+" || hex(ed_pk), zero-padded to 160 bytes
+box    = AEAD(k, nonce = 0^12, aad = id, plain)       // 176 bytes
+```
+
+The fixed nonce is safe because `k` seals exactly one message. Parsers accept the link with
+surrounding white space and in any letter case, and nothing else. The padding hides the
+length of the username.
+
+### 30.1 Server
+
+`POST /api/v2/invite/create`, form fields `u`, `id`, `box`, `ts`, `sig`, each exactly once.
+`sig` is Ed25519 by the directory `ed` of `u` over
+`"aegis-v2 invite
+" || u || "
+" || id || "
+" || box || "
+" || ts` (hex fields lowercase).
+Rules: `|ts − now| ≤ 600`, the signed message is remembered for 20 minutes and a repeat gets
+`403`; an unknown `u` gets `403` like a bad signature; a known `id` gets `409`. Each user may
+create at most 10 invites in any 7 days (`429`); the count is kept per user and day in memory
+only and is never linked to the invites. The server stores only `id → (exp, box)` with
+`exp = now + 7 days`, rounded up to the hour. It never stores `s` or the creator.
+
+`POST /api/v2/invite/redeem`, form `id=<hex>`. `200 {"box":…}` once, and the record is deleted
+in the same durable write. Unknown, already used and expired ids all answer the same `404`.
+Expired records are dropped by the periodic purge.
+
+`POST /api/v2/invite/revoke`, form `id=<hex>`. Deletes the record if it exists; always `200`.
+A revoked invite still counts towards the creator's limit until its day falls out of the window.
+
+Redeeming or creating an invite never registers, reserves or transfers a username.
+
+### 30.2 Redeeming
+
+The redeemer derives `id`, calls `redeem`, opens `box` with `k` (a box that does not open, or
+whose plaintext is not exactly the format above, is refused) and pins `u`, `x_pk`, `ed_pk` as a
+contact without asking the directory. It fetches prekeys with `ed` set (section 27.1), so this
+works for a hidden inviter too.
+
+A bundle never replaces a pinned contact: if `u` is already a contact with other keys, or the
+keys belong to another contact, the bundle is refused. A client refuses its own link before
+calling `redeem`, so it does not burn the invite. An `iacc` that cannot be posted is kept and
+retried; the secret itself is not needed again.
+
+### 30.3 Accepting
+
+The redeemer then sends the inviter an envelope of type `iacc` (frame `0x01`, section 6) with
+empty `group_id`, `group_key` and `members` and
+
+```
+tag  = HKDF(s, salt = "", "aegis-v2 invite-accept
+" || u_r || "
+" || hex(x_r) || "
+" || hex(ed_r), 32)
+sig  = Ed25519(ed_r_sk, "aegis-v2 invite-accept-sig
+" || u_r || "
+" || hex(x_r) || "
+" || hex(tag))
+body = hex(tag || sig)                                   // 192 hex digits
+```
+
+where `u_r`, `x_r`, `ed_r` are the redeemer's username and keys (`x_r` is the sender key proved
+by the seal, `ed_r` is `sender_ed`). The inviter keeps its open secrets locally until they
+expire or are used. An `iacc` from an unknown sender is accepted only if the tag matches one of
+those secrets and the signature checks; the inviter then pins the sender without a directory
+lookup and forgets that secret. Any other `iacc` is dropped, as is one whose keys already
+belong to a contact. Frames the sender posted before its `iacc` arrived are then opened. Display name and avatar follow in
+the usual `prof` envelope.
+
+### 30.4 Hidden profile
+
+`POST /api/v2/dir/hide`, form fields `u`, `hidden` (`0` or `1`), `ts`, `sig`, with `sig` by the
+directory `ed` of `u` over `"aegis-v2 hide
+" || u || "
+" || hidden || "
+" || ts`. Same time
+window and replay rules as above; an unknown `u` gets `403` like a bad signature. The flag is
+kept in the state file and survives re-registration. Default off.
+
+While on, `dir/lookup` for `u` answers the same `404` as an unknown name and `prekeys/take`
+without the matching `ed` answers `404`. Queues are addressed by key, so existing contacts keep
+working. A stranger can still learn that the name is taken by trying to register it (`409`),
+because names stay unique.
+
+### 30.5 Group membership
+
+The server has no route that lists group members or answers whether a user is in a group.
+Groups are only queues derived from `G` (section 7); membership is known only to members,
+carried inside `ginv` and `skey` envelopes. A non-member cannot even name the group's queue
+without `G`.
+
+Clients do not leak it either: a group frame from a member who is not a contact is dropped
+instead of looking the sender up, and a frame of type `0x03` from an unknown key waits as a
+request without any directory call (audit item wire-r2-4). A directory lookup only ever names
+a user the person typed in.

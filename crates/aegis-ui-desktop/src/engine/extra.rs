@@ -538,7 +538,7 @@ impl Engine {
             let Some(s) = app.session.as_ref() else {
                 return;
             };
-            if s.data.about.is_empty() && s.data.particles == "none" {
+            if s.data.display.is_empty() && s.data.about.is_empty() && s.data.particles == "none" {
                 return;
             }
             s.profile_frame(u, now_ms()).ok().map(|d| (app.epoch, d))

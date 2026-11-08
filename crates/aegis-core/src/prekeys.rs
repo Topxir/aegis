@@ -27,7 +27,7 @@ pub fn take_body_hash(u: &str, ts: u64) -> String {
     pow::body_hash_hex(format!("{u}\n{ts}").as_bytes())
 }
 
-fn strict_pairs<const N: usize>(body: &str, keys: [&str; N]) -> Result<[String; N]> {
+pub(crate) fn strict_pairs<const N: usize>(body: &str, keys: [&str; N]) -> Result<[String; N]> {
     if body.split('&').any(str::is_empty) {
         return Err(Error::InvalidText);
     }
@@ -143,6 +143,9 @@ pub struct PrekeyTake {
     pub u: String,
     pub ts: u64,
     pub pow: u64,
+    /// The identity key the caller has pinned for `u`. Required for a hidden user
+    /// (section 30); when present it must match, or the answer is `404`.
+    pub ed: Option<[u8; 32]>,
 }
 
 impl PrekeyTake {
@@ -154,7 +157,13 @@ impl PrekeyTake {
     /// Like `mine`, searching upward from `start`.
     pub fn mine_from(u: &str, ts: u64, bits: u32, start: u64) -> Self {
         let pow = pow::mine_from(&take_scope(u), ts, &take_body_hash(u, ts), bits, start);
-        Self { u: u.to_owned(), ts, pow }
+        Self { u: u.to_owned(), ts, pow, ed: None }
+    }
+
+    /// The same request naming the pinned identity key of `u`.
+    pub fn with_ed(mut self, ed: [u8; 32]) -> Self {
+        self.ed = Some(ed);
+        self
     }
 
     pub fn pow_ok(&self, bits: u32) -> bool {
@@ -162,15 +171,26 @@ impl PrekeyTake {
     }
 
     pub fn to_form(&self) -> String {
-        format!("u={}&ts={}&pow={}", pct_encode(&self.u), self.ts, self.pow)
+        let mut f = format!("u={}&ts={}&pow={}", pct_encode(&self.u), self.ts, self.pow);
+        if let Some(ed) = &self.ed {
+            f.push_str(&format!("&ed={}", hex::encode(ed)));
+        }
+        f
     }
 
+    /// Strict parser: `u`, `ts`, `pow` and an optional `ed`, each exactly once.
     pub fn from_form(body: &str) -> Result<Self> {
-        let [u, ts, pw] = strict_pairs(body, ["u", "ts", "pow"])?;
+        let (u, ts, pw, ed) = match strict_pairs(body, ["u", "ts", "pow", "ed"]) {
+            Ok([u, ts, pw, ed]) => (u, ts, pw, Some(hex::decode_array(&ed)?)),
+            Err(_) => {
+                let [u, ts, pw] = strict_pairs(body, ["u", "ts", "pow"])?;
+                (u, ts, pw, None)
+            }
+        };
         if !is_valid_username(&u) {
             return Err(Error::InvalidUsername);
         }
-        Ok(Self { u, ts: parse_u64(&ts)?, pow: parse_u64(&pw)? })
+        Ok(Self { u, ts: parse_u64(&ts)?, pow: parse_u64(&pw)?, ed })
     }
 }
 

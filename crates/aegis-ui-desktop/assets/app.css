@@ -478,3 +478,4 @@ button.sti:hover { border-color: #38383e; color: var(--text); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+.qr { display: block; width: 220px; height: 220px; border-radius: 8px; }

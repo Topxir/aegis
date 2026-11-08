@@ -32,13 +32,15 @@ pub enum Kind {
     Ttl,
     /// Disappearing-message timer of a group.
     Gttl,
+    /// Invite acceptance: the redeemer announces itself to the inviter (section 30.3).
+    Iacc,
 }
 
 impl Kind {
     /// Frame type that carries this envelope kind: `0x01` (sealed) or `0x02` (group/channel queue).
     pub fn frame_type(self) -> u8 {
         match self {
-            Kind::Dm | Kind::Ginv | Kind::Dmf | Kind::Cinv | Kind::Prof | Kind::Skey | Kind::Ttl => 0x01,
+            Kind::Dm | Kind::Ginv | Kind::Dmf | Kind::Cinv | Kind::Prof | Kind::Skey | Kind::Ttl | Kind::Iacc => 0x01,
             Kind::Gmsg | Kind::Gmf | Kind::Cmsg | Kind::Cmf | Kind::Gttl => 0x02,
         }
     }
@@ -57,6 +59,7 @@ impl Kind {
             Kind::Skey => "skey",
             Kind::Ttl => "ttl",
             Kind::Gttl => "gttl",
+            Kind::Iacc => "iacc",
         }
     }
 
@@ -74,6 +77,7 @@ impl Kind {
             "skey" => Ok(Kind::Skey),
             "ttl" => Ok(Kind::Ttl),
             "gttl" => Ok(Kind::Gttl),
+            "iacc" => Ok(Kind::Iacc),
             _ => Err(Error::InvalidEnvelope("type")),
         }
     }
@@ -162,6 +166,14 @@ impl Envelope {
                 }
                 if !self.members.is_empty() {
                     return Err(Error::InvalidEnvelope("cinv carries members"));
+                }
+            }
+            Kind::Iacc => {
+                if !self.group_id.is_empty() || self.group_key.is_some() || !self.members.is_empty() {
+                    return Err(Error::InvalidEnvelope("iacc carries group fields"));
+                }
+                if !hex::is_hex_len(&self.body, 96) {
+                    return Err(Error::InvalidEnvelope("iacc body"));
                 }
             }
             Kind::Skey => {
@@ -464,7 +476,7 @@ pub(crate) mod tests {
         let all = [
             (Kind::Dm, 1), (Kind::Prof, 1), (Kind::Ginv, 1), (Kind::Dmf, 1), (Kind::Cinv, 1),
             (Kind::Gmsg, 2), (Kind::Gmf, 2), (Kind::Cmsg, 2), (Kind::Cmf, 2),
-            (Kind::Skey, 1), (Kind::Ttl, 1), (Kind::Gttl, 2),
+            (Kind::Skey, 1), (Kind::Ttl, 1), (Kind::Gttl, 2), (Kind::Iacc, 1),
         ];
         for (k, t) in all {
             assert_eq!(k.frame_type(), t);

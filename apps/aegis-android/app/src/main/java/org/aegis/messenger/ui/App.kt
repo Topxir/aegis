@@ -78,6 +78,7 @@ private fun Navigator(session: Session, onLanguage: () -> Unit) {
     fun guide() { reset("list"); Guide.start() }
 
     BackHandler(routes.size > 1) { pop() }
+    LaunchedEffect(session.linkIn) { if (session.linkIn != null && route != "new") push("new") }
     LaunchedEffect(Unit) { while (true) { delay(5_000); session.purgeNow() } }
     LaunchedEffect(Unit) { if (!Guide.done(ctx)) Guide.start() }
 

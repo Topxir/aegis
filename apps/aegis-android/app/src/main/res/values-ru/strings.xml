@@ -174,7 +174,7 @@
     <string name="about_limits_title">ИЗВЕСТНЫЕ ОГРАНИЧЕНИЯ</string>
     <string name="about_l1">Нет прямой секретности: при утечке долговременного ключа можно прочитать ранее перехваченные сообщения.</string>
     <string name="about_l2">Сервер и сетевые посредники (например, Cloudflare) видят ваш IP-адрес, время отправки и получения и примерный размер сообщений.</string>
-    <string name="about_l3">Имена пользователей публичны в каталоге сервера.</string>
+    <string name="about_l3">Имена пользователей видны в каталоге сервера, если профиль не скрыт.</string>
     <string name="about_l4">У группы один общий ключ; вышедший участник может читать и писать, пока группа не создана заново.</string>
     <string name="about_l5">Исчезающие сообщения зависят от того, выполняет ли их собеседник.</string>
     <string name="about_l6">Только текстовые сообщения. Звонков, файлов и изображений нет.</string>
@@ -281,4 +281,23 @@
     <string name="remove_member_body">Прежние сообщения он по-прежнему сможет прочитать. Новые используют свежие ключи, которые он не получит.</string>
     <string name="remove">Удалить</string>
     <string name="removed_from_group">Вас удалили из группы.</string>
+    <string name="invite_title">Ссылка-приглашение</string>
+    <string name="invite_note">Ссылка срабатывает один раз и действует 7 дней. Открывший её получает ваши ключи напрямую, без запроса к каталогу. Передавайте её только тому, кому она предназначена.</string>
+    <string name="invite_create">Создать приглашение</string>
+    <string name="invite_another">Создать ещё</string>
+    <string name="invite_copy">Копировать</string>
+    <string name="invite_copied">Скопировано.</string>
+    <string name="invite_qr">QR-код ссылки-приглашения</string>
+    <string name="invite_open_title">Открыть приглашение</string>
+    <string name="invite_open_note">Вставьте ссылку aegis://invite/, которую вам дали.</string>
+    <string name="invite_open">Открыть</string>
+    <string name="invite_paste">Вставить</string>
+    <string name="field_invite_link">Ссылка-приглашение</string>
+    <string name="err_invite_limit">Слишком много открытых приглашений. Дождитесь, пока часть будет использована или истечёт.</string>
+    <string name="err_invite_link">Это не ссылка-приглашение.</string>
+    <string name="err_invite_gone">Приглашение уже использовано, истекло или не существует.</string>
+    <string name="err_invite_conflict">Контакт с этим ником или этими ключами уже есть, но с другими ключами. Приглашение не применено.</string>
+    <string name="profile_lookup">Поиск профиля</string>
+    <string name="hide_profile">Скрыть профиль</string>
+    <string name="hide_profile_note">Поиск по вашему нику будет отвечать «не найден». Новые контакты смогут найти вас только по ссылке-приглашению. Существующие контакты это не затронет.</string>
 </resources>

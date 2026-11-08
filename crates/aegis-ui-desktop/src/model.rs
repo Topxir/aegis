@@ -130,6 +130,9 @@ pub struct Settings {
     /// Install signed updates on their own.
     #[serde(default = "yes")]
     pub auto_update: bool,
+    /// Directory lookups of this name answer "not found" (spec section 30.4).
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 fn bridges_off() -> String {
@@ -232,6 +235,7 @@ impl Settings {
             bridges: bridges_off(),
             bridge_lines: String::new(),
             auto_update: true,
+            hidden: false,
         }
     }
 }
@@ -453,6 +457,20 @@ pub struct Pending {
     pub frames: Vec<String>,
 }
 
+/// An invite this user made and nobody has used yet (spec section 30).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OpenInvite {
+    #[serde(with = "hex32_secret")]
+    pub secret: Zeroizing<[u8; 32]>,
+    pub exp_s: u64,
+}
+
+impl core::fmt::Debug for OpenInvite {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OpenInvite").field("exp_s", &self.exp_s).finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Data {
     pub schema: u32,
@@ -499,6 +517,8 @@ pub struct Data {
     /// the slot without asking for the PIN. Empty when no PIN is set (or it predates this).
     #[serde(default)]
     pub pin_verifier: String,
+    #[serde(default)]
+    pub invites: Vec<OpenInvite>,
 }
 
 impl core::fmt::Debug for Data {

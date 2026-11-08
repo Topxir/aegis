@@ -123,6 +123,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
             }
         }
     });
+    engine.app().link_in = crate::engine::invites::launch_link();
     let (jobs_tx, jobs_rx) = channel::<Job>();
     let ctl = Controller::new(Arc::clone(&engine), jobs_tx.clone());
 

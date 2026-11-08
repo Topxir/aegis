@@ -282,7 +282,10 @@ fn dispatch(state: &Mutex<ServerState>, req: &Request, now: u64) -> BlobReply {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .handle_tracked(req, now);
-    let durable = req.path.starts_with("/api/v2/pin/") || req.path.starts_with("/api/v2/prekeys/");
+    let durable = req.path.starts_with("/api/v2/pin/")
+        || req.path.starts_with("/api/v2/prekeys/")
+        || req.path.starts_with("/api/v2/invite/")
+        || req.path == "/api/v2/dir/hide";
     if durable && persist_or_undo(state, changes).is_err() {
         return json_err(503, "storage unavailable");
     }

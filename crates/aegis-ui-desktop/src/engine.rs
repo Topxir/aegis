@@ -37,6 +37,7 @@ pub mod cover;
 mod extra;
 mod lock;
 mod notice;
+pub mod invites;
 mod oseal;
 mod pin;
 mod timer;
@@ -141,6 +142,12 @@ pub struct App {
     /// Step of the first-run tour while it is open again from the settings.
     pub guide: Option<u8>,
     pub update: update::State,
+    /// The invite link made last, shown until the account is locked (memory only).
+    pub invite: Option<Zeroizing<String>>,
+    /// An invite link to open once an account is unlocked.
+    pub link_in: Option<Zeroizing<String>>,
+    /// Invite accepts that could not be posted yet.
+    pub accepts: Vec<crate::session::Outbound>,
 }
 
 impl App {
@@ -171,6 +178,9 @@ impl App {
             tor: tor::Status::Off,
             guide: None,
             update: update::State::new(),
+            invite: None,
+            link_in: None,
+            accepts: Vec::new(),
         }
     }
 
@@ -254,6 +264,9 @@ pub enum Job {
         tor: bool,
     },
     UpdateDisplay(String),
+    CreateInvite,
+    RedeemInvite(Zeroizing<String>),
+    SetHidden(bool),
     PinSet {
         pin: Zeroizing<String>,
         confirm: Zeroizing<String>,
@@ -583,7 +596,12 @@ impl Engine {
             let mut app = self.app();
             app.session = Some(s);
             app.epoch += 1;
-            app.route = Route::Welcome;
+            app.route = if app.link_in.is_some() {
+                Route::NewChat
+            } else {
+                Route::Welcome
+            };
+            app.invite = None;
             app.dialog = None;
             app.info = false;
             app.flash = None;
@@ -734,7 +752,7 @@ impl Engine {
         self.write_session(&mut s)?;
         let registered = self
             .client_for(&s.data.settings)
-            .and_then(|c| c.register(&identity, &u, &display).map_err(Failure::from));
+            .and_then(|c| c.register(&identity, &u, "").map_err(Failure::from));
         if let Err(e) = registered {
             let _ = std::fs::remove_file(&path);
             return Err(e);
@@ -948,27 +966,18 @@ impl Engine {
             .map_or(Ok(()), |(_, r)| r)
     }
 
+    /// The display name stays on this device; contacts get it in the profile card and in
+    /// every envelope. The directory keeps no name (spec section 3).
     pub fn update_display(&self, name: &str) -> Result<(), Failure> {
         let name = sanitize_display_text(name.trim());
         if !directory::is_valid_title(&name) {
             return Err(Failure::new("err.display"));
         }
-        let (epoch, client, identity, u) = {
-            let app = self.app();
-            let s = app.session.as_ref().ok_or(Failure::new("err.locked"))?;
-            (
-                app.epoch,
-                self.client_for(&s.data.settings)?,
-                identity_of(s),
-                s.data.username.clone(),
-            )
-        };
-        client.register(&identity, &u, &name)?;
-        self.live(epoch, |s| {
+        self.mutate(|s| {
             s.data.display = name;
             s.dirty = true;
-        });
-        Ok(())
+        })
+        .ok_or(Failure::new("err.locked"))
     }
 
     pub fn test_connection(&self, endpoint: &str, socks5: &str, tor: bool) -> Result<(), Failure> {
@@ -1127,6 +1136,9 @@ impl Engine {
             Some(Ok(o)) => o,
         };
         let env = opened.envelope;
+        if env.kind == Kind::Iacc {
+            return self.handle_accept(epoch, client, &env, opened.sender_x_pk);
+        }
         if !matches!(
             env.kind,
             Kind::Dm | Kind::Dmf | Kind::Ginv | Kind::Cinv | Kind::Prof | Kind::Ttl
@@ -1189,7 +1201,8 @@ impl Engine {
                     if round == 1 {
                         return Err(Failure::new("err.needs_update"));
                     }
-                    let Some(b) = self.net_prekeys_take(client, &d.to)? else {
+                    let ed = self.live(epoch, |s| s.data.contacts.get(&d.to).map(|c| c.ed)).flatten();
+                    let Some(b) = self.net_prekeys_take(client, &d.to, ed.as_ref())? else {
                         return Err(Failure::new("err.needs_update"));
                     };
                     match self.live(epoch, |s| s.begin_session(&d.to, &b, now_s())) {
@@ -1631,15 +1644,12 @@ impl Engine {
             Some(None) => return (Flow::Next, false),
             Some(Some(v)) => v,
         };
-        let entry = if known {
-            None
-        } else {
-            match self.net_lookup(client, &env.sender) {
-                Err(_) => return (Flow::Retry, false),
-                Ok(None) => return (Flow::Next, false),
-                Ok(Some(e)) => Some(e),
-            }
-        };
+        // A member who is not a contact is never looked up: asking the directory about the
+        // senders in a group would show the server who is in it (section 7).
+        if !known {
+            return (Flow::Next, false);
+        }
+        let entry: Option<DirEntry> = None;
         let mut media = None;
         let mut env = env;
         if env.kind == Kind::Gmf {
@@ -1700,6 +1710,7 @@ impl Engine {
         if self.retry_deferred(epoch, &client) {
             applied += 1;
         }
+        self.retry_accepts(&client);
 
         'inbox: for _ in 0..POLL_PAGES {
             let page = match self.net_poll(&client, &inbox, cursor) {
@@ -1852,6 +1863,21 @@ impl Engine {
                 let r = self.add_contact(&u);
                 self.finish(r.map(|()| None));
             }
+            Job::CreateInvite => {
+                self.set_busy(Some("busy.invite"));
+                let r = self.create_invite();
+                self.finish(r.map(|()| None));
+            }
+            Job::RedeemInvite(link) => {
+                self.set_busy(Some("busy.invite"));
+                let r = self.redeem_invite(&link);
+                self.finish(r.map(|()| None));
+            }
+            Job::SetHidden(on) => {
+                self.set_busy(Some("busy.pin"));
+                let r = self.set_hidden(on);
+                self.finish(r.map(|()| Some(("ok.saved", String::new()))));
+            }
             Job::Send { chat, text } => {
                 let r = self.send_message(&chat, &text, None);
                 self.finish(r.map(|()| None));
@@ -1924,7 +1950,11 @@ impl Engine {
             }
             Job::UpdateDisplay(name) => {
                 self.set_busy(Some("busy.profile"));
-                let r = self.update_display(&name);
+                let card = self.mutate(|s| (s.data.about.clone(), s.data.particles.clone()));
+                let r = match card {
+                    Some((about, particles)) => self.save_profile(&name, &about, &particles),
+                    None => Err(Failure::new("err.locked")),
+                };
                 self.finish(r.map(|()| Some(("ok.saved", String::new()))));
             }
             Job::PinSet { pin, confirm } => {

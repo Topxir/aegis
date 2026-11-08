@@ -83,6 +83,7 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 Field(name, { name = it; saved = false }, stringResource(R.string.field_display_name))
             }
             if (acct) Divider()
+            if (acct) { HiddenProfileSection(session, d); Divider() }
             if (net) Section(stringResource(R.string.tor)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(stringResource(R.string.tor_connect), color = Ui.text, modifier = Modifier.weight(1f))

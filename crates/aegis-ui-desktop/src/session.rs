@@ -26,6 +26,8 @@ use aegis_core::{hex, pad, Error};
 use zeroize::Zeroizing;
 
 pub use aegis_core::envelope::TTL_CHOICES;
+mod invites;
+pub use invites::Pinned;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatRef {
@@ -378,6 +380,7 @@ impl Session {
             deferred: Vec::new(),
             skeys: BTreeMap::new(),
             pin_verifier: String::new(),
+            invites: Vec::new(),
         };
         Self::new(data, password)
     }
@@ -436,6 +439,7 @@ impl Session {
             chat.msgs.retain(|m| !m.expired(now_ms));
             changed |= chat.msgs.len() != before;
         }
+        changed |= self.purge_invites(now_ms / 1000);
         self.dirty |= changed;
         changed
     }

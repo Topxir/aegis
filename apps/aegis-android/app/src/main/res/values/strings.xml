@@ -174,7 +174,7 @@
     <string name="about_limits_title">KNOWN LIMITS</string>
     <string name="about_l1">No forward secrecy: if a long-term key leaks, past captured messages can be read.</string>
     <string name="about_l2">The server and any network operator in between (such as Cloudflare) can see your IP address and when you send and fetch messages, and roughly how large they are.</string>
-    <string name="about_l3">Usernames are public in the server directory.</string>
+    <string name="about_l3">Usernames are listed in the server directory unless the profile is hidden.</string>
     <string name="about_l4">Groups share one key; a member who leaves can still read and write until the group is recreated.</string>
     <string name="about_l5">Disappearing messages depend on the other side honouring them.</string>
     <string name="about_l6">Messages are text only. There are no calls, files or images.</string>
@@ -281,4 +281,23 @@
     <string name="remove_member_body">They stay able to read what was sent before. New messages use fresh keys they will not receive.</string>
     <string name="remove">Remove</string>
     <string name="removed_from_group">You were removed from a group.</string>
+    <string name="invite_title">Invite link</string>
+    <string name="invite_note">A link works once and for 7 days. Whoever opens it gets your keys directly, without a directory lookup. Share it only with the person you mean.</string>
+    <string name="invite_create">Create invite</string>
+    <string name="invite_another">Create another</string>
+    <string name="invite_copy">Copy</string>
+    <string name="invite_copied">Copied.</string>
+    <string name="invite_qr">QR code of the invite link</string>
+    <string name="invite_open_title">Open an invite</string>
+    <string name="invite_open_note">Paste an aegis://invite/ link someone gave you.</string>
+    <string name="invite_open">Open</string>
+    <string name="invite_paste">Paste</string>
+    <string name="field_invite_link">Invite link</string>
+    <string name="err_invite_limit">Too many open invites. Wait until some are used or expire.</string>
+    <string name="err_invite_link">This is not an invite link.</string>
+    <string name="err_invite_gone">This invite was already used, has expired or does not exist.</string>
+    <string name="err_invite_conflict">A contact with this name or these keys already exists with other keys. The invite was not applied.</string>
+    <string name="profile_lookup">Profile lookup</string>
+    <string name="hide_profile">Hide profile</string>
+    <string name="hide_profile_note">Looking up your username then answers \"not found\". New contacts can reach you only through an invite link. Existing contacts are not affected.</string>
 </resources>
