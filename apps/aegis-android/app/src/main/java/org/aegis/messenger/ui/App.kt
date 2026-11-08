@@ -68,7 +68,7 @@ private fun Navigator(session: Session, onLanguage: () -> Unit) {
     fun reset(r: String) { stack = r }
 
     BackHandler(routes.size > 1) { pop() }
-    LaunchedEffect(Unit) { while (true) { delay(30_000); session.purgeNow() } }
+    LaunchedEffect(Unit) { while (true) { delay(5_000); session.purgeNow() } }
 
     AnimatedContent(
         targetState = route,

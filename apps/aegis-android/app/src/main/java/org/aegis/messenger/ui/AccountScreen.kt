@@ -40,7 +40,7 @@ import org.aegis.messenger.core.Particles
 import org.aegis.messenger.core.Profile
 import org.aegis.messenger.data.VaultData
 
-private fun Context.activity(): MainActivity? {
+internal fun Context.activity(): MainActivity? {
     var c = this
     while (c is ContextWrapper) {
         if (c is MainActivity) return c
@@ -121,8 +121,17 @@ fun AccountScreen(session: Session, d: VaultData, onBack: () -> Unit) {
                     )
                 }
                 Note(stringResource(R.string.secure_note))
-                Text(stringResource(R.string.lock_idle), color = Ui.text, modifier = Modifier.padding(top = 12.dp, bottom = 6.dp))
-                Choices(listOf(1, 5, 15, 60).map { it to lockText(it) }, s.idleLockMin) { session.saveSettings(s.copy(idleLockMin = it)) { } }
+                Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(stringResource(R.string.app_lock), color = Ui.text, modifier = Modifier.weight(1f))
+                    Switch(
+                        s.appLock, { session.saveSettings(s.copy(appLock = it)) { ctx.activity()?.applySecure() } },
+                        colors = SwitchDefaults.colors(checkedTrackColor = Ui.accent, checkedThumbColor = Ui.onAccent, uncheckedTrackColor = Ui.surface2, uncheckedThumbColor = Ui.muted, uncheckedBorderColor = Ui.border),
+                    )
+                }
+                if (s.appLock) {
+                    Text(stringResource(R.string.lock_idle), color = Ui.text, modifier = Modifier.padding(top = 12.dp, bottom = 6.dp))
+                    Choices(listOf(1, 5, 15, 60).map { it to lockText(it) }, s.idleLockMin) { session.saveSettings(s.copy(idleLockMin = it)) { } }
+                }
                 PinSection(session)
             }
         }

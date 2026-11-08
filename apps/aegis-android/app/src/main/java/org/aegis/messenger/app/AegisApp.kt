@@ -28,6 +28,13 @@ object Boot {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("secure", on).apply()
     }
 
+    /** Mirror of the vault's app lock switch, for notifications posted while the vault is locked. */
+    fun appLock(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("app_lock", true)
+
+    fun setAppLock(ctx: Context, on: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("app_lock", on).apply()
+    }
+
     /** Route through the embedded Tor; on unless switched off. Read before unlock, so it lives outside the vault. */
     fun tor(ctx: Context): Boolean = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("tor", true)
 

@@ -87,10 +87,15 @@
     <string name="safety_verified">Отмечен как проверенный</string>
     <string name="ttl_title">Исчезающие сообщения</string>
     <string name="ttl_off">Выкл.</string>
+    <string name="ttl_30s">30 сек</string>
+    <string name="ttl_5m">5 мин</string>
     <string name="ttl_1h">1 час</string>
     <string name="ttl_1d">1 день</string>
-    <string name="ttl_7d">7 дней</string>
-    <string name="ttl_note">Действует на новые сообщения в этом чате. Собеседник тоже их удалит, но изменённый клиент может сохранить.</string>
+    <string name="ttl_7d">1 неделя</string>
+    <string name="ttl_note">Действует на новые сообщения в этом чате для всех участников. Каждое устройство удаляет сообщение через это время после его получения, вместе с вложениями. Изменённый клиент может их сохранить.</string>
+    <string name="ttl_line_set">%1$s: исчезающие сообщения — %2$s</string>
+    <string name="ttl_line_off">%1$s: исчезающие сообщения выключены</string>
+    <string name="ttl_you">Вы</string>
     <string name="history">История</string>
     <string name="clear_history">Очистить историю</string>
     <string name="clear_history_body">Сообщения этого чата будут удалены с этого устройства.</string>
@@ -112,6 +117,8 @@
     <string name="test_ok">Сервер ответил.</string>
     <string name="test_fail">Нет корректного ответа от сервера.</string>
     <string name="locking">Блокировка</string>
+    <string name="app_lock">Блокировка приложения</string>
+    <string name="app_lock_off_note">Приложение блокируется только при запуске и кнопкой «Заблокировать». Включите блокировку, чтобы оно блокировалось при бездействии или в фоне.</string>
     <string name="lock_idle">Блокировать при бездействии</string>
     <string name="lock_background">Блокировать после выхода из приложения</string>
     <string name="lock_immediately">Сразу</string>
@@ -122,7 +129,9 @@
     <string name="lock_now">Заблокировать</string>
     <string name="notifications">Уведомления</string>
     <string name="notifications_enable">Показывать уведомления</string>
-    <string name="notifications_note">В уведомлении только факт нового сообщения, без отправителя и текста. Пока приложение заблокировано, сообщения не загружаются и уведомлений нет; они ждут на сервере до разблокировки.</string>
+    <string name="notifications_content">Показывать отправителя и текст</string>
+    <string name="notifications_content_note">Только пока приложение разблокировано. На экране блокировки по-прежнему только «Новое сообщение».</string>
+    <string name="notifications_note">Если отправитель и текст не включены, в уведомлении только факт нового сообщения. Пока приложение заблокировано, сообщения не загружаются и уведомлений нет; они ждут на сервере до разблокировки.</string>
     <string name="language">Язык</string>
     <string name="lang_system">Системный</string>
     <string name="data">Данные</string>
@@ -193,7 +202,7 @@
     <string name="profile_note">Имя, описание и частицы отправляются вашим контактам.</string>
     <string name="privacy_security">Приватность и безопасность</string>
     <string name="secure_screen">Запретить снимки и превью экрана</string>
-    <string name="secure_note">Скрывает приложение в списке задач и блокирует захват экрана.</string>
+    <string name="secure_note">Запрещает снимки и запись экрана во всех окнах и диалогах и скрывает приложение в списке задач. При включённой блокировке список задач никогда не показывает чат.</string>
     <string name="pin_title">PIN-код</string>
     <string name="duress_title">PIN под принуждением</string>
     <string name="background_check">Проверять в фоне</string>

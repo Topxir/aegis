@@ -87,10 +87,15 @@
     <string name="safety_verified">Marked as verified</string>
     <string name="ttl_title">Disappearing messages</string>
     <string name="ttl_off">Off</string>
+    <string name="ttl_30s">30 sec</string>
+    <string name="ttl_5m">5 min</string>
     <string name="ttl_1h">1 hour</string>
     <string name="ttl_1d">1 day</string>
-    <string name="ttl_7d">7 days</string>
-    <string name="ttl_note">Applies to new messages in this chat. The other side deletes them too, but a modified client may keep them.</string>
+    <string name="ttl_7d">1 week</string>
+    <string name="ttl_note">Applies to new messages in this chat, for everyone in it. Each device deletes a message this long after it arrived there, attachments included. A modified client may keep them.</string>
+    <string name="ttl_line_set">%1$s set disappearing messages to %2$s</string>
+    <string name="ttl_line_off">%1$s turned off disappearing messages</string>
+    <string name="ttl_you">You</string>
     <string name="history">History</string>
     <string name="clear_history">Clear chat history</string>
     <string name="clear_history_body">Messages of this chat will be deleted from this device.</string>
@@ -112,6 +117,8 @@
     <string name="test_ok">The server answered.</string>
     <string name="test_fail">No valid answer from the server.</string>
     <string name="locking">Locking</string>
+    <string name="app_lock">App lock</string>
+    <string name="app_lock_off_note">The app locks only when it starts and with Lock now. Turn the app lock on to lock it after inactivity or in the background.</string>
     <string name="lock_idle">Lock after inactivity</string>
     <string name="lock_background">Lock after leaving the app</string>
     <string name="lock_immediately">Now</string>
@@ -122,7 +129,9 @@
     <string name="lock_now">Lock now</string>
     <string name="notifications">Notifications</string>
     <string name="notifications_enable">Show notifications</string>
-    <string name="notifications_note">Notifications say only that a message arrived, without sender or text. While the app is locked, nothing is fetched and no notifications appear; messages wait on the server until you unlock.</string>
+    <string name="notifications_content">Show sender and text</string>
+    <string name="notifications_content_note">Only while the app is unlocked. The lock screen still shows only “New message”.</string>
+    <string name="notifications_note">Unless sender and text are switched on, notifications say only that a message arrived. While the app is locked, nothing is fetched and no notifications appear; messages wait on the server until you unlock.</string>
     <string name="language">Language</string>
     <string name="lang_system">System</string>
     <string name="data">Data</string>
@@ -193,7 +202,7 @@
     <string name="profile_note">Your name, about and particles are sent to your contacts.</string>
     <string name="privacy_security">Privacy and security</string>
     <string name="secure_screen">Block screenshots and previews</string>
-    <string name="secure_note">Hides the app in the task switcher and stops screen capture.</string>
+    <string name="secure_note">Stops screenshots and screen recording in every window and dialog and hides the app in the task switcher. With the app lock on the task switcher never shows a chat.</string>
     <string name="pin_title">PIN</string>
     <string name="duress_title">Duress PIN</string>
     <string name="background_check">Check in the background</string>

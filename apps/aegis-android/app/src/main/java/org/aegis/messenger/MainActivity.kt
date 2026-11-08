@@ -34,10 +34,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** FLAG_SECURE follows the setting, on by default. */
+    /**
+     * FLAG_SECURE follows the setting, on by default. With it off but the app lock on, the task
+     * switcher still gets no thumbnail, so no chat stays visible there while the app is locked.
+     */
     fun applySecure() {
-        if (Boot.secureScreen(this)) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        val secure = Boot.secureScreen(this)
+        if (secure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(!secure && !Boot.appLock(this))
+    }
+
+    override fun onResume() {
+        super.onResume()
+        applySecure()
+    }
+
+    override fun onPause() {
+        // Before Android 13 the thumbnail can only be kept out with FLAG_SECURE, set as the app leaves.
+        if (Build.VERSION.SDK_INT < 33 && Boot.appLock(this)) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        super.onPause()
     }
 
     override fun onStart() {
