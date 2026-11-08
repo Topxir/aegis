@@ -274,6 +274,10 @@ fn dispatch(state: &Mutex<ServerState>, req: &Request, now: u64) -> BlobReply {
     if req.path.starts_with("/api/v2/blob/") {
         return handle_blob(state, req, now);
     }
+    if req.path.starts_with("/api/v2/update/") {
+        let dir = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).update_dir();
+        return crate::update::handle_update(dir.as_deref(), req);
+    }
     let (resp, changes) = state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

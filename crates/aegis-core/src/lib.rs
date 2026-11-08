@@ -30,6 +30,7 @@ pub mod sealed;
 pub mod senderkey;
 pub mod session;
 pub mod text;
+pub mod update;
 pub mod vault;
 pub mod vectors;
 pub mod x3dh;

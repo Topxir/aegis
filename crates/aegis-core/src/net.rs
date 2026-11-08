@@ -473,6 +473,32 @@ impl Client {
         }
     }
 
+    /// The signed update manifest (spec section 29); `None` if the server publishes none.
+    pub fn update_manifest(&self) -> Result<Option<Vec<u8>>> {
+        let (code, body) =
+            self.request_capped("GET", "/api/v2/update/manifest", "", &[], crate::update::MAX_MANIFEST)?;
+        match code {
+            404 => Ok(None),
+            200 if !body.is_empty() => Ok(Some(body)),
+            200 => Err(Error::BadResponse),
+            c => Err(Error::Http(c)),
+        }
+    }
+
+    /// Up to one chunk of a published update file, starting at byte `off`.
+    pub fn update_chunk(&self, name: &str, off: u64) -> Result<Vec<u8>> {
+        if !crate::update::valid_name(name) {
+            return Err(Error::Update("file name"));
+        }
+        let path = format!("/api/v2/update/file?name={name}&off={off}");
+        let (code, body) = self.request_capped("GET", &path, "", &[], crate::update::CHUNK)?;
+        match code {
+            200 if !body.is_empty() => Ok(body),
+            200 => Err(Error::BadResponse),
+            c => Err(Error::Http(c)),
+        }
+    }
+
     fn connect(&self) -> Result<TcpStream> {
         let ep = &self.endpoint;
         let stream = if let Some(proxy) = &self.socks5 {
