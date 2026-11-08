@@ -208,7 +208,8 @@ fn dir_register_and_exact_lookup() {
     assert_eq!(r.status, 200);
     let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
     assert_eq!(v["u"], "alice");
-    assert_eq!(v["title"], "Alice");
+    // The title is signed by the client but never stored or served (section 3).
+    assert_eq!(v["title"], "");
     assert_eq!(v["x"], hex::encode(&a.x_public()));
     assert_eq!(v["ed"], hex::encode(&a.ed_public()));
     assert!(v.as_object().unwrap().keys().all(|k| ["u", "title", "x", "ed"].contains(&k.as_str())));
@@ -315,10 +316,10 @@ fn dir_username_bound_to_first_key() {
     let before = lookup(s.addr, "alice").body;
     assert_eq!(register(s.addr, &m, "alice", "Mallory").status, 409);
     assert_eq!(lookup(s.addr, "alice").body, before, "squatter must not change the entry");
-    // Same key may update its title.
+    // Same key may register again; the title is still not kept.
     assert_eq!(register(s.addr, &a, "alice", "Alice 2").status, 200);
     let v: serde_json::Value = serde_json::from_str(&lookup(s.addr, "alice").body).unwrap();
-    assert_eq!(v["title"], "Alice 2");
+    assert_eq!(v["title"], "");
     // Case variants cannot create a second entry for the same name.
     assert_eq!(post_form(s.addr, &mined(&m, "alice", "x", now()).to_form().replacen("u=alice", "u=ALICE", 1)).status, 400);
 }

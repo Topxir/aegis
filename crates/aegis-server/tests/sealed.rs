@@ -368,7 +368,7 @@ fn sealed_directory_register_and_lookup() {
     let (c, b) = sealed_call(&r, "GET", "/api/v2/dir/lookup?u=alice", b"");
     assert_eq!(c, 200);
     let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
-    assert_eq!(v["title"], "Alice");
+    assert_eq!(v["u"], "alice");
     assert_eq!(sealed_call(&r, "GET", "/api/v2/dir/lookup?u=bobby", b"").0, 404);
 }
 

@@ -1,6 +1,7 @@
 use crate::blob::{is_blob_id, BlobStore, Reserve, DEFAULT_BLOB_QUOTA_BYTES, DEFAULT_BLOB_TTL_SECS, MAX_BLOB_BYTES};
 use crate::http::{BlobReply, Request, Response};
 use aegis_core::directory::Registration;
+use aegis_core::invite::{Hide, InviteCreate, INVITE_TTL_SECS, MAX_OPEN_INVITES};
 use aegis_core::prekeys::{PrekeyPut, PrekeyTake, MAX_OPKS};
 use aegis_core::identity::is_valid_username;
 use aegis_core::text::parse_u64;
@@ -16,7 +17,8 @@ use std::sync::{Arc, Mutex};
 pub const DEFAULT_QUEUE_TTL_SECS: u64 = 14 * 24 * 3600;
 /// Name of the persisted state inside the data directory.
 pub const STATE_FILE: &str = "server-v2.state";
-const MAGIC: &[u8; 8] = b"AEGSRV04";
+const MAGIC: &[u8; 8] = b"AEGSRV05";
+const MAGIC_V4: &[u8; 8] = b"AEGSRV04";
 const MAGIC_V3: &[u8; 8] = b"AEGSRV03";
 const MAGIC_V2: &[u8; 8] = b"AEGSRV02";
 /// Name of the server's long-term X25519 secret (section 23) inside the data directory.
@@ -55,6 +57,8 @@ pub struct Config {
     /// Reply bytes `nop` may hand out per second, shared by all clients; up to
     /// `NOP_BURST_SECS` seconds of it can be spent at once.
     pub nop_bytes_per_sec: u64,
+    /// Most open invites stored at once, over all users.
+    pub max_invites: usize,
 }
 
 impl Default for Config {
@@ -75,6 +79,7 @@ impl Default for Config {
             blob_ttl_secs: DEFAULT_BLOB_TTL_SECS,
             owner_ed_pk: None,
             nop_bytes_per_sec: 8 * 1024 * 1024,
+            max_invites: 1_000_000,
         }
     }
 }
@@ -108,9 +113,17 @@ impl From<std::io::Error> for ServerError {
 
 #[derive(Clone)]
 struct DirEntry {
-    title: String,
     x: [u8; 32],
     ed: [u8; 32],
+    /// Lookups answer "not found" (section 29).
+    hidden: bool,
+}
+
+/// An open invite: only the hash of the secret and the sealed bundle are kept.
+#[derive(Clone)]
+struct Invite {
+    exp: u64,
+    sealed: Vec<u8>,
 }
 
 /// Most sealed requests accepted per timestamp second. A full second refuses further requests
@@ -126,6 +139,8 @@ enum Undo {
     Prekeys(String, Option<Prekeys>),
     PrekeyPut(String),
     Frame([u8; 32], u64),
+    Invite([u8; 32], Option<Invite>),
+    InviteDay(String, u64),
 }
 
 /// Changes made by one request, newest last.
@@ -190,6 +205,13 @@ pub struct ServerState {
     config: Config,
     path: Option<PathBuf>,
     dir: HashMap<String, DirEntry>,
+    /// The username held by each identity key.
+    owners: HashMap<[u8; 32], String>,
+    invites: HashMap<[u8; 32], Invite>,
+    /// Invites created per user and unix day (memory only, never linked to the invites).
+    invite_days: HashMap<String, BTreeMap<u64, usize>>,
+    /// Stand-in key checked for unknown users, so they answer like a bad signature.
+    dummy_ed: [u8; 32],
     queues: HashMap<[u8; 32], VecDeque<Frame>>,
     /// Times of recent accepted prekey puts per user (memory only).
     prekey_puts: HashMap<String, VecDeque<u64>>,
@@ -281,6 +303,10 @@ impl ServerState {
             config,
             path: None,
             dir: HashMap::new(),
+            owners: HashMap::new(),
+            invites: HashMap::new(),
+            invite_days: HashMap::new(),
+            dummy_ed: aegis_core::identity::ed25519_public(&[1; 32]),
             queues: HashMap::new(),
             prekey_puts: HashMap::new(),
             next_seq: 1,
@@ -318,7 +344,11 @@ impl ServerState {
                     self.dir.insert(u, e);
                 }
                 Undo::Dir(u, None) => {
-                    self.dir.remove(&u);
+                    if let Some(e) = self.dir.remove(&u) {
+                        if self.owners.get(&e.ed) == Some(&u) {
+                            self.owners.remove(&e.ed);
+                        }
+                    }
                 }
                 Undo::Pin(slot, Some(p)) => {
                     self.pins.insert(slot, p);
@@ -335,6 +365,17 @@ impl ServerState {
                 Undo::PrekeyPut(u) => {
                     if let Some(t) = self.prekey_puts.get_mut(&u) {
                         t.pop_back();
+                    }
+                }
+                Undo::Invite(id, Some(i)) => {
+                    self.invites.insert(id, i);
+                }
+                Undo::Invite(id, None) => {
+                    self.invites.remove(&id);
+                }
+                Undo::InviteDay(u, day) => {
+                    if let Some(n) = self.invite_days.get_mut(&u).and_then(|d| d.get_mut(&day)) {
+                        *n = n.saturating_sub(1);
                     }
                 }
                 Undo::Frame(q, seq) => {
@@ -368,9 +409,13 @@ impl ServerState {
             ("POST", "/api/v2/prekeys/take") => self.prekeys_take(&req.body, now),
             ("POST", "/api/v2/dir/register") => self.register(&req.body, now),
             ("GET", "/api/v2/dir/lookup") => self.lookup(&req.query),
+            ("POST", "/api/v2/dir/hide") => self.hide(&req.body, now),
+            ("POST", "/api/v2/invite/create") => self.invite_create(&req.body, now),
+            ("POST", "/api/v2/invite/redeem") => self.invite_redeem(&req.body, now),
+            ("POST", "/api/v2/invite/revoke") => self.invite_revoke(&req.body),
             ("POST", "/api/v2/queue/send") => self.send(&req.query, &req.body, now),
             ("GET", "/api/v2/queue/poll") => self.poll(&req.query, now),
-            (_, "/health" | "/api/v2/key" | "/api/v2/nop" | "/api/v2/pin/create" | "/api/v2/pin/open" | "/api/v2/pin/delete" | "/api/v2/prekeys/put" | "/api/v2/prekeys/take" | "/api/v2/dir/register" | "/api/v2/dir/lookup" | "/api/v2/queue/send" | "/api/v2/queue/poll") => {
+            (_, "/health" | "/api/v2/key" | "/api/v2/nop" | "/api/v2/pin/create" | "/api/v2/pin/open" | "/api/v2/pin/delete" | "/api/v2/prekeys/put" | "/api/v2/prekeys/take" | "/api/v2/dir/register" | "/api/v2/dir/lookup" | "/api/v2/dir/hide" | "/api/v2/invite/create" | "/api/v2/invite/redeem" | "/api/v2/invite/revoke" | "/api/v2/queue/send" | "/api/v2/queue/poll") => {
                 err(405, "method not allowed")
             }
             _ => err(404, "not found"),
@@ -406,6 +451,7 @@ impl ServerState {
             Some(e) if e.ed != reg.ed => return err(409, "username is bound to another key"),
             // A name already bound to this key keeps working even if a later rule reserves it.
             Some(_) => {}
+            None if self.owners.contains_key(&reg.ed) => return err(409, "key already has a username"),
             None if is_reserved_name(&reg.u) && self.config.owner_ed_pk != Some(reg.ed) => {
                 return err(403, "reserved username");
             }
@@ -415,10 +461,10 @@ impl ServerState {
             None => {}
         }
         self.replay.insert(hash, self.replay_expiry(reg.ts, now));
-        let old = self.dir.insert(
-            reg.u.clone(),
-            DirEntry { title: reg.title, x: reg.x, ed: reg.ed },
-        );
+        // The title is covered by the signature but never stored (section 3).
+        let hidden = self.dir.get(&reg.u).is_some_and(|e| e.hidden);
+        let old = self.dir.insert(reg.u.clone(), DirEntry { x: reg.x, ed: reg.ed, hidden });
+        self.owners.entry(reg.ed).or_insert_with(|| reg.u.clone());
         self.journal.push(Undo::Dir(reg.u, old));
         self.dirty = true;
         json_resp(200, &json!({"ok": true}))
@@ -431,12 +477,126 @@ impl ServerState {
             Err(r) => return r,
         };
         match self.dir.get(u) {
-            Some(e) => json_resp(
+            Some(e) if !e.hidden => json_resp(
                 200,
-                &json!({"u": u, "title": e.title, "x": hex::encode(&e.x), "ed": hex::encode(&e.ed)}),
+                &json!({"u": u, "title": "", "x": hex::encode(&e.x), "ed": hex::encode(&e.ed)}),
             ),
-            None => err(404, "not found"),
+            _ => err(404, "not found"),
         }
+    }
+
+    /// The key a signed request of `u` is checked against: the registered one, or a stand-in
+    /// for an unknown user so both cases cost the same and answer the same.
+    fn signing_key(&self, u: &str) -> (bool, [u8; 32]) {
+        match self.dir.get(u) {
+            Some(e) => (true, e.ed),
+            None => (false, self.dummy_ed),
+        }
+    }
+
+    fn hide(&mut self, body: &[u8], now: u64) -> Response {
+        let Ok(text) = core::str::from_utf8(body) else {
+            return err(400, "body is not utf-8");
+        };
+        let Ok(h) = Hide::from_form(text) else {
+            return err(400, "malformed request");
+        };
+        if !pow::ts_in_window(h.ts, now) {
+            return err(403, "timestamp out of range");
+        }
+        let (known, ed) = self.signing_key(&h.u);
+        if !(h.sig_ok(&ed) & known) {
+            return err(403, "bad signature");
+        }
+        let hash = aegis_core::sha256(&[&aegis_core::invite::hide_message(&h.u, h.hidden, h.ts)]);
+        if self.pow_spent(hash, now) {
+            return err(403, "request already used");
+        }
+        self.replay.insert(hash, self.replay_expiry(h.ts, now));
+        if let Some(e) = self.dir.get_mut(&h.u) {
+            if e.hidden != h.hidden {
+                let old = e.clone();
+                e.hidden = h.hidden;
+                self.journal.push(Undo::Dir(h.u, Some(old)));
+                self.dirty = true;
+            }
+        }
+        json_resp(200, &json!({"ok": true}))
+    }
+
+    fn invite_create(&mut self, body: &[u8], now: u64) -> Response {
+        let Ok(text) = core::str::from_utf8(body) else {
+            return err(400, "body is not utf-8");
+        };
+        let Ok(c) = InviteCreate::from_form(text) else {
+            return err(400, "malformed invite");
+        };
+        if !pow::ts_in_window(c.ts, now) {
+            return err(403, "timestamp out of range");
+        }
+        let (known, ed) = self.signing_key(&c.u);
+        if !(c.sig_ok(&ed) & known) {
+            return err(403, "bad signature");
+        }
+        let hash = aegis_core::sha256(&[&c.message()]);
+        if self.pow_spent(hash, now) {
+            return err(403, "request already used");
+        }
+        let today = now / 86_400;
+        let made: usize = self
+            .invite_days
+            .get(&c.u)
+            .map(|d| d.range(today.saturating_sub(INVITE_DAYS - 1)..).map(|(_, n)| n).sum())
+            .unwrap_or(0);
+        if made >= MAX_OPEN_INVITES {
+            return err(429, "too many invites");
+        }
+        if self.invites.contains_key(&c.id) {
+            return err(409, "invite exists");
+        }
+        if self.invites.len() >= self.config.max_invites {
+            return err(503, "invite table full");
+        }
+        self.replay.insert(hash, self.replay_expiry(c.ts, now));
+        // Rounded up to the hour so the expiry does not give away the creation second.
+        let exp = (now + INVITE_TTL_SECS).div_ceil(3600) * 3600;
+        self.invites.insert(c.id, Invite { exp, sealed: c.sealed });
+        *self.invite_days.entry(c.u.clone()).or_default().entry(today).or_default() += 1;
+        self.journal.push(Undo::Invite(c.id, None));
+        self.journal.push(Undo::InviteDay(c.u, today));
+        self.dirty = true;
+        json_resp(200, &json!({"ok": true}))
+    }
+
+    /// Hands out the bundle once. Unknown, used and expired invites answer the same.
+    fn invite_redeem(&mut self, body: &[u8], now: u64) -> Response {
+        let Some(id) = invite_id_form(body) else {
+            return err(400, "malformed request");
+        };
+        // An expired record is left for `purge`, so it answers exactly like an unknown id and
+        // causes no write.
+        match self.invites.get(&id) {
+            Some(inv) if inv.exp > now => {}
+            _ => return err(404, "not found"),
+        }
+        let Some(inv) = self.invites.remove(&id) else {
+            return err(404, "not found");
+        };
+        self.journal.push(Undo::Invite(id, Some(inv.clone())));
+        self.dirty = true;
+        json_resp(200, &json!({"box": hex::encode(&inv.sealed)}))
+    }
+
+    /// Whoever holds the link may drop the invite. Its creation still counts towards the cap.
+    fn invite_revoke(&mut self, body: &[u8]) -> Response {
+        let Some(id) = invite_id_form(body) else {
+            return err(400, "malformed request");
+        };
+        if let Some(inv) = self.invites.remove(&id) {
+            self.journal.push(Undo::Invite(id, Some(inv)));
+            self.dirty = true;
+        }
+        json_resp(200, &json!({"ok": true}))
     }
 
     fn send(&mut self, q: &[(String, String)], body: &[u8], now: u64) -> Response {
@@ -621,6 +781,14 @@ impl ServerState {
         self.replay.expire(now);
         self.expire_sealed(now);
         self.prekey_puts.retain(|_, t| t.back().is_some_and(|b| b.saturating_add(3600) > now));
+        let before = self.invites.len();
+        self.invites.retain(|_, i| i.exp > now);
+        changed |= self.invites.len() != before;
+        let today = now / 86_400;
+        self.invite_days.retain(|_, d| {
+            d.retain(|day, n| *n > 0 && day + INVITE_DAYS > today);
+            !d.is_empty()
+        });
         let before = self.pins.len();
         self.pins.retain(|_, p| p.last_used.saturating_add(PIN_TTL_SECS) > now);
         changed |= self.pins.len() != before;
@@ -651,14 +819,12 @@ impl ServerState {
         let Ok(put) = PrekeyPut::from_form(text) else {
             return err(400, "malformed prekeys");
         };
-        let Some(entry) = self.dir.get(&put.u) else {
-            return err(404, "unknown user");
-        };
-        let ed = entry.ed;
         if !pow::ts_in_window(put.ts, now) {
             return err(403, "timestamp out of range");
         }
-        if !put.sig_ok(&ed) || !put.spk_sig_ok(&ed) {
+        // Unknown users answer like a bad signature, so a hidden name cannot be told apart.
+        let (known, ed) = self.signing_key(&put.u);
+        if !(put.sig_ok(&ed) & put.spk_sig_ok(&ed) & known) {
             return err(403, "bad signature");
         }
         let hash = aegis_core::sha256(&[&put.message()]);
@@ -738,7 +904,13 @@ impl ServerState {
             return err(403, "proof of work already used");
         }
         self.replay.insert(hash, self.replay_expiry(take.ts, now));
-        let Some(rec) = self.prekeys.get_mut(&take.u) else {
+        // A hidden user's prekeys go only to callers that already know its key.
+        let visible = match (self.dir.get(&take.u), take.ed) {
+            (Some(e), Some(ed)) => ct_eq(&e.ed, &ed),
+            (Some(e), None) => !e.hidden,
+            (None, _) => false,
+        };
+        let Some(rec) = self.prekeys.get_mut(&take.u).filter(|_| visible) else {
             return err(404, "not found");
         };
         let before = rec.clone();
@@ -958,9 +1130,9 @@ impl ServerState {
         put_len(&mut o, self.dir.len());
         for (u, e) in &self.dir {
             put_bytes(&mut o, u.as_bytes());
-            put_bytes(&mut o, e.title.as_bytes());
             o.extend_from_slice(&e.x);
             o.extend_from_slice(&e.ed);
+            o.push(u8::from(e.hidden));
         }
         put_len(&mut o, self.pins.len());
         for (slot, p) in &self.pins {
@@ -981,6 +1153,12 @@ impl ServerState {
                 o.extend_from_slice(k);
             }
         }
+        put_len(&mut o, self.invites.len());
+        for (id, i) in &self.invites {
+            o.extend_from_slice(id);
+            o.extend_from_slice(&i.exp.to_be_bytes());
+            put_bytes(&mut o, &i.sealed);
+        }
         put_len(&mut o, self.queues.len());
         for (q, frames) in &self.queues {
             o.extend_from_slice(q);
@@ -998,21 +1176,35 @@ impl ServerState {
         let mut r = Reader { b: bytes, i: 0 };
         let parsed = (|| -> Option<()> {
             let magic = r.take(8)?;
-            if magic != MAGIC && magic != MAGIC_V3 && magic != MAGIC_V2 {
+            if magic != MAGIC && magic != MAGIC_V4 && magic != MAGIC_V3 && magic != MAGIC_V2 {
                 return None;
             }
             let has_pins = magic != MAGIC_V2;
-            let has_prekeys = magic == MAGIC;
+            let has_prekeys = magic == MAGIC || magic == MAGIC_V4;
+            // Older files carry a display title per user; it is read and dropped.
+            let has_titles = magic != MAGIC;
             self.next_seq = r.u64()?;
             for _ in 0..r.u32()? {
                 let u = String::from_utf8(r.bytes()?.to_vec()).ok()?;
-                let title = String::from_utf8(r.bytes()?.to_vec()).ok()?;
+                if has_titles {
+                    core::str::from_utf8(r.bytes()?).ok()?;
+                }
                 let x: [u8; 32] = r.take(32)?.try_into().ok()?;
                 let ed: [u8; 32] = r.take(32)?.try_into().ok()?;
+                let hidden = if has_titles {
+                    false
+                } else {
+                    match r.take(1)?[0] {
+                        0 => false,
+                        1 => true,
+                        _ => return None,
+                    }
+                };
                 if !is_valid_username(&u) {
                     return None;
                 }
-                self.dir.insert(u, DirEntry { title, x, ed });
+                self.owners.entry(ed).or_insert_with(|| u.clone());
+                self.dir.insert(u, DirEntry { x, ed, hidden });
             }
             if has_pins {
                 for _ in 0..r.u32()? {
@@ -1044,6 +1236,17 @@ impl ServerState {
                     self.prekeys.insert(u, Prekeys { spk, spk_ts, spk_sig, opks });
                 }
             }
+            if !has_titles {
+                for _ in 0..r.u32()? {
+                    let id: [u8; 32] = r.take(32)?.try_into().ok()?;
+                    let exp = r.u64()?;
+                    let sealed = r.bytes()?.to_vec();
+                    if sealed.len() != aegis_core::invite::BOX_LEN {
+                        return None;
+                    }
+                    self.invites.insert(id, Invite { exp, sealed });
+                }
+            }
             for _ in 0..r.u32()? {
                 let q: [u8; 32] = r.take(32)?.try_into().ok()?;
                 let mut frames = VecDeque::new();
@@ -1062,6 +1265,8 @@ impl ServerState {
         })();
         if parsed.is_none() {
             self.dir.clear();
+            self.owners.clear();
+            self.invites.clear();
             self.pins.clear();
             self.prekeys.clear();
             self.queues.clear();
@@ -1167,6 +1372,13 @@ impl ServerState {
         self.nop_budget = (rest, now);
         Response { status: 200, body: "\0".repeat(len) }
     }
+}
+
+/// Days an invite creation counts towards the cap.
+const INVITE_DAYS: u64 = INVITE_TTL_SECS / 86_400;
+
+fn invite_id_form(body: &[u8]) -> Option<[u8; 32]> {
+    aegis_core::invite::parse_id_form(core::str::from_utf8(body).ok()?).ok()
 }
 
 fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
@@ -1343,7 +1555,7 @@ mod tests {
         assert_eq!(r.status, 200);
         let v: serde_json::Value = serde_json::from_str(&r.body).unwrap();
         assert_eq!(v["u"], "alice");
-        assert_eq!(v["title"], "Alice <b>");
+        assert_eq!(v["title"], "");
         assert_eq!(v["x"], hex::encode(&id.x_public()));
         assert_eq!(v["ed"], hex::encode(&id.ed_public()));
         assert_eq!(s.handle(&req("GET", "/api/v2/dir/lookup", "u=bob", b""), NOW).status, 404);
@@ -1367,7 +1579,7 @@ mod tests {
     }
 
     #[test]
-    fn title_update_same_key_and_conflict_other_key() {
+    fn title_is_never_stored_and_other_key_conflicts() {
         let mut s = ServerState::ephemeral(cfg());
         let a = Identity::from_secrets([1; 32], [2; 32]);
         let m = Identity::from_secrets([1; 32], [9; 32]);
@@ -1377,7 +1589,7 @@ mod tests {
         assert_eq!(post(&mut s, &reg_form(&a, "alice", "One", NOW, 6), NOW), 200);
         assert_eq!(post(&mut s, &reg_form(&a, "alice", "Two", NOW + 1, 6), NOW + 1), 200);
         let r = s.handle(&req("GET", "/api/v2/dir/lookup", "u=alice", b""), NOW);
-        assert!(r.body.contains("Two"));
+        assert!(!r.body.contains("One") && !r.body.contains("Two"));
         assert_eq!(post(&mut s, &reg_form(&m, "alice", "Evil", NOW + 2, 6), NOW + 2), 409);
         assert!(!s.handle(&req("GET", "/api/v2/dir/lookup", "u=alice", b""), NOW).body.contains("Evil"));
     }

@@ -2,6 +2,7 @@
 
 use crate::directory::Registration;
 use crate::identity::{is_valid_username, Identity};
+use crate::invite::{Hide, InviteCreate};
 use crate::text::{pct_encode, sanitize_display_text};
 use crate::prekeys::{PrekeyPut, PrekeyTake};
 use crate::x3dh::Bundle;
@@ -269,7 +270,8 @@ impl Client {
                 }
                 Ok(Some(DirEntry {
                     u: u.to_owned(),
-                    title: sanitize_display_text(s("title")?),
+                    // Servers no longer store titles (section 3); the field may be empty or absent.
+                    title: sanitize_display_text(v["title"].as_str().unwrap_or("")),
                     x: hex::decode_array(s("x")?).map_err(|_| Error::BadResponse)?,
                     ed: hex::decode_array(s("ed")?).map_err(|_| Error::BadResponse)?,
                 }))
@@ -368,14 +370,62 @@ impl Client {
 
     /// Takes a prekey bundle for `u`; `None` if the user has no signed prekey.
     pub fn prekeys_take(&self, u: &str) -> Result<Option<Bundle>> {
+        self.prekeys_take_for(u, None)
+    }
+
+    /// [`Self::prekeys_take`] naming the key the caller knows for `u`. A hidden user's
+    /// prekeys are only handed out this way (section 29.4).
+    pub fn prekeys_take_for(&self, u: &str, ed: Option<&[u8; 32]>) -> Result<Option<Bundle>> {
         if !is_valid_username(u) {
             return Err(Error::InvalidUsername);
         }
-        let take = PrekeyTake::mine_from(u, unique_ts(), self.pow_bits, pow_start());
+        let mut take = PrekeyTake::mine_from(u, unique_ts(), self.pow_bits, pow_start());
+        if let Some(ed) = ed {
+            take = take.with_ed(*ed);
+        }
         let (code, body) = self.request("POST", "/api/v2/prekeys/take", "application/x-www-form-urlencoded", take.to_form().as_bytes())?;
         match code {
             404 => Ok(None),
             200 => Bundle::from_json(&body).map(Some),
+            c => Err(Error::Http(c)),
+        }
+    }
+
+    /// Turns the directory listing of `u` off (`hidden`) or back on (section 29.4).
+    pub fn hide(&self, identity: &Identity, u: &str, hidden: bool) -> Result<()> {
+        let h = Hide::sign(identity, u, hidden, unique_ts())?;
+        self.form_ok("/api/v2/dir/hide", &h.to_form())
+    }
+
+    /// Stores a sealed contact bundle for the invite secret `s` (section 29).
+    pub fn invite_create(&self, identity: &Identity, u: &str, s: &[u8; 32]) -> Result<()> {
+        let c = InviteCreate::sign(identity, u, s, unique_ts())?;
+        self.form_ok("/api/v2/invite/create", &c.to_form())
+    }
+
+    /// Redeems an invite: `None` if it is unknown, used or expired.
+    pub fn invite_redeem(&self, s: &[u8; 32]) -> Result<Option<crate::invite::Bundle>> {
+        let form = crate::invite::id_form(&crate::invite::invite_id(s));
+        let (code, body) = self.request("POST", "/api/v2/invite/redeem", "application/x-www-form-urlencoded", form.as_bytes())?;
+        match code {
+            404 => Ok(None),
+            200 => {
+                let v: serde_json::Value = serde_json::from_slice(&body).map_err(|_| Error::BadResponse)?;
+                let sealed = hex::decode(v["box"].as_str().ok_or(Error::BadResponse)?).map_err(|_| Error::BadResponse)?;
+                crate::invite::open_bundle(s, &sealed).map(Some)
+            }
+            c => Err(Error::Http(c)),
+        }
+    }
+
+    /// Drops an open invite. The server answers the same whether it existed or not.
+    pub fn invite_revoke(&self, s: &[u8; 32]) -> Result<()> {
+        self.form_ok("/api/v2/invite/revoke", &crate::invite::id_form(&crate::invite::invite_id(s)))
+    }
+
+    fn form_ok(&self, path: &str, form: &str) -> Result<()> {
+        match self.request("POST", path, "application/x-www-form-urlencoded", form.as_bytes())?.0 {
+            200 => Ok(()),
             c => Err(Error::Http(c)),
         }
     }

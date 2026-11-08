@@ -15,6 +15,7 @@ mod error;
 pub mod group;
 pub mod hex;
 pub mod identity;
+pub mod invite;
 pub mod mp4clean;
 pub mod net;
 pub mod official;

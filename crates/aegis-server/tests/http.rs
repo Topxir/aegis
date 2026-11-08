@@ -67,13 +67,13 @@ fn health_register_lookup_over_http() {
     let id = Identity::from_secrets([1; 32], [2; 32]);
     c.register(&id, "alice", "Alice").unwrap();
     let e = c.lookup("alice").unwrap().unwrap();
-    assert_eq!(e.title, "Alice");
+    assert_eq!(e.title, "", "titles are never stored (section 3)");
     assert_eq!(e.x, id.x_public());
     assert_eq!(e.ed, id.ed_public());
     assert!(c.lookup("bobby").unwrap().is_none());
     let other = Identity::from_secrets([3; 32], [4; 32]);
     assert!(c.register(&other, "alice", "Mallory").is_err());
-    assert_eq!(c.lookup("alice").unwrap().unwrap().title, "Alice");
+    assert_eq!(c.lookup("alice").unwrap().unwrap().ed, id.ed_public());
 }
 
 #[test]
