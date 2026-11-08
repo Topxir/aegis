@@ -5,7 +5,7 @@ enum class SkScope {
 
     fun id(g: ByteArray): String = if (this == Group) org.aegis.messenger.core.Group.groupId(g) else org.aegis.messenger.core.Channel.channelId(g)
     fun allows(k: Kind): Boolean = when (this) {
-        Group -> k == Kind.Gmsg || k == Kind.Gmf
+        Group -> k == Kind.Gmsg || k == Kind.Gmf || k == Kind.Gttl
         Channel -> k == Kind.Cmsg || k == Kind.Cmf
     }
 }

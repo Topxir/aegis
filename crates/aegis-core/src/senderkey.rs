@@ -40,7 +40,7 @@ impl Scope {
 
     fn allows(self, k: Kind) -> bool {
         match self {
-            Scope::Group => matches!(k, Kind::Gmsg | Kind::Gmf),
+            Scope::Group => matches!(k, Kind::Gmsg | Kind::Gmf | Kind::Gttl),
             Scope::Channel => matches!(k, Kind::Cmsg | Kind::Cmf),
         }
     }

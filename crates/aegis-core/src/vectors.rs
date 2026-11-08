@@ -222,6 +222,7 @@ pub fn generate() -> Result<Value> {
         "session": session_vectors(&dm)?,
         "senderkey": senderkey_vectors(&dm, &g)?,
         "sealed_transport": sealed_vectors()?,
+        "timer": timer_vectors(&dm, &g)?,
     }))
 }
 
@@ -530,6 +531,46 @@ fn senderkey_vectors(dm: &Envelope, g: &[u8; 32]) -> Result<Value> {
         "frame_layout": "0x05 || hnonce(12) || AEAD(hk, hnonce, aad 0x05, chain_id||BE32(n)) (36 bytes) || AEAD(msg_key, nonce, aad 0x05||chain_id||BE32(n), envelope||sig)",
         "n": 0,
         "now": 1_700_000_000,
+    }))
+}
+
+fn timer_vectors(dm: &Envelope, g: &[u8; 32]) -> Result<Value> {
+    let alice = Identity::from_secrets(seq(0x10), seq(0x20));
+    let gid = group::group_id(g);
+    let ttl = Envelope {
+        kind: Kind::Ttl,
+        msg_id: h(&seq(0x65)[..16]),
+        ttl_s: 300,
+        body: String::new(),
+        group_id: String::new(),
+        group_key: None,
+        members: vec![],
+        ..dm.clone()
+    };
+    let gttl = Envelope {
+        kind: Kind::Gttl,
+        msg_id: h(&seq(0x66)[..16]),
+        ttl_s: 30,
+        group_id: gid.clone(),
+        ..ttl.clone()
+    };
+    let (chain_id, hnonce) = (crate::arr::<16>(&seq(0xf3)[..16])?, crate::arr::<12>(&seq(0xf4)[..12])?);
+    let mut chain = SendChain::new_with(chain_id, b32(&seq(0xf5))?, 1_700_000_000);
+    let skey = chain.skey_envelope_with(h(&seq(0x67)[..16]), "alice", &dm.sender_name, alice.ed_public(), &gid, dm.ts_ms);
+    let frame = chain.encrypt_with(&hnonce, Scope::Group, g, alice.ed_secret(), &gttl)?;
+    let base = 1_700_000_000_000u64;
+    let expiry: Vec<Value> = [(0u64, 0u64), (30, 29_999), (30, 30_000), (300, 299_999), (86_400, 86_399_999), (604_800, 604_800_000), (0, 1_000_000_000_000)]
+        .iter()
+        .map(|&(t, d)| json!({"base_ms": base, "ttl_s": t, "now_ms": base + d, "expired": crate::envelope::expired_since(base, t, base + d)}))
+        .collect();
+    Ok(json!({
+        "choices": crate::envelope::TTL_CHOICES,
+        "ttl_envelope": env_json(&ttl)?,
+        "gttl_envelope": env_json(&gttl)?,
+        "g": h(g), "chain_id": h(&chain_id), "ck": h(&seq(0xf5)), "hnonce": h(&hnonce), "now": 1_700_000_000,
+        "skey_envelope": env_json(&skey)?,
+        "gttl_frame": h(&frame),
+        "expiry": expiry,
     }))
 }
 

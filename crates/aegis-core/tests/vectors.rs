@@ -188,6 +188,32 @@ fn new_vectors_verify_with_published_inputs() {
     let env = rs.decrypt(&frame, sk["now"].as_u64().unwrap()).unwrap();
     assert_eq!(env.body, "hello chain");
 
+    let tv = &v["timer"];
+    for k in ["ttl_envelope", "gttl_envelope"] {
+        let enc = hex::decode(s_(&tv[k], "encoded")).unwrap();
+        let e = Envelope::decode(&enc).unwrap();
+        assert_eq!(e.kind.as_str(), s_(&tv[k], "kind"));
+        assert_eq!(e.ttl_s, tv[k]["ttl_s"].as_u64().unwrap());
+        assert!(e.body.is_empty());
+        assert_eq!(e.encode().unwrap(), enc);
+    }
+    let g = a32(tv, "g");
+    let mut rs = RecvSet::new(Scope::Group, &g, None).unwrap();
+    let skey = Envelope::decode(&hex::decode(s_(&tv["skey_envelope"], "encoded")).unwrap()).unwrap();
+    rs.add_from_skey(&skey, tv["now"].as_u64().unwrap()).unwrap();
+    let env = rs.decrypt(&hex::decode(s_(tv, "gttl_frame")).unwrap(), tv["now"].as_u64().unwrap()).unwrap();
+    assert_eq!(env.kind.as_str(), "gttl");
+    assert_eq!(env.ttl_s, 30);
+    let choices: Vec<u64> = tv["choices"].as_array().unwrap().iter().map(|c| c.as_u64().unwrap()).collect();
+    assert_eq!(choices, aegis_core::envelope::TTL_CHOICES);
+    for c in tv["expiry"].as_array().unwrap() {
+        let n = |k: &str| c[k].as_u64().unwrap();
+        assert_eq!(
+            aegis_core::envelope::expired_since(n("base_ms"), n("ttl_s"), n("now_ms")),
+            c["expired"].as_bool().unwrap()
+        );
+    }
+
     let st = &v["sealed_transport"];
     let (req, k_resp) = sealed::open_request(&a32(st, "srv_sk"), &hex::decode(s_(st, "request")).unwrap()).unwrap();
     assert_eq!((req.method.as_str(), req.target.as_str()), (s_(st, "method"), s_(st, "target")));
