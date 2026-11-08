@@ -119,7 +119,9 @@ struct DirEntry {
     hidden: bool,
 }
 
-/// An open invite: only the hash of the secret and the sealed bundle are kept.
+/// An open invite: only the hash of the secret and the sealed bundle are kept. A used or
+/// revoked invite keeps its id with an empty bundle until `exp`, so the id cannot be created
+/// again with another bundle.
 #[derive(Clone)]
 struct Invite {
     exp: u64,
@@ -584,26 +586,30 @@ impl ServerState {
         };
         // An expired record is left for `purge`, so it answers exactly like an unknown id and
         // causes no write.
-        match self.invites.get(&id) {
-            Some(inv) if inv.exp > now => {}
-            _ => return err(404, "not found"),
-        }
-        let Some(inv) = self.invites.remove(&id) else {
+        let Some(inv) = self.invites.get_mut(&id) else {
             return err(404, "not found");
         };
-        self.journal.push(Undo::Invite(id, Some(inv.clone())));
+        if inv.exp <= now || inv.sealed.is_empty() {
+            return err(404, "not found");
+        }
+        let sealed = core::mem::take(&mut inv.sealed);
+        let exp = inv.exp;
+        self.journal.push(Undo::Invite(id, Some(Invite { exp, sealed: sealed.clone() })));
         self.dirty = true;
-        json_resp(200, &json!({"box": hex::encode(&inv.sealed)}))
+        json_resp(200, &json!({"box": hex::encode(&sealed)}))
     }
 
-    /// Whoever holds the link may drop the invite. Its creation still counts towards the cap.
+    /// Whoever holds the link may use up the invite. Its creation still counts towards the cap.
     fn invite_revoke(&mut self, body: &[u8]) -> Response {
         let Some(id) = invite_id_form(body) else {
             return err(400, "malformed request");
         };
-        if let Some(inv) = self.invites.remove(&id) {
-            self.journal.push(Undo::Invite(id, Some(inv)));
-            self.dirty = true;
+        if let Some(inv) = self.invites.get_mut(&id) {
+            if !inv.sealed.is_empty() {
+                let old = Invite { exp: inv.exp, sealed: core::mem::take(&mut inv.sealed) };
+                self.journal.push(Undo::Invite(id, Some(old)));
+                self.dirty = true;
+            }
         }
         json_resp(200, &json!({"ok": true}))
     }
@@ -1250,7 +1256,7 @@ impl ServerState {
                     let id: [u8; 32] = r.take(32)?.try_into().ok()?;
                     let exp = r.u64()?;
                     let sealed = r.bytes()?.to_vec();
-                    if sealed.len() != aegis_core::invite::BOX_LEN {
+                    if !sealed.is_empty() && sealed.len() != aegis_core::invite::BOX_LEN {
                         return None;
                     }
                     self.invites.insert(id, Invite { exp, sealed });

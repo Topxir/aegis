@@ -936,7 +936,7 @@ class Session(private val ctx: Context) {
             }
             if (frame.isNotEmpty() && frame[0] == SessionStore.FRAME_SESSION) return handleSessionFrame(client, d, frame)
             val o = Seal.openDm(d.xSk, frame)
-            if (o.envelope.kind == Kind.Iacc) return acceptInviteUse(o.envelope, o.senderXPk)
+            if (o.envelope.kind == Kind.Iacc) return acceptInviteUse(client, o.envelope, o.senderXPk)
             return ingest(client, o.envelope, o.senderXPk, null)
         } catch (e: AegisException.Network) {
             throw e
@@ -1572,7 +1572,11 @@ class Session(private val ctx: Context) {
             try {
                 val client = clientFor(d.settings)
                 val b = client.inviteRedeem(s)
+                // A visible inviter must match the directory; the invite is already used up, so a
+                // failed lookup does not stop it.
+                val listed = if (b == null) null else try { client.lookup(b.u) } catch (e: AegisException) { null }
                 if (b == null) err = R.string.err_invite_gone
+                else if (listed != null && (!Bytes.eq(listed.x, b.x) || !Bytes.eq(listed.ed, b.ed))) err = R.string.err_invite_link
                 else when (Invites.pin(data ?: d, b, id.xPublic, id.edPublic)) {
                     Invites.Pin.Self -> err = R.string.err_self
                     Invites.Pin.Conflict -> err = R.string.err_invite_conflict
@@ -1630,9 +1634,16 @@ class Session(private val ctx: Context) {
     }
 
     /** An `iacc` in the inbox. Only a sender proving one of the open invites is pinned; frames it sent earlier are then opened. */
-    private fun acceptInviteUse(env: Envelope, senderX: ByteArray): Int {
+    private fun acceptInviteUse(client: Client, env: Envelope, senderX: ByteArray): Int {
         val d = data ?: return 0
         if (SeenIds(SEEN_CAP, d.seen).contains(env.msgId)) return 0
+        // A name listed in the directory must come with the listed keys, so whoever intercepted
+        // a link cannot take the name of a visible user. A failed lookup leaves the frame for later.
+        val listed = client.lookup(env.sender)
+        if (listed != null && (!Bytes.eq(listed.x, senderX) || !Bytes.eq(listed.ed, env.senderEd))) {
+            markSeen(env.msgId)
+            return 0
+        }
         val xHex = Hex.encode(senderX)
         val blocked = synchronized(d.fs) { xHex in d.fs.blocked }
         var added: Contact? = null

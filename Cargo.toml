@@ -8,7 +8,7 @@ members = [
 exclude = ["apps", "builds"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.5"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 authors = ["aegis-project <aegis-project@users.noreply.github.com>"]

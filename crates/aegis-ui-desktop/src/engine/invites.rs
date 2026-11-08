@@ -58,6 +58,13 @@ impl Engine {
         let b = self
             .net_invite_redeem(&client, &secret)?
             .ok_or(Failure::new("err.invite_gone"))?;
+        // A visible inviter must match the directory; a hidden one is pinned as given. The
+        // invite is already used up, so a failed lookup does not stop it.
+        if let Ok(Some(e)) = self.net_lookup(&client, &b.u) {
+            if e.x != b.x || e.ed != b.ed {
+                return Err(Failure::new("err.invite_link"));
+            }
+        }
         let now = now_ms();
         let (pinned, out) = self
             .live(epoch, |s| {
@@ -101,6 +108,13 @@ impl Engine {
         env: &Envelope,
         sender_x: [u8; 32],
     ) -> (Flow, bool) {
+        // A name that is listed in the directory must come with the listed keys, so whoever
+        // intercepted a link cannot take the name of a visible user.
+        match self.net_lookup(client, &env.sender) {
+            Err(_) => return (Flow::Retry, false),
+            Ok(Some(e)) if e.x != sender_x || e.ed != env.sender_ed => return (Flow::Next, false),
+            Ok(_) => {}
+        }
         let outcome = match self.live(epoch, |s| s.accept_invite_use(env, sender_x, now_ms())) {
             None => return (Flow::Stop, false),
             Some(Outcome::Dropped) => return (Flow::Next, false),

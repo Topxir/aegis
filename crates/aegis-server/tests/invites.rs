@@ -151,6 +151,31 @@ fn invite_redeems_once_and_gives_the_bundle() {
     // the same id cannot be created twice
     assert_eq!(create(&s, &alice(), "alice", &[45; 32], now).0, 200);
     assert_eq!(create(&s, &alice(), "alice", &[45; 32], now).0, 409);
+    // a used or revoked id stays taken, so nobody can put another bundle under it
+    assert_eq!(register_as(&s, &bob(), "bob", "", now), 200);
+    assert_eq!(create(&s, &bob(), "bob", &secret, now).0, 409);
+    assert_eq!(create(&s, &bob(), "bob", &other, now).0, 409);
+}
+
+#[test]
+fn a_used_id_stays_taken_after_a_restart_until_it_expires() {
+    let d = TempDir::new();
+    let now = now_secs();
+    let secret = [6u8; 32];
+    {
+        let s = open(&d);
+        assert_eq!(register_as(&s, &alice(), "alice", "", now), 200);
+        assert_eq!(register_as(&s, &bob(), "bob", "", now), 200);
+        assert_eq!(create(&s, &alice(), "alice", &secret, now).0, 200);
+        assert_eq!(redeem(&s, &secret, now).0, 200);
+        persist_now(&s).unwrap();
+    }
+    let s = open(&d);
+    assert_eq!(redeem(&s, &secret, now).0, 404);
+    assert_eq!(create(&s, &bob(), "bob", &secret, now).0, 409);
+    let later = now + INVITE_TTL_SECS + 3600;
+    s.lock().unwrap().purge(later);
+    assert_eq!(create(&s, &bob(), "bob", &secret, later).0, 200);
 }
 
 #[test]

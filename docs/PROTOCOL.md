@@ -185,7 +185,8 @@ An all-zero `dh1` or `dh2` is rejected.
 The recipient decrypts `c1` to get `S.x_pk`, then `c2`. The sender is authenticated by `dh2`,
 and the server cannot see who sent the frame. The recipient then checks that
 `S.x_pk` and `sender_ed` match the pinned contact for `sender`; only an unknown sender is
-looked up in the directory (and then pinned). `iacc` (section 30.3) is never looked up.
+looked up in the directory (and then pinned). For `iacc` (section 30.3) the directory only
+vetoes: a listed name with other keys is dropped, an unlisted one is pinned as proved.
 On mismatch the message is dropped and the contact is flagged as "key changed".
 
 Each client also keeps its own copy of what it sent; nothing is sent to self.
@@ -991,11 +992,14 @@ create at most 10 invites in any 7 days (`429`); the count is kept per user and 
 only and is never linked to the invites. The server stores only `id → (exp, box)` with
 `exp = now + 7 days`, rounded up to the hour. It never stores `s` or the creator.
 
-`POST /api/v2/invite/redeem`, form `id=<hex>`. `200 {"box":…}` once, and the record is deleted
-in the same durable write. Unknown, already used and expired ids all answer the same `404`.
-Expired records are dropped by the periodic purge.
+`POST /api/v2/invite/redeem`, form `id=<hex>`. `200 {"box":…}` once, and the box is deleted
+in the same durable write. The `id` itself stays stored with an empty box until `exp`, so a used
+`id` cannot be created again with another box (`409`); otherwise a link holder could redeem the
+real box and put a box with his own keys under the same link. Unknown, already used and expired
+ids all answer the same `404`. Expired records are dropped by the periodic purge.
 
-`POST /api/v2/invite/revoke`, form `id=<hex>`. Deletes the record if it exists; always `200`.
+`POST /api/v2/invite/revoke`, form `id=<hex>`. Empties the box like a redeem if the record
+exists; always `200`.
 A revoked invite still counts towards the creator's limit until its day falls out of the window.
 
 Redeeming or creating an invite never registers, reserves or transfers a username.
@@ -1004,7 +1008,9 @@ Redeeming or creating an invite never registers, reserves or transfers a usernam
 
 The redeemer derives `id`, calls `redeem`, opens `box` with `k` (a box that does not open, or
 whose plaintext is not exactly the format above, is refused) and pins `u`, `x_pk`, `ed_pk` as a
-contact without asking the directory. It fetches prekeys with `ed` set (section 27.1), so this
+contact. If `u` is listed in the directory with other keys the bundle is refused; a hidden
+or unlisted `u` is pinned as given, and a failed lookup does not stop it because the invite is
+already used up. It fetches prekeys with `ed` set (section 27.1), so this
 works for a hidden inviter too.
 
 A bundle never replaces a pinned contact: if `u` is already a contact with other keys, or the
@@ -1032,8 +1038,10 @@ body = hex(tag || sig)                                   // 192 hex digits
 where `u_r`, `x_r`, `ed_r` are the redeemer's username and keys (`x_r` is the sender key proved
 by the seal, `ed_r` is `sender_ed`). The inviter keeps its open secrets locally until they
 expire or are used. An `iacc` from an unknown sender is accepted only if the tag matches one of
-those secrets and the signature checks; the inviter then pins the sender without a directory
-lookup and forgets that secret. Any other `iacc` is dropped, as is one whose keys already
+those secrets and the signature checks. The inviter then looks the sender's name up: a name
+listed with other keys is dropped (so a link holder cannot take the name of a visible user), a
+failed lookup leaves the frame for the next poll, and a hidden or unlisted name is pinned as
+proved. The secret is then forgotten. Any other `iacc` is dropped, as is one whose keys already
 belong to a contact. Frames the sender posted before its `iacc` arrived are then opened. Display name and avatar follow in
 the usual `prof` envelope.
 

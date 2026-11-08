@@ -318,6 +318,7 @@ static TABLE: &[(&str, &str, &str)] = &[
     ("err.bridges_many", "Too many bridge lines.", "Слишком много строк мостов."),
     ("err.clearnet_tor", "This address is the clearnet entry behind Cloudflare. With Tor on the app uses the onion address of the server.", "Этот адрес — вход через обычный интернет за Cloudflare. С Tor приложение использует onion-адрес сервера."),
     ("err.tor_off_first", "Save the settings with Tor off before testing without Tor.", "Сначала сохраните настройки с выключенным Tor, потом проверяйте без Tor."),
+    ("err.tor_on_first", "Save the settings with Tor on before testing through Tor, so your bridges are used.", "Сначала сохраните настройки с включённым Tor, потом проверяйте через Tor, чтобы использовались ваши мосты."),
     ("dlg.tor_off", "Turn off Tor?", "Выключить Tor?"),
     ("dlg.tor_off_text", "Without Tor your IP address becomes visible to the server and to Cloudflare, which carries the clearnet connection. Your provider also sees that you connect to Aegis.", "Без Tor ваш IP-адрес становится виден серверу и Cloudflare, через который идёт подключение. Ваш провайдер тоже видит, что вы подключаетесь к Aegis."),
     ("dlg.tor_off_ok", "Turn off Tor", "Выключить Tor"),

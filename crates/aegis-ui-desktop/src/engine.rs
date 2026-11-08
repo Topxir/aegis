@@ -988,7 +988,15 @@ impl Engine {
         let endpoint = crate::connection::endpoint_for(endpoint, tor)?;
         let endpoint = endpoint.as_str();
         let socks = if tor {
-            self.tor_sync_for(true);
+            // Tor starts only from saved settings, so it never runs without the chosen bridges.
+            if saved_off {
+                return Err(Failure::new("err.tor_on_first"));
+            }
+            if self.app().session.is_some() {
+                self.tor_sync();
+            } else {
+                self.tor_sync_for(true);
+            }
             let mut up = self.tor.socks_addr();
             for _ in 0..180 {
                 if up.is_some() {
