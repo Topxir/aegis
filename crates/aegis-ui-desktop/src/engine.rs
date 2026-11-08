@@ -37,6 +37,7 @@ pub mod cover;
 mod extra;
 mod oseal;
 mod pin;
+pub mod update;
 
 const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
 const POLL_PAGES: usize = 10;
@@ -131,6 +132,7 @@ pub struct App {
     pub pin_left: Option<u32>,
     /// State of the embedded Tor client.
     pub tor: tor::Status,
+    pub update: update::State,
 }
 
 impl App {
@@ -158,6 +160,7 @@ impl App {
             duress_on: false,
             pin_left: None,
             tor: tor::Status::Off,
+            update: update::State::new(),
         }
     }
 
@@ -251,6 +254,7 @@ pub enum Job {
     DeleteAccount(String),
     Flush,
     Persist(Box<Session>),
+    InstallUpdate,
     Stop,
 }
 
@@ -1938,6 +1942,7 @@ impl Engine {
                 }
             }
             Job::Persist(s) => self.persist(*s),
+            Job::InstallUpdate => self.restart_into_update(),
             Job::Stop => {}
         }
     }

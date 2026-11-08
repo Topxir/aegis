@@ -578,6 +578,15 @@ timing and the fact that Aegis is used. To hide the IP as well, use Tor (section
   Tor library). Setting "Connect through Tor" sends all traffic through it; with an onion
   endpoint neither Cloudflare nor the server operator learns the client IP.
 - An external SOCKS5 proxy (section 10) remains available.
+- Tor is on by default. With Tor on, clients connect to the onion address and refuse the
+  clearnet entry (the Cloudflare-fronted domain and its subdomains) for every request, update
+  checks included. Turning Tor off needs an explicit confirmation that the IP address becomes
+  visible to the server and to Cloudflare.
+- Bridges for networks that block Tor: Snowflake or obfs4 from Tor's built-in lists, or pasted
+  lines (obfs4, webtunnel, meek_lite, snowflake, or plain `addr:port [fingerprint]`). Pasted
+  lines are checked and reduced to `transport addr [fingerprint] key=value...` before they
+  reach the torrc as `Bridge` lines with `UseBridges 1`. Desktop runs lyrebird from the Tor
+  Expert Bundle; Android runs the transports in-process (IPtProxy).
 
 ## 25. Traffic shape and device hardening
 
@@ -857,3 +866,44 @@ secrecy per chain step, but no post-compromise security until the next chain rot
 
 Implementations expose deterministic variants (`*_with` taking the ephemeral keys and random
 values as arguments) so that X3DH, ratchet steps and group frames have test vectors.
+
+## 29. Signed updates
+
+The owner signs releases with an offline Ed25519 key. Clients trust exactly one public key,
+compiled in (`aegis_core::update::TRUSTED_KEY_HEX`, Android `Update.TRUSTED_KEY_HEX`).
+
+Signed manifest: 64-byte signature followed by the manifest bytes exactly as signed. The
+signature covers `"aegis-update-v1\n" || manifest`. At most 64 KiB; clients verify before they
+parse. The manifest is JSON:
+
+```
+{"v":1,"seq":N,"version":"0.2.0","files":{
+  "windows-x86_64":{"name":"aegis-desktop.exe","size":S,"sha256":"<hex>","version":"0.2.0","min":"0.1.0"},
+  "android":{"name":"aegis-messenger-release.apk","size":S,"sha256":"<hex>","version":"0.3.0","min":"0","code":3}}}
+```
+
+- `seq` grows with every published manifest. A client stores the highest `seq` it accepted
+  and refuses a lower one (replay of an old manifest).
+- A build is offered only if it is newer: Android compares `code` with its `versionCode`,
+  other platforms compare dotted versions numerically. Running below `min` marks the update
+  required.
+- `name`: letters, digits, `.`, `-`, `_`; no leading dot, no `..`, at most 96 characters.
+  `size` 1 byte to 512 MiB.
+
+Routes, read-only, served from `<data-dir>/update/` (plain files only, no links):
+
+- `GET /api/v2/update/manifest` → the file `manifest.signed`, or `404`.
+- `GET /api/v2/update/file?name=<name>&off=<n>` → up to 1 MiB of the file from byte `n`;
+  `400` for a bad name, `416` for an offset past the end, `413` for an oversized file.
+
+Both go through the sealed transport (section 23) over the client's normal route, so with Tor
+on they reach the onion address and never the clearnet entry. The client checks the total
+size and SHA-256 against the manifest before it uses the file. Android also requires the APK to
+carry the same signing certificate and package name as the installed app.
+
+Publishing (owner): `scripts/build.ps1` signs with `~/.aegis-update.key` (or
+`AEGIS_UPDATE_KEY`) and writes `builds/update/` (manifest plus files, `seq` = Unix time).
+Copy the contents of that folder into the server's `<data-dir>/update/`; no restart is
+needed. By hand: `aegis-update sign --key <key> --out <dir> --version <v> --windows <exe>
+[--android <apk> --android-code <n>]`. A new key: `aegis-update keygen <path>` (never
+overwrites), then put the printed public key into both clients.

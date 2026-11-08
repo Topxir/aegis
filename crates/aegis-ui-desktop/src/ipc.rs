@@ -132,6 +132,12 @@ pub enum Cmd {
         bridge_lines: String,
     },
     ConfirmTorOff {},
+    SaveUpdates {
+        #[serde(default)]
+        auto_update: bool,
+    },
+    UpdateNow {},
+    InstallUpdate {},
     SavePrivacy {
         idle_min: String,
         protect: bool,

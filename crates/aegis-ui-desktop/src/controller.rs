@@ -294,6 +294,17 @@ impl Controller {
                     self.save_connection(f, false);
                 }
             }
+            Cmd::SaveUpdates { auto_update } => {
+                e.mutate(|s| s.data.settings.auto_update = auto_update);
+                self.saved(Ok(()));
+                self.local_change();
+            }
+            Cmd::UpdateNow {} => e.update_now(),
+            Cmd::InstallUpdate {} => {
+                if e.update_ready() {
+                    self.job(Job::InstallUpdate);
+                }
+            }
             Cmd::SavePrivacy { idle_min, protect } => {
                 let r = match idle_min.trim().parse::<u32>() {
                     Ok(n) => e.apply_privacy(n, protect),
@@ -435,6 +446,10 @@ impl Controller {
     pub fn lock(&self) {
         if let Some(s) = self.engine.detach() {
             self.job(Job::Persist(Box::new(s)));
+        }
+        // A verified update installs when the app locks; the vault is saved first, jobs run in order.
+        if self.engine.update_ready() {
+            self.job(Job::InstallUpdate);
         }
         self.engine.changed();
     }

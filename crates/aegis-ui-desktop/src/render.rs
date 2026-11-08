@@ -1644,7 +1644,7 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
             );
             let status_html = format!("{}{}", tor_html(app, l, st.tor), conn_html(app, l));
             format!(
-            r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}<p class="note">{}</p><div class="row"><button type="button" class="btn primary" data-act="save_connection" data-primary>{}</button><button type="button" class="btn" data-act="test_conn">{}</button></div>{}</section>"#,
+            r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}<p class="note">{}</p><div class="row"><button type="button" class="btn primary" data-act="save_connection" data-primary>{}</button><button type="button" class="btn" data-act="test_conn">{}</button></div>{}</section>{}"#,
             esc(tr(l, "acct.connection")),
             field(l, "endpoint", "f.endpoint", "text", &val(&st.endpoint)),
             field(
@@ -1659,7 +1659,8 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
             esc(&[tr(l, "conn.tor_note"), tr(l, "conn.cover_note")].join(" ")),
             esc(tr(l, "common.save")),
             esc(tr(l, "set.test")),
-            status_html
+            status_html,
+            crate::engine::update::card_html(app, l, st)
             )
         }
         _ => format!(
