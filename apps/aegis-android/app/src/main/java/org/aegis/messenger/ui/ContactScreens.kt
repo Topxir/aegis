@@ -1,8 +1,6 @@
 package org.aegis.messenger.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
@@ -219,14 +217,11 @@ fun GroupInfoScreen(session: Session, d: VaultData, id: String, onBack: () -> Un
 
 @Composable
 fun ProfileHeader(seed: ByteArray, name: String, handle: String, about: String, particles: org.aegis.messenger.core.Particles) {
-    Box(Modifier.fillMaxWidth().height(200.dp).background(Ui.surface2)) {
-        ParticlesLayer(particles, Modifier.fillMaxSize())
-        Column(Modifier.align(Alignment.BottomStart).padding(16.dp)) {
-            AvatarView(seed, 88)
-            androidx.compose.foundation.layout.Spacer(Modifier.height(10.dp))
-            Text(name, style = MaterialTheme.typography.titleLarge, color = Ui.text)
-            Text(handle, style = MaterialTheme.typography.bodySmall.copy(fontFamily = GeistMono), color = Ui.muted)
-        }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        AvatarView(seed, 88)
+        androidx.compose.foundation.layout.Spacer(Modifier.height(12.dp))
+        Text(name, style = MaterialTheme.typography.titleLarge, color = Ui.text)
+        Text(handle, style = MaterialTheme.typography.bodySmall.copy(fontFamily = GeistMono), color = Ui.muted)
     }
     if (about.isNotBlank()) Section(stringResource(R.string.field_about)) { Text(about, style = MaterialTheme.typography.bodyLarge, color = Ui.text) }
 }

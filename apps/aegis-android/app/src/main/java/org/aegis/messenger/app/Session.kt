@@ -1872,6 +1872,8 @@ class Session(private val ctx: Context) {
         }
     }
 
+    fun saveLook(l: org.aegis.messenger.data.Look) = update { it.copy(look = l.sanitize()) }
+
     fun setTor(on: Boolean) {
         Boot.setTor(ctx, on)
         Tor.setEnabled(on)

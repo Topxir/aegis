@@ -183,14 +183,7 @@
     <string name="channel_create">Создать канал</string>
     <string name="field_about">О себе</string>
     <string name="account_profile">Профиль</string>
-    <string name="particles_title">Частицы</string>
-    <string name="particles_none">Нет</string>
-    <string name="particles_dust">Пыль</string>
-    <string name="particles_snow">Снег</string>
-    <string name="particles_embers">Угли</string>
-    <string name="particles_orbit">Орбита</string>
-    <string name="particles_rain">Дождь</string>
-    <string name="profile_note">Имя, описание и частицы отправляются вашим контактам.</string>
+    <string name="profile_note">Имя и описание отправляются вашим контактам.</string>
     <string name="privacy_security">Приватность и безопасность</string>
     <string name="secure_screen">Запретить снимки и превью экрана</string>
     <string name="secure_note">Скрывает приложение в списке задач и блокирует захват экрана.</string>

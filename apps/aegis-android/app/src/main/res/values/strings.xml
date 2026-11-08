@@ -183,14 +183,7 @@
     <string name="channel_create">Create channel</string>
     <string name="field_about">About</string>
     <string name="account_profile">Profile</string>
-    <string name="particles_title">Particles</string>
-    <string name="particles_none">None</string>
-    <string name="particles_dust">Dust</string>
-    <string name="particles_snow">Snow</string>
-    <string name="particles_embers">Embers</string>
-    <string name="particles_orbit">Orbit</string>
-    <string name="particles_rain">Rain</string>
-    <string name="profile_note">Your name, about and particles are sent to your contacts.</string>
+    <string name="profile_note">Your name and about line are sent to your contacts.</string>
     <string name="privacy_security">Privacy and security</string>
     <string name="secure_screen">Block screenshots and previews</string>
     <string name="secure_note">Hides the app in the task switcher and stops screen capture.</string>

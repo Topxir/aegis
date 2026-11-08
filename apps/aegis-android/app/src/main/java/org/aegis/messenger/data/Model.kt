@@ -115,6 +115,7 @@ class VaultData(
     /** Pinned owner key of the official channel; null until first seen (spec section 19). */
     val officialOwnerEd: ByteArray? = null,
     val fs: FsState = FsState(),
+    val look: Look = Look(),
 ) {
     fun contact(u: String): Contact? = contacts.firstOrNull { it.username == u }
     fun group(id: String): Group? = groups.firstOrNull { it.id == id }
@@ -136,9 +137,10 @@ class VaultData(
         prefs: Map<String, ChatPrefs> = this.prefs,
         profile: OwnProfile = this.profile,
         officialOwnerEd: ByteArray? = this.officialOwnerEd,
+        look: Look = this.look,
     ) = VaultData(
         username, xSk, edSk, registered, contacts, groups, chats, seen, cursors, settings,
-        channels, prefs, profile, mediaKey, officialOwnerEd, fs,
+        channels, prefs, profile, mediaKey, officialOwnerEd, fs, look,
     )
 
     fun withChat(key: String, c: Chat): VaultData = copy(chats = chats + (key to c))
@@ -215,6 +217,7 @@ object VaultCodec {
         m["media_key"] = Hex.encode(v.mediaKey)
         m["official_owner_ed"] = v.officialOwnerEd?.let { Hex.encode(it) }
         m["fs"] = v.fs.toJson()
+        m["look"] = v.look.toJson()
         return Text.utf8(Json.write(m))
     }
 
@@ -284,6 +287,7 @@ object VaultCodec {
                 bool(m, "registered"), contacts, groups, chats, (m["seen"] as List<String>),
                 (m["cursors"] as Map<String, Long>), settings,
                 channels, prefs, pr, mediaKey, officialEd, FsState.fromJson(m["fs"] as Map<String, Any?>?),
+                Look.fromJson(m["look"] as? Map<String, Any?>),
             )
         } catch (e: AegisException) {
             throw e
