@@ -33,10 +33,12 @@ impl Session {
         if !ttl_allowed(ttl_s) {
             return Err(Failure::new("err.generic"));
         }
-        let current = self.chat(r).ok_or(Failure::new("err.generic"))?.ttl_s;
-        if current == ttl_s {
+        let chat = self.chat(r).ok_or(Failure::new("err.generic"))?;
+        if chat.ttl_s == ttl_s {
             return Ok(None);
         }
+        // Later than any change applied here, so the other side cannot rank it below that one.
+        let now_ms = now_ms.max(chat.ttl_ms.saturating_add(1));
         let id = random_msg_id()?;
         let out = match r {
             ChatRef::Dm(to) => {

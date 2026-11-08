@@ -142,7 +142,8 @@ Changing the timer sends a control envelope inside the usual encryption:
 
 `ttl_s` holds the new timer. A receiver drops a value outside the list above. It applies the
 change unless it already applied one with a later `ts_ms` for that chat, so crossing changes
-end on the newer one on both sides. Each applied change adds a local line to the chat ("Bob:
+end on the newer one on both sides. A sender sets `ts_ms` above the `ts_ms` of the last change
+it applied for that chat, even when its own clock is behind. Each applied change adds a local line to the chat ("Bob:
 Disappearing messages 5 minutes"); the line is not a message and never expires.
 
 Expiry is counted from receipt: a received message is deleted `ttl_s` seconds after the

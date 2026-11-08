@@ -1203,20 +1203,27 @@ class Session(private val ctx: Context) {
         }
     }
 
-    /** A timer change from the other side (spec section 5.2): the later one wins, and it leaves a line in the chat. */
+    /**
+     * A timer change from the other side (spec section 5.2). One older than the last change applied is
+     * ignored, so crossing changes end on the newer one; an actual change leaves a line in the chat.
+     */
     private fun acceptTimer(key: String, env: Envelope, now: Long): Int {
         if (!Expiry.allowed(env.ttlS)) return 0
         val line = Message(env.msgId, false, env.sender, env.senderName, env.tsMs, now, 0, "", timer = env.ttlS)
         update { d ->
+            val same: Boolean
             val next = if (key.startsWith("dm:")) {
                 val c = d.contact(key.removePrefix("dm:")) ?: return@update d
-                if (env.tsMs <= c.ttlTs) return@update d
+                if (env.tsMs < c.ttlTs) return@update d
+                same = c.ttlS == env.ttlS
                 d.withContact(c.copy(ttlS = env.ttlS, ttlTs = env.tsMs))
             } else {
                 val g = d.group(key.removePrefix("g:")) ?: return@update d
-                if (env.tsMs <= g.ttlTs) return@update d
+                if (env.tsMs < g.ttlTs) return@update d
+                same = g.ttlS == env.ttlS
                 d.copy(groups = d.groups.map { if (it.id == g.id) it.copy(ttlS = env.ttlS, ttlTs = env.tsMs) else it })
             }
+            if (same) return@update next
             val c = next.chat(key)
             next.withChat(key, Chat((c.messages + line).takeLast(MAX_MESSAGES), c.unread))
         }
@@ -1594,17 +1601,19 @@ class Session(private val ctx: Context) {
     fun setChatTtl(key: String, ttlS: Long) {
         val d = data ?: return
         if (!Expiry.allowed(ttlS) || ttlFor(d, key) == ttlS || !canSend(d, key)) return
-        val now = System.currentTimeMillis()
+        val last = if (key.startsWith("dm:")) d.contact(key.removePrefix("dm:"))?.ttlTs else d.group(key.removePrefix("g:"))?.ttlTs
+        // Later than any change applied here, so the other side cannot rank it below that one.
+        val now = maxOf(System.currentTimeMillis(), (last ?: 0) + 1)
         update { cur ->
             if (key.startsWith("dm:")) {
                 val c = cur.contact(key.removePrefix("dm:")) ?: return@update cur
-                cur.withContact(c.copy(ttlS = ttlS, ttlTs = maxOf(now, c.ttlTs + 1)))
+                cur.withContact(c.copy(ttlS = ttlS, ttlTs = now))
             } else {
                 val g = cur.group(key.removePrefix("g:")) ?: return@update cur
-                cur.copy(groups = cur.groups.map { if (it.id == g.id) it.copy(ttlS = ttlS, ttlTs = maxOf(now, g.ttlTs + 1)) else it })
+                cur.copy(groups = cur.groups.map { if (it.id == g.id) it.copy(ttlS = ttlS, ttlTs = now) else it })
             }
         }
-        val m = Message(newId(), true, d.username, d.settings.displayName, now, now, 0, "", Status.SENDING, timer = ttlS)
+        val m = Message(newId(), true, d.username, d.settings.displayName, now, System.currentTimeMillis(), 0, "", Status.SENDING, timer = ttlS)
         appendOutgoing(key, m)
         deliver(key, m)
     }
