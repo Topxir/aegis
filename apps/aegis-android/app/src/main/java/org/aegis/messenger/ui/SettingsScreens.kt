@@ -113,6 +113,8 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 test?.let { Note(stringResource(if (it) R.string.test_ok else R.string.test_fail), if (it) Ui.accent else Ui.danger) }
             }
             Divider()
+            UpdateSettings()
+            Divider()
             Section(stringResource(R.string.cover_traffic)) {
                 val coverCtx = LocalContext.current
                 var cover by remember { mutableStateOf(Boot.coverMode(coverCtx)) }
