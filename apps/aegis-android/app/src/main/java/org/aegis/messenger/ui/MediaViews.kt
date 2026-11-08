@@ -114,7 +114,7 @@ fun MediaThumb(session: Session, media: Media, modifier: Modifier = Modifier, sq
 /** Full-screen viewer for a photo or a video. */
 @Composable
 fun MediaViewer(session: Session, media: Media, onClose: () -> Unit) {
-    Dialog(onClose, DialogProperties(usePlatformDefaultWidth = false)) {
+    Dialog(onClose, DialogProperties(usePlatformDefaultWidth = false, securePolicy = securePolicy())) {
         Box(Modifier.fillMaxSize().background(Color.Black).clickable(onClick = onClose), contentAlignment = Alignment.Center) {
             if (media.kind == MediaKind.Video) VideoPlayer(session, media) else {
                 val img = rememberPreview(session, media, 2560)

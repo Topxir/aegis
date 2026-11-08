@@ -9,7 +9,10 @@ import android.content.Intent
 import org.aegis.messenger.MainActivity
 import org.aegis.messenger.R
 
-/** Notifications carry no sender and no message text. */
+/**
+ * New-message notifications. They carry no sender and no text unless the user switched content on
+ * and the app is unlocked (see [NoteText]); the lock screen never shows more than "New message".
+ */
 object Notifier {
     const val CHANNEL_MESSAGES = "messages"
     const val CHANNEL_SERVICE = "service"
@@ -35,15 +38,37 @@ object Notifier {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
-    fun newMessage(ctx: Context) {
-        val n = Notification.Builder(ctx, CHANNEL_MESSAGES)
+    private fun generic(ctx: Context, visibility: Int): Notification =
+        Notification.Builder(ctx, CHANNEL_MESSAGES)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(ctx.getString(R.string.app_name))
             .setContentText(ctx.getString(R.string.notif_new_message))
-            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setVisibility(visibility)
             .setAutoCancel(true)
             .setContentIntent(openApp(ctx))
             .build()
+
+    /**
+     * Posts the new-message notification. Without [m] (the vault is locked) or with content hidden it is
+     * the generic one, kept off the lock screen entirely while the app lock is on. With content shown
+     * the lock screen gets the generic version.
+     */
+    fun newMessage(ctx: Context, m: NoteText.Incoming? = null, showContent: Boolean = false) {
+        val note = NoteText.note(m == null, showContent, ctx.getString(R.string.app_name), ctx.getString(R.string.notif_new_message), m)
+        val hidden = Notification.VISIBILITY_PRIVATE
+        val n = if (m == null || !showContent) {
+            generic(ctx, if (Boot.appLock(ctx)) Notification.VISIBILITY_SECRET else hidden)
+        } else {
+            Notification.Builder(ctx, CHANNEL_MESSAGES)
+                .setSmallIcon(R.drawable.ic_stat)
+                .setContentTitle(note.title)
+                .setContentText(note.body)
+                .setVisibility(hidden)
+                .setPublicVersion(generic(ctx, Notification.VISIBILITY_PUBLIC))
+                .setAutoCancel(true)
+                .setContentIntent(openApp(ctx))
+                .build()
+        }
         try {
             ctx.getSystemService(NotificationManager::class.java).notify(ID_MESSAGE, n)
         } catch (e: SecurityException) {

@@ -99,8 +99,7 @@ class Session(private val ctx: Context) {
         const val SEEN_CAP = 4000
         const val MAX_CAPTION = Attach.MAX_CAPTION
         private const val MAX_IMPORT = 64 * 1024 * 1024
-        private val TTL_CHOICES = longArrayOf(0, 3600, 86400, 604800)
-        fun ttlChoices(): LongArray = TTL_CHOICES
+        fun ttlChoices(): List<Long> = Expiry.TTL_CHOICES
     }
 
     /** Non-null while unlocked. */
@@ -254,6 +253,7 @@ class Session(private val ctx: Context) {
         ensureOfficial()
         syncFsContacts(d)
         purgeExpired()
+        Boot.setAppLock(ctx, d.settings.appLock)
         startPoller()
         AegisService.start(ctx)
         if (Boot.backgroundPoll(ctx)) BgState.store(ctx, d.settings.endpoint, d.settings.proxy, d.xSk) else BgState.clear(ctx)
@@ -694,7 +694,7 @@ class Session(private val ctx: Context) {
         main.removeCallbacks(bgRunnable)
         val d = data ?: return
         val min = d.settings.backgroundLockMin
-        if (min >= 0 && backgroundAt != 0L && SystemClock.elapsedRealtime() - backgroundAt >= min * 60_000L) {
+        if (d.settings.appLock && min >= 0 && backgroundAt != 0L && SystemClock.elapsedRealtime() - backgroundAt >= min * 60_000L) {
             lock()
             return
         }
@@ -707,6 +707,7 @@ class Session(private val ctx: Context) {
         main.removeCallbacks(idleRunnable)
         val d = data ?: return
         backgroundAt = SystemClock.elapsedRealtime()
+        if (!d.settings.appLock) return
         val min = d.settings.backgroundLockMin
         if (min == 0) lock() else if (min > 0) main.postDelayed(bgRunnable, min * 60_000L)
     }
@@ -714,8 +715,9 @@ class Session(private val ctx: Context) {
     /** Called on user interaction; restarts the idle countdown. */
     fun touch() {
         main.removeCallbacks(idleRunnable)
-        val min = data?.settings?.idleLockMin ?: return
-        if (min > 0 && foreground) main.postDelayed(idleRunnable, min * 60_000L)
+        val s = data?.settings ?: return
+        val min = s.idleLockMin
+        if (s.appLock && min > 0 && foreground) main.postDelayed(idleRunnable, min * 60_000L)
     }
 
     // ---- state mutation and persistence -------------------------------------
@@ -768,17 +770,20 @@ class Session(private val ctx: Context) {
 
     private fun purgeExpired() {
         val now = System.currentTimeMillis()
-        val d = data ?: return
-        var changed = false
-        val chats = d.chats.mapValues { (_, c) ->
-            val kept = c.messages.filter { !Expiry.isExpired(it.baseMs, it.ttlS, now) }
-            if (kept.size != c.messages.size) {
-                changed = true
-                dropMedia(c.messages - kept.toSet())
-                Chat(kept, c.unread)
-            } else c
+        val d0 = data ?: return
+        if (d0.chats.values.none { c -> c.messages.any { Expiry.isExpired(it.baseMs, it.ttlS, now) } }) return
+        val gone = ArrayList<Message>()
+        update { d ->
+            d.copy(
+                chats = d.chats.mapValues { (_, c) ->
+                    val (dead, kept) = c.messages.partition { Expiry.isExpired(it.baseMs, it.ttlS, now) }
+                    if (dead.isEmpty()) return@mapValues c
+                    gone += dead
+                    Chat(kept, minOf(c.unread, kept.count { !it.outgoing && it.timer == null }))
+                },
+            )
         }
-        if (changed) update { it.copy(chats = chats) }
+        dropMedia(gone)
     }
 
     fun purgeNow() = purgeExpired()
@@ -833,6 +838,7 @@ class Session(private val ctx: Context) {
     }
 
     private fun pollOnce() {
+        val started = System.currentTimeMillis()
         purgeExpired()
         val d0 = data ?: return
         val client = clientFor(d0.settings)
@@ -855,7 +861,35 @@ class Session(private val ctx: Context) {
             incoming += drain(client, ChannelCrypto.queue(c.secret), null, c)
         }
         incoming += retryDeferred(client)
-        if (incoming > 0 && !foreground && (data?.settings?.notifications == true)) Notifier.newMessage(ctx)
+        if (incoming > 0 && !foreground && (data?.settings?.notifications == true)) notifyNew(started)
+    }
+
+    /** Notifies about the newest message stored since [since] in a chat that is not muted (spec section 21). */
+    private fun notifyNew(since: Long) {
+        val d = data ?: return
+        var key: String? = null
+        var last: Message? = null
+        for ((k, c) in d.chats) {
+            if (d.pref(k).muted) continue
+            val m = c.messages.lastOrNull { !it.outgoing && it.timer == null && it.baseMs >= since } ?: continue
+            if (last == null || m.baseMs > last.baseMs) { key = k; last = m }
+        }
+        val m = last ?: return
+        val k = key ?: return
+        val chat = when {
+            k.startsWith("dm:") -> d.contact(m.sender)?.let { it.title.ifBlank { "@" + it.username } } ?: ("@" + m.sender)
+            k.startsWith("g:") -> d.group(k.removePrefix("g:"))?.name ?: ""
+            else -> d.channel(k.removePrefix("c:"))?.name ?: ""
+        }
+        val sender = if (k.startsWith("g:")) m.senderName.ifBlank { "@" + m.sender } else null
+        val media = m.media
+        val text = when {
+            media == null -> m.body
+            m.body.isNotEmpty() -> m.body
+            media.kind == MediaKind.Video -> ctx.getString(R.string.media_video)
+            else -> ctx.getString(R.string.media_photo)
+        }
+        Notifier.newMessage(ctx, NoteText.Incoming(chat, sender, text), d.settings.showContent)
     }
 
     private fun drain(client: Client, queue: ByteArray, group: Group?, chan: Channel?): Int {
@@ -1157,8 +1191,43 @@ class Session(private val ctx: Context) {
                 acceptSkey(env)
                 0
             }
+            Kind.Ttl -> {
+                if (group != null) return 0
+                acceptTimer(dmKey(env.sender), env, now)
+            }
+            Kind.Gttl -> {
+                if (group == null || env.sender !in group.members) return 0
+                acceptTimer(groupKey(group.id), env, now)
+            }
             Kind.Cmsg, Kind.Cmf -> 0
         }
+    }
+
+    /**
+     * A timer change from the other side (spec section 5.2). One older than the last change applied is
+     * ignored, so crossing changes end on the newer one; an actual change leaves a line in the chat.
+     */
+    private fun acceptTimer(key: String, env: Envelope, now: Long): Int {
+        if (!Expiry.allowed(env.ttlS)) return 0
+        val line = Message(env.msgId, false, env.sender, env.senderName, env.tsMs, now, 0, "", timer = env.ttlS)
+        update { d ->
+            val same: Boolean
+            val next = if (key.startsWith("dm:")) {
+                val c = d.contact(key.removePrefix("dm:")) ?: return@update d
+                if (env.tsMs < c.ttlTs) return@update d
+                same = c.ttlS == env.ttlS
+                d.withContact(c.copy(ttlS = env.ttlS, ttlTs = env.tsMs))
+            } else {
+                val g = d.group(key.removePrefix("g:")) ?: return@update d
+                if (env.tsMs < g.ttlTs) return@update d
+                same = g.ttlS == env.ttlS
+                d.copy(groups = d.groups.map { if (it.id == g.id) it.copy(ttlS = env.ttlS, ttlTs = env.tsMs) else it })
+            }
+            if (same) return@update next
+            val c = next.chat(key)
+            next.withChat(key, Chat((c.messages + line).takeLast(MAX_MESSAGES), c.unread))
+        }
+        return 0
     }
 
     /** A sender key arrives only inside a pairwise session frame. */
@@ -1311,8 +1380,7 @@ class Session(private val ctx: Context) {
     }
 
     private fun addIncomingMedia(client: Client, key: String, env: Envelope, now: Long): Int {
-        val base = minOf(env.tsMs, now)
-        if (Expiry.isExpired(base, env.ttlS, now)) { markSeen(env.msgId); return 0 }
+        val base = now
         val bytes = try {
             val desc0 = AttachmentDescriptor.parse(env.body)
             Attach.open(desc0, desc0.ids.map { client.blobGet(it) ?: throw AegisException.Media("blob missing") })
@@ -1356,8 +1424,7 @@ class Session(private val ctx: Context) {
     }
 
     private fun addIncoming(key: String, env: Envelope, now: Long): Int {
-        val base = minOf(env.tsMs, now)
-        if (Expiry.isExpired(base, env.ttlS, now)) return 0
+        val base = now
         val m = Message(env.msgId, false, env.sender, env.senderName, env.tsMs, base, env.ttlS, env.body)
         update { d ->
             val c = d.chat(key)
@@ -1530,17 +1597,25 @@ class Session(private val ctx: Context) {
         return n
     }
 
+    /** Sets the chat timer and tells the other side (spec section 5.2); the change shows as a line in the chat. */
     fun setChatTtl(key: String, ttlS: Long) {
-        if (ttlS !in TTL_CHOICES) return
-        update { d ->
+        val d = data ?: return
+        if (!Expiry.allowed(ttlS) || ttlFor(d, key) == ttlS || !canSend(d, key)) return
+        val last = if (key.startsWith("dm:")) d.contact(key.removePrefix("dm:"))?.ttlTs else d.group(key.removePrefix("g:"))?.ttlTs
+        // Later than any change applied here, so the other side cannot rank it below that one.
+        val now = maxOf(System.currentTimeMillis(), (last ?: 0) + 1)
+        update { cur ->
             if (key.startsWith("dm:")) {
-                val c = d.contact(key.removePrefix("dm:")) ?: return@update d
-                d.withContact(c.copy(ttlS = ttlS))
+                val c = cur.contact(key.removePrefix("dm:")) ?: return@update cur
+                cur.withContact(c.copy(ttlS = ttlS, ttlTs = now))
             } else {
-                val g = d.group(key.removePrefix("g:")) ?: return@update d
-                d.copy(groups = d.groups.map { if (it.id == g.id) it.copy(ttlS = ttlS) else it })
+                val g = cur.group(key.removePrefix("g:")) ?: return@update cur
+                cur.copy(groups = cur.groups.map { if (it.id == g.id) it.copy(ttlS = ttlS, ttlTs = now) else it })
             }
         }
+        val m = Message(newId(), true, d.username, d.settings.displayName, now, System.currentTimeMillis(), 0, "", Status.SENDING, timer = ttlS)
+        appendOutgoing(key, m)
+        deliver(key, m)
     }
 
     fun markRead(key: String) = update { d ->
@@ -1658,8 +1733,8 @@ class Session(private val ctx: Context) {
                     if (key.startsWith("dm:")) {
                         val c = d.contact(key.removePrefix("dm:")) ?: throw AegisException.InvalidUsername()
                         if (c.keyChanged) throw AegisException.SenderMismatch()
-                        val kind = if (media != null) Kind.Dmf else Kind.Dm
-                        val env = Envelope(kind, m.id, d.username, m.senderName, id.edPublic, m.tsMs, m.ttlS, "", body)
+                        val kind = if (m.timer != null) Kind.Ttl else if (media != null) Kind.Dmf else Kind.Dm
+                        val env = Envelope(kind, m.id, d.username, m.senderName, id.edPublic, m.tsMs, m.timer ?: m.ttlS, "", body)
                         sendPairwise(client, d, id, c, env)
                     } else if (key.startsWith("c:")) {
                         val ch = d.channel(key.removePrefix("c:")) ?: throw AegisException.GroupMismatch()
@@ -1670,8 +1745,8 @@ class Session(private val ctx: Context) {
                         sendSenderKeyFrame(client, d, id, key, SkScope.Channel, ch.secret, to, ChannelCrypto.queue(ch.secret), env)
                     } else {
                         val g = d.group(key.removePrefix("g:")) ?: throw AegisException.GroupMismatch()
-                        val kind = if (media != null) Kind.Gmf else Kind.Gmsg
-                        val env = Envelope(kind, m.id, d.username, m.senderName, id.edPublic, m.tsMs, m.ttlS, g.id, body)
+                        val kind = if (m.timer != null) Kind.Gttl else if (media != null) Kind.Gmf else Kind.Gmsg
+                        val env = Envelope(kind, m.id, d.username, m.senderName, id.edPublic, m.tsMs, m.timer ?: m.ttlS, g.id, body)
                         sendSenderKeyFrame(client, d, id, key, SkScope.Group, g.secret, g.members, Hex.decode(g.queueHex), env)
                     }
                 } finally {
@@ -1914,6 +1989,7 @@ class Session(private val ctx: Context) {
             )
         }
         if (Boot.backgroundPoll(ctx)) data?.let { BgState.store(ctx, clean.endpoint, clean.proxy, it.xSk) }
+        Boot.setAppLock(ctx, clean.appLock)
         touch()
         pollSoon()
         done(null)

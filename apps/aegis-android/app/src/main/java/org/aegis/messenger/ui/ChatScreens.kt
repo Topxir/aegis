@@ -48,6 +48,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalBottomSheetDefaults
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
@@ -142,6 +144,7 @@ private fun dayOf(ms: Long): Int {
 @Composable
 private fun previewOf(m: Message?): String {
     if (m == null) return ""
+    m.timer?.let { return timerText(it, if (m.outgoing) stringResource(R.string.ttl_you) else m.senderName.ifBlank { "@" + m.sender }) }
     val prefix = if (m.outgoing) stringResource(R.string.you_prefix) else ""
     val media = m.media
     val body = m.body.lineSequence().firstOrNull() ?: ""
@@ -288,7 +291,10 @@ fun ChatListScreen(
         }
     }
 
-    if (sheet) ModalBottomSheet(onDismissRequest = { sheet = false }, containerColor = Ui.surface, contentColor = Ui.text) {
+    if (sheet) ModalBottomSheet(
+        onDismissRequest = { sheet = false }, containerColor = Ui.surface, contentColor = Ui.text,
+        properties = ModalBottomSheetDefaults.properties(securePolicy = securePolicy()),
+    ) {
         Column(Modifier.navigationBarsPadding().padding(bottom = 12.dp)) {
             SheetItem(AegisIcons.Send, stringResource(R.string.new_chat)) { sheet = false; onRoute("new") }
             SheetItem(AegisIcons.Users, stringResource(R.string.new_group)) { sheet = false; onRoute("newgroup") }
@@ -456,7 +462,7 @@ fun ChatScreen(
             }
             Box {
                 BarIcon(AegisIcons.More, stringResource(R.string.menu)) { menu = true }
-                DropdownMenu(menu, { menu = false }, modifier = Modifier.background(Ui.surface2)) {
+                DropdownMenu(menu, { menu = false }, modifier = Modifier.background(Ui.surface2), properties = PopupProperties(focusable = true, securePolicy = securePolicy())) {
                     DropdownMenuItem({ Text(stringResource(R.string.profile_title), color = Ui.text) }, { menu = false; onInfo() })
                     DropdownMenuItem({ Text(stringResource(if (muted) R.string.unmute else R.string.mute), color = Ui.text) }, { menu = false; session.setMuted(listOf(key), !muted) })
                 }
@@ -481,7 +487,11 @@ fun ChatScreen(
                 val last = next == null || next.sender != m.sender || next.outgoing != m.outgoing || dayOf(next.tsMs) != dayOf(m.tsMs)
                 if (newDay) DatePill(m.tsMs)
                 Spacer(Modifier.height(if (first) 8.dp else 2.dp))
-                if (kind == Kind.Channel) Box(if (tilt) Modifier.depth(state, m.id) else Modifier) {
+                val timer = m.timer
+                if (timer != null) {
+                    val who = if (m.outgoing) stringResource(R.string.ttl_you) else d.contact(m.sender)?.title?.ifBlank { null } ?: m.senderName.ifBlank { "@" + m.sender }
+                    TimerLine(timerText(timer, who), m.status == Status.FAILED) { session.retry(key, m.id) }
+                } else if (kind == Kind.Channel) Box(if (tilt) Modifier.depth(state, m.id) else Modifier) {
                     PostCard(session, m, anim, seen, { viewer = it })
                 } else Box(if (tilt) Modifier.depth(state, m.id) else Modifier) {
                     val senderSeed = d.contact(m.sender)?.ed ?: seedOf("u:" + m.sender)
@@ -517,6 +527,27 @@ fun ChatScreen(
         }
     }
     viewer?.let { MediaViewer(session, it) { viewer = null } }
+}
+
+@Composable
+private fun timerText(ttlS: Long, who: String): String =
+    if (ttlS == 0L) stringResource(R.string.ttl_line_off, who) else stringResource(R.string.ttl_line_set, who, ttlLabel(ttlS))
+
+/** The local line left by a timer change; a failed one is sent again on tap. */
+@Composable
+private fun TimerLine(text: String, failed: Boolean, onRetry: () -> Unit) {
+    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp), contentAlignment = Alignment.Center) {
+        Row(
+            Modifier.clip(CircleShape).background(Ui.surface2).clickable(enabled = failed, role = Role.Button, onClick = onRetry)
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(AegisIcons.Clock, null, tint = Ui.muted, modifier = Modifier.size(12.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(text, style = MaterialTheme.typography.labelMedium, color = Ui.muted)
+            if (failed) { Spacer(Modifier.width(6.dp)); Text("!", style = MaterialTheme.typography.labelMedium, color = Ui.danger) }
+        }
+    }
 }
 
 @Composable

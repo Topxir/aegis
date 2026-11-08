@@ -24,12 +24,14 @@ data class Message(
     val sender: String,
     val senderName: String,
     val tsMs: Long,
-    /** Local clock when the message was stored; expiry never starts later than this. */
+    /** Local clock when the message was stored or sent; expiry counts from here (spec section 5.2). */
     val baseMs: Long,
     val ttlS: Long,
     val body: String,
     val status: Int = Status.SENT,
     val media: Media? = null,
+    /** Set only on the local line that records a timer change: the new timer in seconds. */
+    val timer: Long? = null,
 )
 
 data class Contact(
@@ -48,6 +50,8 @@ data class Contact(
     val particles: Particles = Particles.None,
     val cardName: String = "",
     val cardTs: Long = 0,
+    /** Sender time of the last timer change applied; older changes are ignored. */
+    val ttlTs: Long = 0,
 )
 
 data class Group(
@@ -58,6 +62,7 @@ data class Group(
     val ttlS: Long = 0,
     /** Who made the group; only this member can remove others. Empty for groups saved before this field. */
     val creator: String = "",
+    val ttlTs: Long = 0,
 ) {
     val queueHex: String get() = Hex.encode(QueueIds.group(secret))
 }
@@ -92,6 +97,10 @@ data class Settings(
     val backgroundLockMin: Int = 15,
     val pollSeconds: Int = 30,
     val notifications: Boolean = true,
+    /** Idle and background locks; off leaves only the lock on start and the manual one. */
+    val appLock: Boolean = true,
+    /** Show the chat, sender and text in notifications instead of only "New message". */
+    val showContent: Boolean = false,
 )
 
 class VaultData(
@@ -176,16 +185,17 @@ object VaultCodec {
                 "px" to c.pendingX?.let { Hex.encode(it) }, "ped" to c.pendingEd?.let { Hex.encode(it) },
                 "ttl" to c.ttlS,
                 "about" to c.about, "particles" to c.particles.wire, "card_name" to c.cardName, "card_ts" to c.cardTs,
+                "ttl_ts" to c.ttlTs,
             )
         }
         m["groups"] = v.groups.map { g ->
-            mapOf("id" to g.id, "key" to Hex.encode(g.secret), "name" to g.name, "members" to g.members, "ttl" to g.ttlS, "creator" to g.creator)
+            mapOf("id" to g.id, "key" to Hex.encode(g.secret), "name" to g.name, "members" to g.members, "ttl" to g.ttlS, "creator" to g.creator, "ttl_ts" to g.ttlTs)
         }
         m["chats"] = v.chats.mapValues { (_, c) ->
             mapOf(
                 "unread" to c.unread.toLong(),
                 "msgs" to c.messages.map { x ->
-                    mapOf(
+                    val e = mapOf(
                         "id" to x.id, "out" to x.outgoing, "s" to x.sender, "sn" to x.senderName, "ts" to x.tsMs,
                         "base" to x.baseMs, "ttl" to x.ttlS, "b" to x.body, "st" to x.status.toLong(),
                         "media" to x.media?.let { md ->
@@ -195,6 +205,7 @@ object VaultCodec {
                             )
                         },
                     )
+                    if (x.timer != null) e + ("timer" to x.timer) else e
                 },
             )
         }
@@ -205,6 +216,7 @@ object VaultCodec {
             "endpoint" to s.endpoint, "proxy" to s.proxy, "name" to s.displayName,
             "idle" to s.idleLockMin.toLong(), "bg" to s.backgroundLockMin.toLong(),
             "poll" to s.pollSeconds.toLong(), "notify" to s.notifications,
+            "app_lock" to s.appLock, "show_content" to s.showContent,
         )
         m["channels"] = v.channels.map { c ->
             mapOf(
@@ -241,10 +253,11 @@ object VaultCodec {
                     (it["particles"] as String?)?.let { p -> Particles.parse(p) } ?: Particles.None,
                     (it["card_name"] as String?) ?: "",
                     (it["card_ts"] as Long?) ?: 0,
+                    (it["ttl_ts"] as Long?) ?: 0,
                 )
             }
             val groups = list(m, "groups").map {
-                Group(str(it, "id"), Hex.decodeFixed(str(it, "key"), 32), str(it, "name"), (it["members"] as List<String>), lng(it, "ttl"), (it["creator"] as String?) ?: "")
+                Group(str(it, "id"), Hex.decodeFixed(str(it, "key"), 32), str(it, "name"), (it["members"] as List<String>), lng(it, "ttl"), (it["creator"] as String?) ?: "", (it["ttl_ts"] as Long?) ?: 0)
             }
             val chats = (m["chats"] as Map<String, Map<String, Any?>>).mapValues { (_, c) ->
                 Chat(
@@ -258,6 +271,7 @@ object VaultCodec {
                                     lng(md, "dur"), (md["desc"] as String?) ?: "",
                                 )
                             },
+                            it["timer"] as Long?,
                         )
                     },
                     lng(c, "unread").toInt(),
@@ -267,6 +281,7 @@ object VaultCodec {
             val settings = Settings(
                 str(st, "endpoint"), str(st, "proxy"), str(st, "name"), lng(st, "idle").toInt(), lng(st, "bg").toInt(),
                 lng(st, "poll").toInt(), bool(st, "notify"),
+                (st["app_lock"] as Boolean?) ?: true, (st["show_content"] as Boolean?) ?: false,
             )
             val channels = ((m["channels"] as List<Map<String, Any?>>?) ?: emptyList()).map {
                 Channel(

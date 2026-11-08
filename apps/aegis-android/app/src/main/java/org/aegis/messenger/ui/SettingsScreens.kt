@@ -70,7 +70,7 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
     fun save(next: Settings) {
         session.saveSettings(next) { e -> error = e; saved = e == null }
     }
-    fun current() = Settings(endpoint, proxy, name, s.idleLockMin, s.backgroundLockMin, s.pollSeconds, s.notifications)
+    fun current() = s.copy(endpoint = endpoint, proxy = proxy, displayName = name)
 
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         TopBar(stringResource(SETTINGS_SECTIONS.firstOrNull { it.id == part }?.title ?: R.string.settings), onBack = onBack)
@@ -129,11 +129,20 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
             if (net) Divider()
             if (part == "privacy") { PrivacySection(session); Divider() }
             if (lock) Section(stringResource(R.string.locking)) {
-                Text(stringResource(R.string.lock_idle), color = Ui.text)
-                Choices(listOf(1, 5, 15, 60).map { it to lockLabel(it) }, s.idleLockMin) { save(current().withLocks(it, s.backgroundLockMin)) }
-                Text(stringResource(R.string.lock_background), color = Ui.text, modifier = Modifier.padding(top = 12.dp))
-                Choices(listOf(0, 1, 5, 15, 60, -1).map { it to lockLabel(it) }, s.backgroundLockMin) { save(current().withLocks(s.idleLockMin, it)) }
-                Note(stringResource(R.string.lock_note))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(stringResource(R.string.app_lock), color = Ui.text, modifier = Modifier.weight(1f))
+                    Switch(
+                        s.appLock, { save(current().copy(appLock = it)); ctx.activity()?.applySecure() },
+                        colors = SwitchDefaults.colors(checkedTrackColor = Ui.accent, checkedThumbColor = Ui.onAccent, uncheckedTrackColor = Ui.surface2, uncheckedThumbColor = Ui.muted, uncheckedBorderColor = Ui.border),
+                    )
+                }
+                if (s.appLock) {
+                    Text(stringResource(R.string.lock_idle), color = Ui.text, modifier = Modifier.padding(top = 12.dp))
+                    Choices(listOf(1, 5, 15, 60).map { it to lockLabel(it) }, s.idleLockMin) { save(current().copy(idleLockMin = it)) }
+                    Text(stringResource(R.string.lock_background), color = Ui.text, modifier = Modifier.padding(top = 12.dp))
+                    Choices(listOf(0, 1, 5, 15, 60, -1).map { it to lockLabel(it) }, s.backgroundLockMin) { save(current().copy(backgroundLockMin = it)) }
+                }
+                Note(stringResource(if (s.appLock) R.string.lock_note else R.string.app_lock_off_note))
                 Secondary(stringResource(R.string.lock_now)) { session.lock() }
             }
             if (lock) Divider()
@@ -141,11 +150,19 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(stringResource(R.string.notifications_enable), color = Ui.text, modifier = Modifier.weight(1f))
                     Switch(
-                        s.notifications, { save(current().withNotify(it)) },
+                        s.notifications, { save(current().copy(notifications = it)) },
                         colors = SwitchDefaults.colors(checkedTrackColor = Ui.accent, checkedThumbColor = Ui.onAccent, uncheckedTrackColor = Ui.surface2, uncheckedThumbColor = Ui.muted, uncheckedBorderColor = Ui.border),
                     )
                 }
                 Note(stringResource(R.string.notifications_note))
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(stringResource(R.string.notifications_content), color = Ui.text, modifier = Modifier.weight(1f))
+                    Switch(
+                        s.showContent, { save(current().copy(showContent = it)) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = Ui.accent, checkedThumbColor = Ui.onAccent, uncheckedTrackColor = Ui.surface2, uncheckedThumbColor = Ui.muted, uncheckedBorderColor = Ui.border),
+                    )
+                }
+                Note(stringResource(R.string.notifications_content_note))
                 var bg by remember { mutableStateOf(Boot.backgroundPoll(ctx)) }
                 Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(stringResource(R.string.background_check), color = Ui.text, modifier = Modifier.weight(1f))
@@ -191,9 +208,6 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
         { confirmDelete = false; session.deleteAccount() }, { confirmDelete = false },
     )
 }
-
-private fun Settings.withLocks(idle: Int, bg: Int) = Settings(endpoint, proxy, displayName, idle, bg, pollSeconds, notifications)
-private fun Settings.withNotify(on: Boolean) = Settings(endpoint, proxy, displayName, idleLockMin, backgroundLockMin, pollSeconds, on)
 
 @Composable
 fun AboutScreen(onBack: () -> Unit, onGuide: (() -> Unit)? = null) {

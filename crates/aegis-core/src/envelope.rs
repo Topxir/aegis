@@ -28,14 +28,18 @@ pub enum Kind {
     Prof,
     /// Sender-key chain distribution (section 28).
     Skey,
+    /// Disappearing-message timer of a direct chat (section 5.2).
+    Ttl,
+    /// Disappearing-message timer of a group.
+    Gttl,
 }
 
 impl Kind {
     /// Frame type that carries this envelope kind: `0x01` (sealed) or `0x02` (group/channel queue).
     pub fn frame_type(self) -> u8 {
         match self {
-            Kind::Dm | Kind::Ginv | Kind::Dmf | Kind::Cinv | Kind::Prof | Kind::Skey => 0x01,
-            Kind::Gmsg | Kind::Gmf | Kind::Cmsg | Kind::Cmf => 0x02,
+            Kind::Dm | Kind::Ginv | Kind::Dmf | Kind::Cinv | Kind::Prof | Kind::Skey | Kind::Ttl => 0x01,
+            Kind::Gmsg | Kind::Gmf | Kind::Cmsg | Kind::Cmf | Kind::Gttl => 0x02,
         }
     }
 
@@ -51,6 +55,8 @@ impl Kind {
             Kind::Cmf => "cmf",
             Kind::Prof => "prof",
             Kind::Skey => "skey",
+            Kind::Ttl => "ttl",
+            Kind::Gttl => "gttl",
         }
     }
 
@@ -66,6 +72,8 @@ impl Kind {
             "cmf" => Ok(Kind::Cmf),
             "prof" => Ok(Kind::Prof),
             "skey" => Ok(Kind::Skey),
+            "ttl" => Ok(Kind::Ttl),
+            "gttl" => Ok(Kind::Gttl),
             _ => Err(Error::InvalidEnvelope("type")),
         }
     }
@@ -161,6 +169,20 @@ impl Envelope {
                     return Err(Error::InvalidEnvelope("skey fields"));
                 }
                 parse_skey_body(&self.body)?;
+            }
+            Kind::Ttl | Kind::Gttl => {
+                let id_ok = if self.kind == Kind::Gttl {
+                    hex::is_hex_len(&self.group_id, 32)
+                } else {
+                    self.group_id.is_empty()
+                };
+                if !id_ok
+                    || self.group_key.is_some()
+                    || !self.members.is_empty()
+                    || !self.body.is_empty()
+                {
+                    return Err(Error::InvalidEnvelope("ttl fields"));
+                }
             }
             Kind::Ginv => {
                 let Some(key) = &self.group_key else {
@@ -351,6 +373,19 @@ pub fn is_expired(env: &Envelope, now_ms: u64) -> bool {
     env.ttl_s != 0 && now_ms >= env.ts_ms.saturating_add(env.ttl_s.saturating_mul(1000))
 }
 
+/// Timer values a chat can be set to, in seconds; 0 keeps messages.
+pub const TTL_CHOICES: [u64; 6] = [0, 30, 300, 3600, 86_400, 604_800];
+
+pub fn ttl_allowed(ttl_s: u64) -> bool {
+    TTL_CHOICES.contains(&ttl_s)
+}
+
+/// Local expiry (section 5.2): a message kept since `base_ms` (receipt time, or send time for
+/// our own messages) is deleted once `ttl_s` seconds have passed.
+pub fn expired_since(base_ms: u64, ttl_s: u64, now_ms: u64) -> bool {
+    ttl_s != 0 && now_ms >= base_ms.saturating_add(ttl_s.saturating_mul(1000))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -429,7 +464,7 @@ pub(crate) mod tests {
         let all = [
             (Kind::Dm, 1), (Kind::Prof, 1), (Kind::Ginv, 1), (Kind::Dmf, 1), (Kind::Cinv, 1),
             (Kind::Gmsg, 2), (Kind::Gmf, 2), (Kind::Cmsg, 2), (Kind::Cmf, 2),
-            (Kind::Skey, 1),
+            (Kind::Skey, 1), (Kind::Ttl, 1), (Kind::Gttl, 2),
         ];
         for (k, t) in all {
             assert_eq!(k.frame_type(), t);

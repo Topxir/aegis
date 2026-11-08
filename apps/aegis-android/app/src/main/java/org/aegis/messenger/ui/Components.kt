@@ -37,6 +37,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.SecureFlagPolicy
+import org.aegis.messenger.app.Boot
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -148,6 +151,11 @@ fun Secondary(text: String, enabled: Boolean = true, danger: Boolean = false, mo
 fun Link(text: String, onClick: () -> Unit) {
     TextButton(onClick = onClick, modifier = Modifier.heightIn(min = 48.dp)) { Text(text, color = Ui.accent) }
 }
+
+/** FLAG_SECURE for dialogs, sheets and menus, which get windows of their own. */
+@Composable
+fun securePolicy(): SecureFlagPolicy =
+    if (Boot.secureScreen(LocalContext.current)) SecureFlagPolicy.SecureOn else SecureFlagPolicy.SecureOff
 
 /** A single-select row of text options. */
 @Composable

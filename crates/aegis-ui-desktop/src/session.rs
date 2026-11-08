@@ -9,7 +9,7 @@ use crate::model::{
 };
 use aegis_core::channel::{channel_id, channel_queue, new_channel_secret, MAX_SUBSCRIBERS};
 use aegis_core::envelope::{
-    check_pinned_dm, check_pinned_group, is_expired, random_msg_id, Envelope, Kind, PinnedKeys,
+    check_pinned_dm, check_pinned_group, random_msg_id, Envelope, Kind, PinnedKeys,
     SeenIds, MAX_MEMBERS,
 };
 use aegis_core::group::{group_id, group_queue, new_group_secret};
@@ -25,7 +25,7 @@ use aegis_core::x3dh::Bundle;
 use aegis_core::{hex, pad, Error};
 use zeroize::Zeroizing;
 
-pub const TTL_CHOICES: [u64; 4] = [0, 3600, 86_400, 604_800];
+pub use aegis_core::envelope::TTL_CHOICES;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatRef {
@@ -75,6 +75,8 @@ pub enum Outcome {
     ChannelJoined(String),
     Profile(String),
     KeyChanged(String),
+    /// The timer of a chat was changed by the other side.
+    Timer(ChatRef),
     Dropped,
 }
 
@@ -769,6 +771,7 @@ impl Session {
             out: false,
             state: MsgState::Sent,
             media: None,
+            base_ms: now_ms,
         });
         self.dirty = true;
         Outcome::Added(ChatRef::Dm(contact.to_owned()))
@@ -822,7 +825,7 @@ impl Session {
         }
         if !matches!(
             env.kind,
-            Kind::Dm | Kind::Dmf | Kind::Ginv | Kind::Cinv | Kind::Prof
+            Kind::Dm | Kind::Dmf | Kind::Ginv | Kind::Cinv | Kind::Prof | Kind::Ttl
         ) || (env.kind == Kind::Dmf) != media.is_some()
         {
             return Outcome::Dropped;
@@ -859,9 +862,6 @@ impl Session {
         }
         self.seen.insert(&env.msg_id);
         self.dirty = true;
-        if is_expired(&env, now_ms) {
-            return Outcome::Dropped;
-        }
         let name = sanitize_display_text(&env.sender_name);
         if let Some(c) = self.data.contacts.get_mut(&sender) {
             if !name.is_empty() {
@@ -871,6 +871,7 @@ impl Session {
         match env.kind {
             Kind::Prof => self.accept_profile(&sender, &env),
             Kind::Cinv => self.accept_channel_invite(env, now_ms),
+            Kind::Ttl => self.accept_ttl(ChatRef::Dm(sender), &env, now_ms),
             Kind::Dm | Kind::Dmf => {
                 let text = env.body.clone();
                 let chat = self
@@ -888,6 +889,7 @@ impl Session {
                     out: false,
                     state: MsgState::Sent,
                     media,
+                    base_ms: now_ms,
                 });
                 Outcome::Added(ChatRef::Dm(sender))
             }
@@ -970,9 +972,6 @@ impl Session {
         }
         self.seen.insert(&env.msg_id);
         self.dirty = true;
-        if is_expired(&env, now_ms) {
-            return Outcome::Dropped;
-        }
         let Some(ch) = self.data.channels.get_mut(cid) else {
             return Outcome::Dropped;
         };
@@ -986,6 +985,7 @@ impl Session {
             out: false,
             state: MsgState::Sent,
             media,
+            base_ms: now_ms,
         });
         Outcome::Added(ChatRef::Channel(cid.to_owned()))
     }
@@ -1033,7 +1033,7 @@ impl Session {
         let Some(g) = self.data.groups.get(gid) else {
             return Outcome::Dropped;
         };
-        if !matches!(env.kind, Kind::Gmsg | Kind::Gmf)
+        if !matches!(env.kind, Kind::Gmsg | Kind::Gmf | Kind::Gttl)
             || (env.kind == Kind::Gmf) != media.is_some()
             || env.group_id != g.id
             || env.sender == self.data.username
@@ -1073,8 +1073,8 @@ impl Session {
         }
         self.seen.insert(&env.msg_id);
         self.dirty = true;
-        if is_expired(&env, now_ms) {
-            return Outcome::Dropped;
+        if env.kind == Kind::Gttl {
+            return self.accept_ttl(ChatRef::Group(gid.to_owned()), &env, now_ms);
         }
         let Some(g) = self.data.groups.get_mut(gid) else {
             return Outcome::Dropped;
@@ -1089,11 +1089,12 @@ impl Session {
             out: false,
             state: MsgState::Sent,
             media,
+            base_ms: now_ms,
         });
         Outcome::Added(ChatRef::Group(gid.to_owned()))
     }
 
-    fn own_envelope(&self, kind: Kind, id: String, ts_ms: u64, ttl_s: u64) -> Envelope {
+    pub(crate) fn own_envelope(&self, kind: Kind, id: String, ts_ms: u64, ttl_s: u64) -> Envelope {
         Envelope {
             kind,
             msg_id: id,
@@ -1251,6 +1252,7 @@ impl Session {
                 out: true,
                 state: MsgState::Sending,
                 media,
+                base_ms: now_ms,
             });
         }
         self.dirty = true;
@@ -1343,18 +1345,6 @@ impl Session {
             to: c.u.clone(),
             env,
         })
-    }
-
-    pub fn set_ttl(&mut self, r: &ChatRef, ttl_s: u64) -> bool {
-        if !TTL_CHOICES.contains(&ttl_s) {
-            return false;
-        }
-        if let Some(c) = self.chat_mut(r) {
-            c.ttl_s = ttl_s;
-            self.dirty = true;
-            return true;
-        }
-        false
     }
 
     pub fn set_verified(&mut self, u: &str, on: bool) {

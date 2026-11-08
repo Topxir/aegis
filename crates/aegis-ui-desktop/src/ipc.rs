@@ -139,6 +139,10 @@ pub enum Cmd {
     SavePrivacy {
         idle_min: String,
         protect: bool,
+        #[serde(default)]
+        app_lock: bool,
+        #[serde(default)]
+        lock_min: bool,
     },
     SaveNotify {
         on: bool,

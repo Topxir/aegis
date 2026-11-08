@@ -2,13 +2,14 @@ package org.aegis.messenger.core
 
 enum class Kind(val wire: String) {
     Dm("dm"), Ginv("ginv"), Gmsg("gmsg"), Dmf("dmf"), Gmf("gmf"),
-    Cinv("cinv"), Cmsg("cmsg"), Cmf("cmf"), Prof("prof"), Skey("skey");
+    Cinv("cinv"), Cmsg("cmsg"), Cmf("cmf"), Prof("prof"), Skey("skey"),
+    Ttl("ttl"), Gttl("gttl");
 
     /** Frame type that carries this kind: 0x01 sealed, 0x02 group or channel queue. */
     val frameType: Byte
         get() = when (this) {
-            Dm, Ginv, Dmf, Cinv, Prof, Skey -> 0x01
-            Gmsg, Gmf, Cmsg, Cmf -> 0x02
+            Dm, Ginv, Dmf, Cinv, Prof, Skey, Ttl -> 0x01
+            Gmsg, Gmf, Cmsg, Cmf, Gttl -> 0x02
         }
 
     companion object {
@@ -67,6 +68,12 @@ class Envelope(
                     throw AegisException.InvalidEnvelope("skey fields")
                 }
                 parseSkeyBody(body)
+            }
+            Kind.Ttl, Kind.Gttl -> {
+                val idOk = if (kind == Kind.Gttl) Hex.isHexLen(groupId, 32) else groupId.isEmpty()
+                if (!idOk || groupKey != null || members.isNotEmpty() || body.isNotEmpty()) {
+                    throw AegisException.InvalidEnvelope("ttl fields")
+                }
             }
             Kind.Cinv -> {
                 val key = groupKey ?: throw AegisException.InvalidEnvelope("group_key")
@@ -188,7 +195,12 @@ class SeenIds(private val cap: Int, ids: Iterable<String> = emptyList()) {
 }
 
 object Expiry {
-    /** True when a message with the given timestamp and ttl should be deleted at [nowMs]. */
+    /** Timer values a chat can be set to, in seconds; 0 keeps messages (spec section 5.2). */
+    val TTL_CHOICES = listOf(0L, 30L, 300L, 3600L, 86_400L, 604_800L)
+
+    fun allowed(ttlS: Long): Boolean = ttlS in TTL_CHOICES
+
+    /** True when a message kept since [tsMs] (receipt or send time) with [ttlS] should be deleted at [nowMs]. */
     fun isExpired(tsMs: Long, ttlS: Long, nowMs: Long): Boolean {
         if (ttlS == 0L) return false
         val life = if (ttlS > Long.MAX_VALUE / 1000) Long.MAX_VALUE else ttlS * 1000

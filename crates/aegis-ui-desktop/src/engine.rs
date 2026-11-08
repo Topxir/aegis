@@ -35,8 +35,11 @@ use zeroize::Zeroizing;
 
 pub mod cover;
 mod extra;
+mod lock;
+mod notice;
 mod oseal;
 mod pin;
+mod timer;
 
 const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
 const POLL_PAGES: usize = 10;
@@ -111,6 +114,8 @@ pub struct App {
     pub net_ok: Option<bool>,
     pub last_activity: Instant,
     pub attention: bool,
+    /// Chat of the latest message that asked for attention.
+    pub note: Option<ChatRef>,
     /// Info panel next to the open chat.
     pub info: bool,
     /// Keys the page-visible media ids; changes on every start.
@@ -149,6 +154,7 @@ impl App {
             net_ok: None,
             last_activity: Instant::now(),
             attention: false,
+            note: None,
             info: false,
             media_secret: aegis_core::random_bytes::<32>().unwrap_or([7; 32]),
             key_alert: false,
@@ -205,6 +211,10 @@ pub enum Job {
     Retry {
         chat: ChatRef,
         id: String,
+    },
+    SetTimer {
+        chat: ChatRef,
+        ttl: u64,
     },
     PickMedia(ChatRef),
     SendMedia {
@@ -408,7 +418,7 @@ impl Engine {
     pub fn idle_expired(&self) -> bool {
         let app = self.app();
         match &app.session {
-            Some(s) if s.data.settings.idle_min > 0 => {
+            Some(s) if s.data.settings.app_lock && s.data.settings.idle_min > 0 => {
                 app.last_activity.elapsed()
                     >= Duration::from_secs(u64::from(s.data.settings.idle_min) * 60)
             }
@@ -1065,7 +1075,10 @@ impl Engine {
                         s.mark_read(r);
                     }
                 }
-                app.attention |= flash && !muted;
+                if flash && !muted {
+                    app.attention = true;
+                    app.note = Some(r.clone());
+                }
                 true
             }
             Outcome::GroupJoined(_) | Outcome::ChannelJoined(_) => {
@@ -1074,6 +1087,7 @@ impl Engine {
             }
             Outcome::Profile(_) => true,
             Outcome::KeyChanged(_) => true,
+            Outcome::Timer(_) => true,
             Outcome::Dropped => false,
         }
     }
@@ -1093,7 +1107,7 @@ impl Engine {
         let env = opened.envelope;
         if !matches!(
             env.kind,
-            Kind::Dm | Kind::Dmf | Kind::Ginv | Kind::Cinv | Kind::Prof
+            Kind::Dm | Kind::Dmf | Kind::Ginv | Kind::Cinv | Kind::Prof | Kind::Ttl
         ) {
             return (Flow::Next, false);
         }
@@ -1422,7 +1436,7 @@ impl Engine {
             Some(Some(g)) => g,
         };
         let (kind_ok, tag) = if is_group {
-            (matches!(env.kind, Kind::Gmsg | Kind::Gmf), "g")
+            (matches!(env.kind, Kind::Gmsg | Kind::Gmf | Kind::Gttl), "g")
         } else {
             (matches!(env.kind, Kind::Cmsg | Kind::Cmf), "c")
         };
@@ -1486,7 +1500,7 @@ impl Engine {
         if env.sender != contact
             || !matches!(
                 env.kind,
-                Kind::Dm | Kind::Dmf | Kind::Ginv | Kind::Cinv | Kind::Prof
+                Kind::Dm | Kind::Dmf | Kind::Ginv | Kind::Cinv | Kind::Prof | Kind::Ttl
             )
         {
             return (Flow::Next, false);
@@ -1734,7 +1748,7 @@ impl Engine {
             return applied;
         }
 
-        self.live(epoch, |s| s.sweep(now_ms()));
+        self.sweep_expired(epoch);
         self.gc_media(epoch);
         self.app().net_ok = Some(reached);
         let _ = self.flush();
@@ -1743,14 +1757,10 @@ impl Engine {
     }
 
     pub fn sweep(&self) {
-        if self.mutate_if(|s| s.sweep(now_ms())) {
+        let epoch = self.app().epoch;
+        if self.sweep_expired(epoch) {
             self.changed();
         }
-    }
-
-    fn mutate_if(&self, f: impl FnOnce(&mut Session) -> bool) -> bool {
-        let mut app = self.app();
-        app.session.as_mut().is_some_and(f)
     }
 
     // ---- job runner -----------------------------------------------------------
@@ -1826,6 +1836,10 @@ impl Engine {
             }
             Job::Retry { chat, id } => {
                 let r = self.retry(&chat, &id);
+                self.finish(r.map(|()| None));
+            }
+            Job::SetTimer { chat, ttl } => {
+                let r = self.set_timer(&chat, ttl);
                 self.finish(r.map(|()| None));
             }
             Job::PickMedia(chat) => {

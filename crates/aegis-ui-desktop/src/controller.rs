@@ -196,8 +196,7 @@ impl Controller {
             }
             Cmd::SetTtl { ttl } => {
                 if let Some(chat) = self.current_chat() {
-                    e.mutate(|s| s.set_ttl(&chat, ttl));
-                    self.local_change();
+                    self.job(Job::SetTimer { chat, ttl });
                 }
             }
             Cmd::Verify { on } => {
@@ -279,9 +278,16 @@ impl Controller {
                 e.app().conn = None;
                 self.local_change();
             }
-            Cmd::SavePrivacy { idle_min, protect } => {
+            Cmd::SavePrivacy {
+                idle_min,
+                protect,
+                app_lock,
+                lock_min,
+            } => {
                 let r = match idle_min.trim().parse::<u32>() {
-                    Ok(n) => e.apply_privacy(n, protect),
+                    Ok(n) => e
+                        .apply_privacy(n, protect)
+                        .and_then(|()| e.set_lock(app_lock, lock_min)),
                     Err(_) => Err(Failure::new("err.generic")),
                 };
                 self.saved(r);

@@ -38,7 +38,7 @@ import org.aegis.messenger.core.Crypto
 import org.aegis.messenger.core.Profile
 import org.aegis.messenger.data.VaultData
 
-private fun Context.activity(): MainActivity? {
+internal fun Context.activity(): MainActivity? {
     var c = this
     while (c is ContextWrapper) {
         if (c is MainActivity) return c

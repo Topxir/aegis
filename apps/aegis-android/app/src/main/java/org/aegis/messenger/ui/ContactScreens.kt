@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import org.aegis.messenger.R
 import org.aegis.messenger.app.Session
 import org.aegis.messenger.data.VaultData
@@ -47,12 +48,15 @@ fun Confirm(title: String, body: String, action: String, onYes: () -> Unit, onNo
         text = { Text(body, color = Ui.muted) },
         confirmButton = { TextButton(onClick = onYes) { Text(action, color = Ui.danger) } },
         dismissButton = { TextButton(onClick = onNo) { Text(stringResource(R.string.cancel), color = Ui.text) } },
+        properties = DialogProperties(securePolicy = securePolicy()),
     )
 }
 
 @Composable
-private fun ttlLabel(s: Long): String = when (s) {
+fun ttlLabel(s: Long): String = when (s) {
     0L -> stringResource(R.string.ttl_off)
+    30L -> stringResource(R.string.ttl_30s)
+    300L -> stringResource(R.string.ttl_5m)
     3600L -> stringResource(R.string.ttl_1h)
     86400L -> stringResource(R.string.ttl_1d)
     else -> stringResource(R.string.ttl_7d)
