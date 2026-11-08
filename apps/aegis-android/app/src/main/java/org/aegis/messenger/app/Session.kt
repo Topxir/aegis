@@ -33,6 +33,7 @@ import org.aegis.messenger.core.Expiry
 import org.aegis.messenger.core.Group as GroupCrypto
 import org.aegis.messenger.core.Hex
 import org.aegis.messenger.core.Identity
+import org.aegis.messenger.core.Invite
 import org.aegis.messenger.core.Kind
 import org.aegis.messenger.core.Names
 import org.aegis.messenger.core.Pad
@@ -54,6 +55,7 @@ import org.aegis.messenger.data.channelKey
 import org.aegis.messenger.core.SessionStore
 import org.aegis.messenger.data.Contact
 import org.aegis.messenger.data.FsState
+import org.aegis.messenger.data.Invites
 import org.aegis.messenger.data.Group
 import org.aegis.messenger.data.Message
 import org.aegis.messenger.data.Settings
@@ -204,7 +206,7 @@ class Session(private val ctx: Context) {
                     val client = clientFor(settings)
                     val existing = client.lookup(user)
                     if (existing != null) throw AegisException.Http(409)
-                    client.register(Registration.sign(id, user, title, System.currentTimeMillis() / 1000))
+                    client.register(Registration.sign(id, user, "", System.currentTimeMillis() / 1000))
                     registered = true
                 } catch (e: AegisException.Network) {
                     // Offline: the account is created locally and registered on the next poll.
@@ -333,6 +335,8 @@ class Session(private val ctx: Context) {
         gate.reset()
         post { refreshPin() }
         openChat = null
+        inviteLink = null
+        synchronized(accepts) { accepts.clear() }
         Notifier.cancelAll(ctx)
         AegisService.stop(ctx)
     }
@@ -779,6 +783,7 @@ class Session(private val ctx: Context) {
             } else c
         }
         if (changed) update { it.copy(chats = chats) }
+        if (Invites.purge(d, now / 1000) !== d) update { Invites.purge(it, now / 1000) }
     }
 
     fun purgeNow() = purgeExpired()
@@ -838,12 +843,16 @@ class Session(private val ctx: Context) {
         val client = clientFor(d0.settings)
         if (!d0.registered) {
             val id = Identity(d0.xSk, d0.edSk)
-            val reg = Registration.sign(id, d0.username, d0.settings.displayName, System.currentTimeMillis() / 1000)
-            id.wipe()
-            client.register(reg)
+            try {
+                client.register(Registration.sign(id, d0.username, "", System.currentTimeMillis() / 1000))
+                if (d0.settings.hidden) client.hide(id, d0.username, true)
+            } finally {
+                id.wipe()
+            }
             update { it.copy(registered = true) }
         }
         retryPending()
+        retryAccepts(client)
         publishPrekeys(client, d0)
         purgeFs(d0)
         var incoming = 0
@@ -892,6 +901,7 @@ class Session(private val ctx: Context) {
             }
             if (frame.isNotEmpty() && frame[0] == SessionStore.FRAME_SESSION) return handleSessionFrame(client, d, frame)
             val o = Seal.openDm(d.xSk, frame)
+            if (o.envelope.kind == Kind.Iacc) return acceptInviteUse(o.envelope, o.senderXPk)
             return ingest(client, o.envelope, o.senderXPk, null)
         } catch (e: AegisException.Network) {
             throw e
@@ -1095,6 +1105,11 @@ class Session(private val ctx: Context) {
         if (SeenIds(SEEN_CAP, d.seen).contains(env.msgId)) return 0
         var contact = d.contact(env.sender)
         if (contact == null) {
+            // A group member who is not a contact is not looked up: that would show the server who is in the group (section 7).
+            if (group != null) {
+                markSeen(env.msgId)
+                return 0
+            }
             val e = client.lookup(env.sender)
             if (e == null || !Bytes.eq(e.ed, env.senderEd) || (senderX != null && !Bytes.eq(e.x, senderX))) {
                 markSeen(env.msgId)
@@ -1157,7 +1172,7 @@ class Session(private val ctx: Context) {
                 acceptSkey(env)
                 0
             }
-            Kind.Cmsg, Kind.Cmf -> 0
+            Kind.Cmsg, Kind.Cmf, Kind.Iacc -> 0
         }
     }
 
@@ -1234,7 +1249,7 @@ class Session(private val ctx: Context) {
 
     /** Takes the contact's prekeys and starts a new session with them. No bundle means the contact must update. */
     private fun startSessionWith(client: Client, d: VaultData, user: String) {
-        val b = client.prekeysTake(user) ?: throw AegisException.NeedsUpdate()
+        val b = client.prekeysTake(user, (data ?: d).contact(user)?.ed) ?: throw AegisException.NeedsUpdate()
         val id = Identity(d.xSk, d.edSk)
         try {
             synchronized(d.fs) { d.fs.store.startSession(id, user, b, nowS()) }
@@ -1437,6 +1452,154 @@ class Session(private val ctx: Context) {
     }
 
     // ---- contacts ----------------------------------------------------------
+
+    // ---- invite links (spec section 29) -----------------------------------------
+
+    /** The invite link made last; kept in memory only and gone on lock. */
+    var inviteLink by mutableStateOf<String?>(null)
+        private set
+
+    /** An `aegis:` link opened from outside, waiting for the user to act on it once unlocked. */
+    var linkIn by mutableStateOf<String?>(null)
+
+    /** `iacc` frames that could not be posted yet, as (queue, frame); memory only. */
+    private val accepts = ArrayList<Pair<ByteArray, ByteArray>>()
+
+    fun createInvite(done: (Int?) -> Unit) {
+        val d = data ?: return done(R.string.err_generic)
+        val s = Crypto.randomBytes(32)
+        var added = false
+        update { cur -> Invites.open(cur, s, nowS())?.also { added = true } ?: cur }
+        if (!added) return done(R.string.err_invite_limit)
+        busy = true
+        net.execute {
+            var err: Int? = null
+            val id = Identity(d.xSk, d.edSk)
+            try {
+                // The secret is on disk before the server holds the bundle, so an accept is never lost.
+                flush()
+                clientFor(d.settings).inviteCreate(id, d.username, s)
+                val link = Invite.link(s)
+                post { inviteLink = link }
+            } catch (e: Throwable) {
+                update { Invites.drop(it, s) }
+                err = if (e is AegisException.Http && e.code == 429) R.string.err_invite_limit else fail(e)
+            } finally {
+                id.wipe()
+            }
+            post { busy = false; done(err) }
+        }
+    }
+
+    /** Redeems a link: pins the inviter without asking the directory and tells the inviter who used it. */
+    fun redeemInvite(raw: String, done: (String?, Int?) -> Unit) {
+        val d = data ?: return done(null, R.string.err_generic)
+        val s = try { Invite.parseLink(raw) } catch (e: AegisException) { return done(null, R.string.err_invite_link) }
+        if (Invites.isOwn(d, s)) return done(null, R.string.err_self)
+        busy = true
+        net.execute {
+            var err: Int? = null
+            var user: String? = null
+            val id = Identity(d.xSk, d.edSk)
+            try {
+                val client = clientFor(d.settings)
+                val b = client.inviteRedeem(s)
+                if (b == null) err = R.string.err_invite_gone
+                else when (Invites.pin(data ?: d, b, id.xPublic, id.edPublic)) {
+                    Invites.Pin.Self -> err = R.string.err_self
+                    Invites.Pin.Conflict -> err = R.string.err_invite_conflict
+                    Invites.Pin.Known -> {
+                        sendAccept(client, d, id, s, b)
+                        user = b.u
+                    }
+                    Invites.Pin.New -> {
+                        val c = Contact(b.u, "", b.x.copyOf(), b.ed.copyOf())
+                        update { it.withContact(c) }
+                        syncFsContact(c)
+                        sendAccept(client, d, id, s, b)
+                        sendProfile(listOf(b.u))
+                        user = b.u
+                    }
+                }
+            } catch (e: Throwable) {
+                err = fail(e)
+            } finally {
+                id.wipe()
+            }
+            post {
+                busy = false
+                if (user != null) linkIn = null
+                done(user, err)
+            }
+        }
+    }
+
+    private fun sendAccept(client: Client, d: VaultData, id: Identity, s: ByteArray, b: Invite.Bundle) {
+        val body = Invite.acceptBody(id, s, d.username)
+        val env = Envelope(Kind.Iacc, newId(), d.username, d.settings.displayName, id.edPublic, System.currentTimeMillis(), 0, "", body)
+        val out = QueueIds.inbox(b.x) to Seal.sealDm(d.xSk, b.x, env)
+        try {
+            client.send(out.first, out.second)
+        } catch (e: AegisException.ServerKeyChanged) {
+            synchronized(accepts) { accepts.add(out) }
+            throw e
+        } catch (e: Exception) {
+            synchronized(accepts) { accepts.add(out) }
+        }
+    }
+
+    private fun retryAccepts(client: Client) {
+        val list = synchronized(accepts) { ArrayList(accepts).also { accepts.clear() } }
+        for ((i, out) in list.withIndex()) {
+            try {
+                client.send(out.first, out.second)
+            } catch (e: Exception) {
+                synchronized(accepts) { accepts.addAll(list.subList(i, list.size)) }
+                if (e is AegisException.ServerKeyChanged) throw e
+                return
+            }
+        }
+    }
+
+    /** An `iacc` in the inbox. Only a sender proving one of the open invites is pinned; frames it sent earlier are then opened. */
+    private fun acceptInviteUse(env: Envelope, senderX: ByteArray): Int {
+        val d = data ?: return 0
+        if (SeenIds(SEEN_CAP, d.seen).contains(env.msgId)) return 0
+        val xHex = Hex.encode(senderX)
+        val blocked = synchronized(d.fs) { xHex in d.fs.blocked }
+        var added: Contact? = null
+        update { cur ->
+            val r = Invites.accept(cur, env, senderX, blocked)
+            if (r == null) cur else { added = r.second; r.first }
+        }
+        markSeen(env.msgId)
+        val c = added ?: return 0
+        flush()
+        syncFsContact(c)
+        releaseHeld(xHex)
+        sendProfile(listOf(c.username))
+        post { requestTick++ }
+        return 0
+    }
+
+    /** Turns the hidden profile on or off; the switch follows the server's answer. */
+    fun setHidden(on: Boolean, done: (Int?) -> Unit) {
+        val d = data ?: return done(R.string.err_generic)
+        busy = true
+        net.execute {
+            var err: Int? = null
+            val id = Identity(d.xSk, d.edSk)
+            try {
+                clientFor(d.settings).hide(id, d.username, on)
+                update { it.copy(settings = it.settings.copy(hidden = on)) }
+            } catch (e: Throwable) {
+                err = fail(e)
+            } finally {
+                id.wipe()
+            }
+            post { busy = false; done(err) }
+        }
+    }
 
     /** Exact-username lookup; pins the key it returns on first sight. */
     fun addContact(raw: String, done: (String?, Int?) -> Unit) {
@@ -1903,11 +2066,10 @@ class Session(private val ctx: Context) {
         )
         update { d ->
             val endpointChanged = d.settings.endpoint != clean.endpoint
-            val renamed = d.settings.displayName != clean.displayName
-            // A different server or display name needs a fresh directory registration; cursors belong to the old server.
+            // A different server needs a fresh directory registration; cursors belong to the old server.
             d.copy(
-                settings = clean,
-                registered = d.registered && !endpointChanged && !renamed,
+                settings = clean.copy(hidden = d.settings.hidden),
+                registered = d.registered && !endpointChanged,
                 cursors = if (endpointChanged) emptyMap() else d.cursors,
             )
         }

@@ -92,6 +92,8 @@ data class Settings(
     val backgroundLockMin: Int = 15,
     val pollSeconds: Int = 30,
     val notifications: Boolean = true,
+    /** Directory lookups of this account answer "not found" (spec section 29.4). */
+    val hidden: Boolean = false,
 )
 
 class VaultData(
@@ -115,6 +117,8 @@ class VaultData(
     /** Pinned owner key of the official channel; null until first seen (spec section 19). */
     val officialOwnerEd: ByteArray? = null,
     val fs: FsState = FsState(),
+    /** Invite secrets handed out and not yet used (spec section 29). */
+    val invites: List<OpenInvite> = emptyList(),
 ) {
     fun contact(u: String): Contact? = contacts.firstOrNull { it.username == u }
     fun group(id: String): Group? = groups.firstOrNull { it.id == id }
@@ -136,9 +140,10 @@ class VaultData(
         prefs: Map<String, ChatPrefs> = this.prefs,
         profile: OwnProfile = this.profile,
         officialOwnerEd: ByteArray? = this.officialOwnerEd,
+        invites: List<OpenInvite> = this.invites,
     ) = VaultData(
         username, xSk, edSk, registered, contacts, groups, chats, seen, cursors, settings,
-        channels, prefs, profile, mediaKey, officialOwnerEd, fs,
+        channels, prefs, profile, mediaKey, officialOwnerEd, fs, invites,
     )
 
     fun withChat(key: String, c: Chat): VaultData = copy(chats = chats + (key to c))
@@ -149,6 +154,7 @@ class VaultData(
         mediaKey.fill(0)
         groups.forEach { it.secret.fill(0) }
         channels.forEach { it.secret.fill(0) }
+        invites.forEach { it.secret.fill(0) }
     }
 }
 
@@ -202,7 +208,7 @@ object VaultCodec {
         m["settings"] = mapOf(
             "endpoint" to s.endpoint, "proxy" to s.proxy, "name" to s.displayName,
             "idle" to s.idleLockMin.toLong(), "bg" to s.backgroundLockMin.toLong(),
-            "poll" to s.pollSeconds.toLong(), "notify" to s.notifications,
+            "poll" to s.pollSeconds.toLong(), "notify" to s.notifications, "hidden" to s.hidden,
         )
         m["channels"] = v.channels.map { c ->
             mapOf(
@@ -215,6 +221,7 @@ object VaultCodec {
         m["media_key"] = Hex.encode(v.mediaKey)
         m["official_owner_ed"] = v.officialOwnerEd?.let { Hex.encode(it) }
         m["fs"] = v.fs.toJson()
+        m["invites"] = v.invites.map { mapOf("s" to Hex.encode(it.secret), "exp" to it.expS) }
         return Text.utf8(Json.write(m))
     }
 
@@ -263,7 +270,7 @@ object VaultCodec {
             val st = m["settings"] as Map<String, Any?>
             val settings = Settings(
                 str(st, "endpoint"), str(st, "proxy"), str(st, "name"), lng(st, "idle").toInt(), lng(st, "bg").toInt(),
-                lng(st, "poll").toInt(), bool(st, "notify"),
+                lng(st, "poll").toInt(), bool(st, "notify"), (st["hidden"] as Boolean?) ?: false,
             )
             val channels = ((m["channels"] as List<Map<String, Any?>>?) ?: emptyList()).map {
                 Channel(
@@ -279,11 +286,14 @@ object VaultCodec {
             val mediaKey = (m["media_key"] as String?)?.let { Hex.decodeFixed(it, 32) }
                 ?: org.aegis.messenger.core.Crypto.randomBytes(32)
             val officialEd = (m["official_owner_ed"] as String?)?.let { Hex.decodeFixed(it, 32) }
+            val invites = ((m["invites"] as List<Map<String, Any?>>?) ?: emptyList()).map {
+                OpenInvite(Hex.decodeFixed(str(it, "s"), 32), lng(it, "exp"))
+            }
             return VaultData(
                 str(m, "username"), Hex.decodeFixed(str(m, "x_sk"), 32), Hex.decodeFixed(str(m, "ed_sk"), 32),
                 bool(m, "registered"), contacts, groups, chats, (m["seen"] as List<String>),
                 (m["cursors"] as Map<String, Long>), settings,
-                channels, prefs, pr, mediaKey, officialEd, FsState.fromJson(m["fs"] as Map<String, Any?>?),
+                channels, prefs, pr, mediaKey, officialEd, FsState.fromJson(m["fs"] as Map<String, Any?>?), invites,
             )
         } catch (e: AegisException) {
             throw e

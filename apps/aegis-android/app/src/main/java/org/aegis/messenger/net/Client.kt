@@ -3,6 +3,8 @@ package org.aegis.messenger.net
 import org.aegis.messenger.core.AegisException
 import org.aegis.messenger.core.Cover
 import org.aegis.messenger.core.Hex
+import org.aegis.messenger.core.Identity
+import org.aegis.messenger.core.Invite
 import org.aegis.messenger.core.Json
 import org.aegis.messenger.core.Pad
 import org.aegis.messenger.core.Pin
@@ -58,10 +60,11 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
         if (r.code != 200) throw AegisException.Http(r.code)
         val o = obj(r)
         val u = o["u"] as? String
-        val title = o["title"] as? String
+        // Servers no longer store titles (section 3); the field may be empty or absent.
+        val title = o["title"] as? String ?: ""
         val x = o["x"] as? String
         val ed = o["ed"] as? String
-        if (u != username || title == null || x == null || ed == null) throw AegisException.BadResponse()
+        if (u != username || x == null || ed == null) throw AegisException.BadResponse()
         try {
             return DirEntry(u, Text.sanitizeDisplay(title), Hex.decodeFixed(x, 32), Hex.decodeFixed(ed, 32))
         } catch (e: AegisException.InvalidHex) {
@@ -120,13 +123,36 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
     }
 
     /** Fetches and consumes a prekey bundle. Null means the contact has none (they need to update). */
-    fun prekeysTake(u: String): X3dh.Bundle? {
+    fun prekeysTake(u: String, ed: ByteArray? = null): X3dh.Bundle? {
         val ts = System.currentTimeMillis() / 1000
         val pow = Pow.mine(Prekeys.takeScope(u), ts, Prekeys.takeBodyHash(u, ts), POW_BITS, powStart())
-        val r = transport.request(ep, "POST", "/api/v2/prekeys/take", Text.utf8(Prekeys.takeForm(u, ts, pow)), FORM)
+        val r = transport.request(ep, "POST", "/api/v2/prekeys/take", Text.utf8(Prekeys.takeForm(u, ts, pow, ed)), FORM)
         if (r.code == 404) return null
         if (r.code != 200) throw AegisException.Http(r.code)
         return X3dh.Bundle.fromJson(r.body)
+    }
+
+    private fun formOk(path: String, form: String) {
+        val r = transport.request(ep, "POST", path, Text.utf8(form), FORM)
+        if (r.code != 200) throw AegisException.Http(r.code)
+    }
+
+    /** Turns the directory listing of [u] off or back on (section 29.4). */
+    fun hide(id: Identity, u: String, hidden: Boolean) =
+        formOk("/api/v2/dir/hide", Invite.hideForm(id, u, hidden, System.currentTimeMillis() / 1000))
+
+    /** Stores the sealed contact bundle for invite secret [s]. Too many invites surface as Http(429). */
+    fun inviteCreate(id: Identity, u: String, s: ByteArray) =
+        formOk("/api/v2/invite/create", Invite.createForm(id, u, s, System.currentTimeMillis() / 1000))
+
+    /** Redeems an invite; null if it is unknown, used or expired. */
+    fun inviteRedeem(s: ByteArray): Invite.Bundle? {
+        val r = transport.request(ep, "POST", "/api/v2/invite/redeem", Text.utf8(Invite.idForm(s)), FORM)
+        if (r.code == 404) return null
+        if (r.code != 200) throw AegisException.Http(r.code)
+        val box = obj(r)["box"] as? String ?: throw AegisException.BadResponse()
+        val sealed = try { Hex.decode(box) } catch (e: AegisException.InvalidHex) { throw AegisException.BadResponse() }
+        return Invite.open(s, sealed)
     }
 
     /** Dummy request for cover traffic (spec section 26). The answer is ignored. */

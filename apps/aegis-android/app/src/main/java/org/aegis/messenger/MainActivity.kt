@@ -2,6 +2,7 @@ package org.aegis.messenger
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -29,9 +30,23 @@ class MainActivity : ComponentActivity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+        if (savedInstanceState == null) takeLink(intent)
         setContent {
             AegisTheme { Root(session) { recreate() } }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        takeLink(intent)
+    }
+
+    /** An opened `aegis://invite/` link waits in the session until the user acts on it. */
+    private fun takeLink(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val link = intent.dataString ?: return
+        if (link.startsWith("aegis://invite/", ignoreCase = true)) session.linkIn = link
+        intent.data = null
     }
 
     /** FLAG_SECURE follows the setting, on by default. */

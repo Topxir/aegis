@@ -68,6 +68,7 @@ private fun Navigator(session: Session, onLanguage: () -> Unit) {
     fun reset(r: String) { stack = r }
 
     BackHandler(routes.size > 1) { pop() }
+    LaunchedEffect(session.linkIn) { if (session.linkIn != null && route != "new") push("new") }
     LaunchedEffect(Unit) { while (true) { delay(30_000); session.purgeNow() } }
 
     AnimatedContent(

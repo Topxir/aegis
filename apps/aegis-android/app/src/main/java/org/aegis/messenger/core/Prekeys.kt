@@ -22,5 +22,7 @@ object Prekeys {
         return "u=${Text.pctEncode(u)}&spk=$spkHex&spk_ts=${spk.ts}&spk_sig=$sigHex&opks=$csv&ts=$ts&sig=${Hex.encode(sig)}"
     }
 
-    fun takeForm(u: String, ts: Long, pow: ULong) = "u=${Text.pctEncode(u)}&ts=$ts&pow=$pow"
+    /** Form body of `prekeys/take`; [ed] is the key pinned for [u], required for a hidden user (section 29). */
+    fun takeForm(u: String, ts: Long, pow: ULong, ed: ByteArray? = null) =
+        "u=${Text.pctEncode(u)}&ts=$ts&pow=$pow" + (ed?.let { "&ed=${Hex.encode(it)}" } ?: "")
 }
