@@ -9,8 +9,14 @@ pub mod i18n;
 pub mod ipc;
 pub mod media;
 pub mod model;
+pub mod notify;
 pub mod render;
 pub mod session;
+#[cfg(target_os = "windows")]
+mod shield;
+pub mod timer;
 pub mod tor;
+#[cfg(target_os = "windows")]
+mod tray;
 #[cfg(target_os = "windows")]
 pub mod ui;

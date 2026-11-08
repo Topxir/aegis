@@ -126,6 +126,35 @@ Frame type must match envelope type: `0x01` carries `dm` or `ginv`, `0x02` carri
 `msg_id` values already seen are dropped (the set is kept in the vault, because the server
 can replay frames).
 
+### 5.2 Disappearing messages
+
+Each direct chat and group has a timer: `0` (off), `30`, `300`, `3600`, `86400` or `604800`
+seconds. Every message sent while the timer is on carries it in `ttl_s`; any other value is
+ignored by the receiver's timer controls, and `ttl_s = 0` (all messages from older clients)
+means the message is kept.
+
+Changing the timer sends a control envelope inside the usual encryption:
+
+- `ttl`: direct chat, frame type 0x01/0x03 like `dm`. `group_id`, `body`, `group_key` and
+  `members` are empty.
+- `gttl`: group, sent on the sender's chain like `gmsg` (section 28). `group_id` is the group,
+  `body`, `group_key` and `members` are empty.
+
+`ttl_s` holds the new timer. A receiver drops a value outside the list above. It applies the
+change unless it already applied one with a later `ts_ms` for that chat, so crossing changes
+end on the newer one on both sides. Each applied change adds a local line to the chat ("Bob:
+Disappearing messages 5 minutes"); the line is not a message and never expires.
+
+Expiry is counted from receipt: a received message is deleted `ttl_s` seconds after the
+device stored it, an own message `ttl_s` seconds after it was sent. Sender and receiver clocks
+are never compared, so a wrong clock on either side cannot make a message vanish at once or
+live longer, and a message that waited in the queue while the receiver was offline still gets
+its full time. The cost is that the receiver's copy outlives the sender's by the delivery
+delay. Deletion removes the message from the vault and the screen, and deletes the stored
+attachment file (section 13). The encrypted server copy of a blob is not deleted early, since
+other group members may still fetch it; it expires 14 days after upload (section 14). A
+modified client can keep anything it received.
+
 ## 6. Direct messages and group invites (frame type 0x01)
 
 Sender `S` (x_sk, x_pk), recipient `R` (x_pk from directory or pinned contact).
@@ -502,8 +531,14 @@ No push service (no Google or Apple servers) is used. Clients poll.
   and the official channel queue at most every 15 minutes while the vault is locked, and shows
   "New message" without sender or text. Group and channel queues are polled only while the vault
   is open, because their ids need the vault secrets.
-- Desktop: while the app runs and the window is not focused, new messages show a system
-  notification with the sender's display name; the text is hidden by default.
+- While the vault is open and the app is in the background (Android) or the window is not
+  focused (desktop), new messages show a notification. By default it says only "New message".
+  With "show sender and text" switched on it shows the chat name, the group sender and the
+  first line of the text; never an avatar. On Android such a notification is
+  `VISIBILITY_PRIVATE` with a "New message" public version for the lock screen; a hidden one is
+  `VISIBILITY_SECRET` while the app lock is on. Locked clients show only "New message".
+  Desktop notifications are a balloon from a notification-area icon that is removed when the
+  window gets focus or locks.
 
 ## 22. Profile card
 

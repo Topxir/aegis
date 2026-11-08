@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::platform::windows::WindowExtWindows;
 use tao::window::{UserAttentionType, WindowBuilder};
 use wry::http::{header, Request, Response, StatusCode};
 use wry::{
@@ -203,7 +204,9 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .with_min_inner_size(LogicalSize::new(560.0, 420.0))
         .build(&event_loop)
         .map_err(|e| format!("window: {e}"))?;
-    window.set_content_protection(true);
+    let hwnd = window.hwnd();
+    crate::shield::protect(hwnd, true);
+    let mut tray = crate::tray::Tray::new(hwnd);
 
     let mut context = WebContext::new(Some(web_dir));
     let ipc_ctl = ctl.clone();
@@ -250,35 +253,52 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .map_err(|e| format!("webview: {e}"))?;
 
     let flush_engine = Arc::clone(&engine);
+    let min_ctl = ctl.clone();
     let mut protected: Option<bool> = None;
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(UiEvent::Refresh) => {
                 pending.store(false, Ordering::Release);
-                let (json, protect) = {
+                let (json, protect, locked) = {
                     let app = engine.app();
                     let protect = app.session.as_ref().is_none_or(|s| s.data.settings.protect);
-                    (render::view(&app).to_string(), protect)
+                    (render::view(&app).to_string(), protect, app.session.is_none())
                 };
                 if protected != Some(protect) {
-                    window.set_content_protection(protect);
+                    crate::shield::protect(hwnd, protect);
                     protected = Some(protect);
+                }
+                if locked {
+                    tray.clear();
                 }
                 let _ =
                     webview.evaluate_script(&format!("window.aegis&&window.aegis.render({json})"));
-                if engine.take_attention() && !window.is_focused() {
-                    window.request_user_attention(Some(UserAttentionType::Informational));
+                if let Some(n) = engine.take_note() {
+                    if !window.is_focused() {
+                        window.request_user_attention(Some(UserAttentionType::Informational));
+                        tray.show(&n.title, &n.body);
+                    }
                 }
             }
             Event::WindowEvent {
                 event: WindowEvent::Resized(_) | WindowEvent::Focused(_),
                 ..
-            } => engine.set_visible(!window.is_minimized()),
+            } => {
+                let minimized = window.is_minimized();
+                engine.set_visible(!minimized);
+                if window.is_focused() {
+                    tray.clear();
+                }
+                if minimized && engine.lock_on_minimize() {
+                    min_ctl.lock();
+                }
+            }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                tray.clear();
                 if let Some(s) = flush_engine.detach() {
                     flush_engine.persist(s);
                 }

@@ -89,6 +89,8 @@ fn icon(name: &str) -> &'static str {
 fn ttl_key(t: u64) -> &'static str {
     match t {
         0 => "ttl.off",
+        30 => "ttl.30s",
+        300 => "ttl.5m",
         3600 => "ttl.1h",
         86_400 => "ttl.1d",
         _ => "ttl.7d",
@@ -101,6 +103,17 @@ fn host_of(endpoint: &str) -> String {
     let rest = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let rest = rest.rsplit('@').next().unwrap_or_default();
     rest.chars().take(64).collect()
+}
+
+/// "Bob — Disappearing messages: 5 minutes" for a local timer line.
+fn timer_line(s: &Session, l: Lang, m: &Msg) -> Option<String> {
+    let t = crate::timer::parse_line(&m.text)?;
+    let by = if m.out {
+        tr(l, "ttl.you").to_owned()
+    } else {
+        who(s, &m.from)
+    };
+    Some(format!("{by} \u{2014} {}: {}", tr(l, "ttl.label"), tr(l, ttl_key(t))))
 }
 
 fn contact_name(c: &Contact) -> String {
@@ -388,6 +401,8 @@ fn preview(s: &Session, l: Lang, chat: &Chat, group: bool) -> String {
     };
     let mut t = if m.text == UNDECRYPTABLE {
         tr(l, "chat.undecryptable").to_owned()
+    } else if let Some(line) = timer_line(s, l, m) {
+        line
     } else {
         clean_text(&m.text).replace('\n', " ")
     };
@@ -956,13 +971,19 @@ pub fn msgs(app: &App) -> String {
     let channel = matches!(r, ChatRef::Channel(_));
     let n = chat.msgs.len();
     for (i, m) in chat.msgs.iter().enumerate() {
-        let same = |o: &Msg| o.from == m.from && o.out == m.out;
+        let same = |o: &Msg| {
+            o.from == m.from && o.out == m.out && crate::timer::parse_line(&o.text).is_none()
+        };
         let ctx = Ctx {
             group,
             channel,
             first: channel || i == 0 || !chat.msgs.get(i - 1).is_some_and(same),
             last: channel || i + 1 == n || !chat.msgs.get(i + 1).is_some_and(same),
         };
+        if let Some(line) = timer_line(s, l, m) {
+            h.push_str(&format!(r#"<p class="sys">{}</p>"#, esc(&line)));
+            continue;
+        }
         h.push_str(&msg_html(app, s, l, m, &ctx));
     }
     h
@@ -1598,8 +1619,9 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
             )
         }
         "privacy" => format!(
-            r#"<section class="card" data-scope><h2>{}</h2>{}{}<p class="note">{}</p>{}</section>{}"#,
+            r#"<section class="card" data-scope><h2>{}</h2>{}{}{}<p class="note">{}</p>{}<p class="note">{}</p>{}</section>{}"#,
             esc(tr(l, "acct.privacy")),
+            check("app_lock", tr(l, "priv.lock"), st.app_lock, false),
             field(
                 l,
                 "idle_min",
@@ -1610,6 +1632,8 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
                     val(&st.idle_min.to_string())
                 )
             ),
+            check("lock_min", tr(l, "priv.lock_min"), st.lock_min, false),
+            esc(tr(l, "priv.lock_note")),
             check("protect", tr(l, "priv.protect"), st.protect, false),
             esc(tr(l, "priv.protect_note")),
             save_row(l, "save_privacy"),
@@ -1949,6 +1973,7 @@ mod tests {
                     out: false,
                     state: MsgState::Sent,
                     media: None,
+                    base_ms: 0,
                 });
                 ch.push(Msg {
                     id: format!("m{i}"),
@@ -1965,6 +1990,7 @@ mod tests {
                         dur_ms: 61_000,
                         file: (*p).to_owned(),
                     }),
+                    base_ms: 0,
                 });
             }
             ids.push(u);
@@ -1982,6 +2008,7 @@ mod tests {
                 out: false,
                 state: MsgState::Sent,
                 media: None,
+                base_ms: 0,
             });
         }
         let cid = s
@@ -1998,6 +2025,7 @@ mod tests {
                 out: true,
                 state: MsgState::Sent,
                 media: None,
+                base_ms: 0,
             });
         }
         app.session = Some(s);

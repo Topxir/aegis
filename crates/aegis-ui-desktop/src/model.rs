@@ -92,12 +92,18 @@ pub struct Settings {
     pub idle_min: u32,
     /// Notifications on or off (a taskbar flash while the window is not focused).
     pub flash_taskbar: bool,
-    /// Show the sender name in the notification instead of "New message".
+    /// Show the sender and text in the notification instead of "New message".
     #[serde(default)]
     pub notify_name: bool,
     /// Hide the window from screen capture.
     #[serde(default = "yes")]
     pub protect: bool,
+    /// Lock after `idle_min` minutes without input. The vault itself always asks on start.
+    #[serde(default = "yes")]
+    pub app_lock: bool,
+    /// Also lock when the window is minimized.
+    #[serde(default)]
+    pub lock_min: bool,
     /// Pinned key of the sealed transport (spec section 23) and the endpoint it belongs to.
     #[serde(default, with = "hex32_opt")]
     pub server_key: Option<[u8; 32]>,
@@ -196,6 +202,8 @@ impl Settings {
             flash_taskbar: true,
             notify_name: false,
             protect: true,
+            app_lock: true,
+            lock_min: false,
             server_key: None,
             server_key_for: String::new(),
             tor: true,
@@ -263,17 +271,25 @@ pub struct Msg {
     pub state: MsgState,
     #[serde(default)]
     pub media: Option<MediaRef>,
+    /// Local time the timer counts from: receipt for incoming, sending for own messages.
+    /// Zero in vaults written before it existed, then `ts_ms` is used.
+    #[serde(default)]
+    pub base_ms: u64,
 }
 
 impl Msg {
     pub fn expired(&self, now_ms: u64) -> bool {
-        self.ttl_s != 0 && now_ms >= self.ts_ms.saturating_add(self.ttl_s.saturating_mul(1000))
+        let base = if self.base_ms != 0 { self.base_ms } else { self.ts_ms };
+        aegis_core::envelope::expired_since(base, self.ttl_s, now_ms)
     }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Chat {
     pub ttl_s: u64,
+    /// Sender time of the last timer change, older changes are ignored.
+    #[serde(default)]
+    pub ttl_ms: u64,
     pub unread: u32,
     pub touched_ms: u64,
     pub msgs: Vec<Msg>,
