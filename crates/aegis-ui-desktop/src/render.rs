@@ -2168,10 +2168,10 @@ mod tests {
     }
 
     #[test]
-    fn avatar_is_a_grayscale_circle() {
+    fn avatar_is_a_grayscale_shape() {
         let a = avatar(&[5; 32], "a48");
         assert!(a.starts_with("<svg"));
-        assert!(a.contains("<circle"));
+        assert!(a.contains(r#"<rect class="avb""#));
         assert!(!a.contains("style"));
     }
 
