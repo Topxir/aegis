@@ -319,6 +319,30 @@ impl Controller {
                     });
                 }
             }
+            Cmd::SetLook { key, value } => {
+                if e.mutate(|s| s.data.settings.look.set(&key, &value)) == Some(true) {
+                    self.local_change();
+                }
+            }
+            Cmd::ResetLook {} => {
+                e.mutate(|s| s.data.settings.look = crate::look::Look::default());
+                self.local_change();
+            }
+            Cmd::Guide { step } => {
+                let done = {
+                    let mut app = e.app();
+                    let cur = app.guide.unwrap_or(0);
+                    let next = crate::guide::step(cur, &step);
+                    app.guide = next;
+                    next.is_none() && step != "show"
+                };
+                if done {
+                    e.mutate(|s| s.data.settings.guide_done = true);
+                    self.local_change();
+                } else {
+                    e.changed();
+                }
+            }
             Cmd::PickMedia {} => {
                 if let Some(chat) = self.current_chat() {
                     self.job(Job::PickMedia(chat));

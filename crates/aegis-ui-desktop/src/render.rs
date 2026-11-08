@@ -158,7 +158,7 @@ pub fn auth(app: &App) -> String {
         (AuthTab::Import, "import", "auth.tab_import"),
     ];
     let mut h = String::new();
-    h.push_str(r#"<div class="auth-bg" aria-hidden="true"><span class="orb o1"></span><span class="orb o2"></span><span class="grid"></span></div><div class="auth-wrap"><section class="hero">"#);
+    h.push_str(r#"<div class="auth-wrap"><section class="hero">"#);
     h.push_str(&format!(
         r#"<div class="brandrow rise r0">{}<span class="brand">AEGIS</span></div>"#,
         icon("shield")
@@ -173,7 +173,7 @@ pub fn auth(app: &App) -> String {
         h.push_str(&format!("<li>{}</li>", esc(tr(l, k))));
     }
     h.push_str(
-        r#"</ul></section><div class="card-wrap rise r2"><span class="halo" aria-hidden="true"></span><section class="auth-card"><div class="tabs" role="tablist">"#,
+        r#"</ul></section><div class="card-wrap rise r2"><section class="auth-card"><div class="tabs" role="tablist">"#,
     );
     for (t, id, key) in tabs {
         let sel = t == app.tab;
@@ -296,7 +296,7 @@ fn avatar(key: &[u8; 32], cls: &str) -> String {
         }
     }
     format!(
-        r##"<svg class="av {cls}" viewBox="0 0 7 7" aria-hidden="true"><circle cx="3.5" cy="3.5" r="3.5" fill="#{bg:02x}{bg:02x}{bg:02x}"/><path fill="#{fg:02x}{fg:02x}{fg:02x}" d="{d}"/></svg>"##,
+        r##"<svg class="av {cls}" viewBox="0 0 7 7" aria-hidden="true"><rect class="avb" width="7" height="7" rx="3.5" fill="#{bg:02x}{bg:02x}{bg:02x}"/><path fill="#{fg:02x}{fg:02x}{fg:02x}" d="{d}"/></svg>"##,
         bg = a.bg,
         fg = a.fg
     )
@@ -494,7 +494,7 @@ pub fn drawer(app: &App) -> String {
         esc(&s.data.username)
     );
     for (to, id, ic, key) in [
-        ("account", "profile", "user", "drawer.account"),
+        ("account", "privacy", "settings", "drawer.account"),
         ("new_group", "", "users", "nav.new_group"),
         ("new_channel", "", "mega", "nav.new_channel"),
         ("new_chat", "", "edit", "nav.new_chat"),
@@ -552,21 +552,46 @@ pub fn tabs(app: &App) -> String {
     h
 }
 
-/// Connection row at the bottom of the sidebar. The dot pulses only while connected.
+/// Status row at the bottom of the sidebar: Tor and the route, encryption, the lock, and the
+/// server connection.
 pub fn sidefoot(app: &App) -> String {
+    use crate::tor::Status;
     let l = app.lang();
     let Some(s) = &app.session else {
         return String::new();
     };
+    let st = &s.data.settings;
     let (cls, key) = match app.net_ok {
         Some(true) => ("on", "status.online"),
         Some(false) => ("off", "status.offline"),
         None => ("idle", "status.connecting"),
     };
+    let route = st.connect_endpoint();
+    let onion = host_of(&route).ends_with(".onion");
+    let (tcls, tlabel, ttip) = match (&app.tor, st.tor) {
+        (_, false) => ("warn", tr(l, "stat.tor_off").to_owned(), tr(l, "conn.tor_off")),
+        (Status::Ready, _) if onion => ("ok", tr(l, "stat.onion").to_owned(), tr(l, "stat.onion_tip")),
+        (Status::Ready, _) => ("ok", "Tor".to_owned(), tr(l, "conn.tor_ready")),
+        (Status::Starting(p), _) => ("", format!("Tor {p}%"), tr(l, "conn.tor_start")),
+        (Status::Off, _) => ("", "Tor 0%".to_owned(), tr(l, "conn.tor_start")),
+        (Status::Failed(_), _) => ("bad", "Tor".to_owned(), tr(l, "conn.tor_failed")),
+    };
+    let (lcls, lkey) = if app.pin_on {
+        ("ok", "stat.pin")
+    } else {
+        ("", "stat.nopin")
+    };
     format!(
-        r#"<span class="conn" title="{0}"><span class="dot {cls}" role="img" aria-label="{0}"></span><span class="host mono">{1}</span></span>"#,
-        esc(tr(l, key)),
-        esc(&host_of(&s.data.settings.endpoint)),
+        r#"<div class="stat"><button type="button" class="sti {tcls}" data-act="nav" data-to="account" data-id="connection" data-guide="tor" title="{ttip}"><span class="sd"></span>{tlabel}</button><span class="sti ok" title="{etip}"><span class="sd"></span>{e2ee}</span><button type="button" class="sti {lcls}" data-act="nav" data-to="account" data-id="privacy" data-guide="lock" title="{ltip}">{lock}{llabel}</button></div><span class="conn" title="{net}"><span class="dot {cls}" role="img" aria-label="{net}"></span><span class="host mono">{host}</span></span>"#,
+        net = esc(tr(l, key)),
+        host = esc(&host_of(&route)),
+        ttip = esc(ttip),
+        tlabel = esc(&tlabel),
+        etip = esc(tr(l, "stat.e2ee_tip")),
+        e2ee = esc(tr(l, "stat.e2ee")),
+        ltip = esc(tr(l, "stat.lock_tip")),
+        lock = icon("lock"),
+        llabel = esc(tr(l, lkey)),
     )
 }
 
@@ -1473,6 +1498,7 @@ fn sec_key(sec: &str) -> &'static str {
         "notifications" => "acct.notifications",
         "appearance" => "acct.appearance",
         "connection" => "acct.connection",
+        "about" => "set.about",
         _ => "acct.data",
     }
 }
@@ -1561,18 +1587,8 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
     let body = match sec {
         "profile" => {
             let cur = pfx(&s.data.particles);
-            let opts: String = ["none", "dust", "snow", "embers", "orbit", "rain"]
-                .iter()
-                .map(|p| {
-                    format!(
-                        r#"<option value="{p}"{}>{}</option>"#,
-                        if *p == cur { " selected" } else { "" },
-                        esc(tr(l, &format!("pfx.{p}")))
-                    )
-                })
-                .collect();
             format!(
-                r#"<section class="card pcard" data-scope>{}<div class="pav">{}</div><h2>{}</h2><p class="muted">@{}</p>{}{}<label class="f"><span>{}</span><select name="particles" data-live="particles">{}</select></label><p class="note">{}</p>{}</section>"#,
+                r#"<section class="card pcard" data-scope>{}<div class="pav">{}</div><h2>{}</h2><p class="muted">@{}</p>{}{}<input type="hidden" name="particles" value="{}"><p class="note">{}</p>{}</section>"#,
                 pbanner(cur, true),
                 avatar(&s.ed_public(), "a72"),
                 disp(&s.data.display),
@@ -1591,8 +1607,7 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
                     "text",
                     &format!(r#"maxlength="140" {}"#, val(&s.data.about))
                 ),
-                esc(tr(l, "f.particles")),
-                opts,
+                cur,
                 esc(tr(l, "profile.note")),
                 save_row(l, "save_profile")
             )
@@ -1624,10 +1639,19 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
             save_row(l, "save_notify")
         ),
         "appearance" => format!(
-            r#"<section class="card"><h2>{}</h2><div class="row">{}</div><p class="note">{}</p></section>"#,
+            r#"{}<section class="card"><h2>{}</h2><div class="row">{}</div><p class="note">{}</p></section>"#,
+            crate::look::page(l, &st.look),
             esc(tr(l, "set.language")),
             lang_select(l),
             esc(tr(l, "set.lang_note"))
+        ),
+        "about" => format!(
+            r#"<section class="card"><h2>{}</h2><p class="note">{}</p><p class="note">{}</p><p class="note">{}</p><div class="row"><button type="button" class="btn" data-act="guide" data-step="show">{}</button></div></section>"#,
+            esc(tr(l, "set.about")),
+            esc(tr(l, "set.about_text")),
+            esc(tr(l, "main.e2ee")),
+            esc(tr(l, "set.about_font")),
+            esc(tr(l, "guide.show"))
         ),
         "connection" => {
             let socks = format!(r#"placeholder="127.0.0.1:9050" {}"#, val(&st.socks5));
@@ -1658,7 +1682,7 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
             )
         }
         _ => format!(
-            r#"<section class="card" data-scope><h2>{}</h2><p class="note">{}</p>{}<div class="row"><button type="button" class="btn" data-act="export" data-primary>{}</button></div></section><section class="card"><h2>{}</h2><p class="note">{}</p><div class="row"><button type="button" class="btn danger" data-act="open_dialog" data-kind="delete_account">{}</button></div></section><section class="card"><h2>{}</h2><p class="note">{}</p><p class="note">{}</p><p class="note">{}</p></section>"#,
+            r#"<section class="card" data-scope><h2>{}</h2><p class="note">{}</p>{}<div class="row"><button type="button" class="btn" data-act="export" data-primary>{}</button></div></section><section class="card"><h2>{}</h2><p class="note">{}</p><div class="row"><button type="button" class="btn danger" data-act="open_dialog" data-kind="delete_account">{}</button></div></section>"#,
             esc(tr(l, "set.backup")),
             esc(tr(l, "set.backup_note")),
             field(
@@ -1671,11 +1695,7 @@ fn page_account(app: &App, s: &Session, sec: &str) -> String {
             esc(tr(l, "set.export")),
             esc(tr(l, "set.danger")),
             esc(tr(l, "set.delete_note")),
-            esc(tr(l, "set.delete")),
-            esc(tr(l, "set.about")),
-            esc(tr(l, "set.about_text")),
-            esc(tr(l, "main.e2ee")),
-            esc(tr(l, "set.about_font"))
+            esc(tr(l, "set.delete"))
         ),
     };
     format!(
@@ -1797,6 +1817,10 @@ pub fn view(app: &App) -> Value {
     let chat = matches!(app.route, Route::Chat(_)) && logged_in;
     let pkey = format!("{logged_in}:{:?}:{:?}", app.route, app.tab);
     let info_html = info(app);
+    let look = app
+        .session
+        .as_ref()
+        .map(|s| s.data.settings.look.to_json(!info_html.is_empty()));
     json!({
         "lang": l.code(),
         "authed": logged_in,
@@ -1814,6 +1838,8 @@ pub fn view(app: &App) -> Value {
         "compose": chat && compose(app),
         "overlay": overlay(app),
         "toast": toast(app),
+        "guide": crate::guide::html(app),
+        "look": look,
         "pkey": pkey,
         "ph_msg": tr(l, "chat.placeholder"),
         "ph_filter": tr(l, "list.filter"),

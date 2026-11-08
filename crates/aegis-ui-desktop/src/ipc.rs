@@ -17,6 +17,15 @@ fn secret<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error
     String::deserialize(d).map(Zeroizing::new)
 }
 
+/// A form value as text: strings as they are, checkboxes and numbers in their JSON form.
+fn loose<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => s,
+        v @ (serde_json::Value::Bool(_) | serde_json::Value::Number(_)) => v.to_string(),
+        _ => return Err(serde::de::Error::custom("value")),
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "cmd", content = "args", rename_all = "snake_case")]
 pub enum Cmd {
@@ -145,6 +154,15 @@ pub enum Cmd {
         display: String,
         about: String,
         particles: String,
+    },
+    SetLook {
+        key: String,
+        #[serde(deserialize_with = "loose")]
+        value: String,
+    },
+    ResetLook {},
+    Guide {
+        step: String,
     },
     PickMedia {},
     Mute {},

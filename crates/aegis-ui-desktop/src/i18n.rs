@@ -30,7 +30,7 @@ impl Lang {
 
 /// Looks up `key`. A missing key yields a visible marker; a test checks that none is used.
 pub fn tr(lang: Lang, key: &str) -> &'static str {
-    match TABLE.iter().find(|(k, _, _)| *k == key) {
+    match TABLE.iter().chain(crate::look_text::TABLE).find(|(k, _, _)| *k == key) {
         Some((_, en, ru)) => match lang {
             Lang::En => en,
             Lang::Ru => ru,
@@ -193,7 +193,7 @@ static TABLE: &[(&str, &str, &str)] = &[
     ("tab.all", "All", "Все"),
     ("tab.groups", "Groups", "Группы"),
     ("tab.channels", "Channels", "Каналы"),
-    ("drawer.account", "Account", "Аккаунт"),
+    ("drawer.account", "Settings", "Настройки"),
     ("nav.new_channel", "New channel", "Новый канал"),
     ("nav.contacts", "Contacts", "Контакты"),
     ("list.you", "You:", "Вы:"),
@@ -226,19 +226,19 @@ static TABLE: &[(&str, &str, &str)] = &[
     ("f.about", "About (up to 140 characters)", "О себе (до 140 символов)"),
     ("f.particles", "Particles", "Частицы"),
     ("contacts.chat", "Chat", "Чат"),
-    ("acct.profile", "Profile", "Профиль"),
-    ("acct.privacy", "Privacy and security", "Приватность и безопасность"),
+    ("acct.profile", "Account", "Аккаунт"),
+    ("acct.privacy", "Security and privacy", "Безопасность и приватность"),
     ("acct.notifications", "Notifications", "Уведомления"),
     ("acct.appearance", "Appearance", "Оформление"),
-    ("acct.connection", "Connection", "Соединение"),
-    ("acct.data", "Data and export", "Данные и экспорт"),
+    ("acct.connection", "Network and Tor", "Сеть и Tor"),
+    ("acct.data", "Backup and deletion", "Копия и удаление"),
     ("pfx.none", "None", "Нет"),
     ("pfx.dust", "Dust", "Пыль"),
     ("pfx.snow", "Snow", "Снег"),
     ("pfx.embers", "Embers", "Угли"),
     ("pfx.orbit", "Orbit", "Орбита"),
     ("pfx.rain", "Rain", "Дождь"),
-    ("profile.note", "Your name, about line and particles are sent to your contacts.", "Имя, строка о себе и частицы отправляются вашим контактам."),
+    ("profile.note", "Your name and about line are sent to your contacts.", "Имя и строка о себе отправляются вашим контактам."),
     ("priv.protect", "Hide the window from screen capture", "Скрывать окно от захвата экрана"),
     ("priv.protect_note", "Screenshots and screen sharing show a blank window.", "На снимках и в трансляции экрана окно будет пустым."),
     ("priv.pin", "PIN", "PIN-код"),
@@ -320,10 +320,11 @@ mod tests {
 
     #[test]
     fn keys_are_unique_and_nonempty() {
-        for (i, (k, en, ru)) in TABLE.iter().enumerate() {
+        let all: Vec<_> = TABLE.iter().chain(crate::look_text::TABLE).collect();
+        for (i, (k, en, ru)) in all.iter().enumerate() {
             assert!(!en.is_empty() && !ru.is_empty(), "{k}");
             assert!(
-                TABLE[i + 1..].iter().all(|(o, _, _)| o != k),
+                all[i + 1..].iter().all(|(o, _, _)| o != k),
                 "duplicate {k}"
             );
         }
@@ -339,10 +340,12 @@ mod tests {
             include_str!("controller.rs"),
             include_str!("render.rs"),
             include_str!("media.rs"),
+            include_str!("look.rs"),
+            include_str!("guide.rs"),
         ];
         let prefixes = [
             "err.", "ok.", "busy.", "warn.", "chat.", "chan.", "menu.", "list.", "nav.", "dlg.",
-            "media.", "key.", "acct.", "pfx.", "notify.", "priv.", "date.", "tab.", "info.", "conn.", "req.",
+            "media.", "key.", "acct.", "pfx.", "notify.", "priv.", "date.", "tab.", "info.", "conn.", "req.", "look.", "guide.", "stat.",
         ];
         for src in sources {
             let body = src.split("#[cfg(test)]").next().unwrap_or_default();
@@ -352,7 +355,7 @@ mod tests {
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_');
                 if key_like && prefixes.iter().any(|p| part.starts_with(p)) && part.len() > 4 {
                     assert!(
-                        TABLE.iter().any(|(k, _, _)| *k == part),
+                        TABLE.iter().chain(crate::look_text::TABLE).any(|(k, _, _)| *k == part),
                         "missing translation key {part}"
                     );
                 }

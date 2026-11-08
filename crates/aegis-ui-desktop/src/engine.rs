@@ -64,13 +64,14 @@ pub enum Route {
 }
 
 /// Sections of the account cabinet, in display order.
-pub const SECTIONS: [&str; 6] = [
-    "profile",
+pub const SECTIONS: [&str; 7] = [
     "privacy",
-    "notifications",
-    "appearance",
     "connection",
+    "appearance",
+    "notifications",
+    "profile",
     "data",
+    "about",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +130,8 @@ pub struct App {
     pub pin_left: Option<u32>,
     /// State of the embedded Tor client.
     pub tor: tor::Status,
+    /// Step of the first-run tour while it is open again from the settings.
+    pub guide: Option<u8>,
 }
 
 impl App {
@@ -156,6 +159,7 @@ impl App {
             duress_on: false,
             pin_left: None,
             tor: tor::Status::Off,
+            guide: None,
         }
     }
 
