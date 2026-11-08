@@ -2,12 +2,12 @@
 
 This folder contains prebuilt artifacts.
 
-- `android-apk/aegis-messenger-release.apk` - Android client
+- `android-apk/aegis-messenger-release.apk` - Android client. It is larger than GitHub's 100 MB file limit, so it is not stored in git: download it from the GitHub Release of the same tag. Its checksum is in `SHA256SUMS.txt`.
 - `desktop/aegis-desktop.exe` - Windows desktop client
 - `server/aegis-serverd.exe` - relay server
 - `SHA256SUMS.txt` - SHA256 checksums for the artifacts above
 
-To verify checksums from this directory:
+To verify checksums from the repository root:
 
 ```sh
 sha256sum -c SHA256SUMS.txt
