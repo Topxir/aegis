@@ -109,6 +109,7 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("info.guardianproject:tor-android:0.4.8.21") { exclude(group = "org.jetbrains.kotlin") }
     implementation("info.guardianproject:jtorctl:0.4.5.7")
+    implementation("com.netzarchitekten:IPtProxy:5.7.0")
 
     testImplementation("junit:junit:4.13.2")
 }

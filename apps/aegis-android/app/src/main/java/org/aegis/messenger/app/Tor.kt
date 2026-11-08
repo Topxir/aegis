@@ -86,6 +86,13 @@ object Tor {
         if (on) start() else stop()
     }
 
+    /** Applies changed bridge settings: Tor restarts with the new torrc. */
+    fun restart() {
+        if (!enabled) return
+        stop()
+        start()
+    }
+
     private fun publish() {
         val port = service?.socksPort ?: -1
         if (circuit && port > 0) {
@@ -100,11 +107,19 @@ object Tor {
         synchronized(lock) {
             if (bound) return
             status = TorStatus.Starting
+            try {
+                Transports.prepare(ctx)
+            } catch (_: Exception) {
+                Transports.stop()
+                status = TorStatus.Failed
+                return
+            }
             val f = IntentFilter().apply { addAction(TorService.ACTION_STATUS); addAction(TorService.ACTION_ERROR) }
             LocalBroadcastManager.getInstance(ctx).registerReceiver(receiver, f)
             bound = ctx.bindService(Intent(ctx, TorService::class.java), connection, Context.BIND_AUTO_CREATE)
             if (!bound) {
                 LocalBroadcastManager.getInstance(ctx).unregisterReceiver(receiver)
+                Transports.stop()
                 status = TorStatus.Failed
             }
         }
@@ -117,6 +132,7 @@ object Tor {
                 LocalBroadcastManager.getInstance(ctx).unregisterReceiver(receiver)
                 try { ctx.unbindService(connection) } catch (_: IllegalArgumentException) {}
             }
+            Transports.stop()
             bound = false
             service = null
             circuit = false

@@ -91,6 +91,7 @@ fun SettingsScreen(session: Session, d: VaultData, onBack: () -> Unit, onAbout: 
                         TorStatus.Failed -> Note(stringResource(R.string.tor_failed), Ui.danger)
                         else -> Note(stringResource(R.string.tor_starting))
                     }
+                    BridgeSettings()
                 }
                 Note(stringResource(if (tor) R.string.tor_note_on else R.string.tor_note_off))
             }
