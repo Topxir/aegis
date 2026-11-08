@@ -2064,6 +2064,8 @@ class Session(private val ctx: Context) {
             displayName = title,
             pollSeconds = s.pollSeconds.coerceIn(10, 600),
         )
+        // The name travels only in the profile card (spec section 3), so a new one goes out as a card.
+        val renamed = data?.let { it.settings.displayName != clean.displayName } == true
         update { d ->
             val endpointChanged = d.settings.endpoint != clean.endpoint
             // A different server needs a fresh directory registration; cursors belong to the old server.
@@ -2076,6 +2078,7 @@ class Session(private val ctx: Context) {
         if (Boot.backgroundPoll(ctx)) data?.let { BgState.store(ctx, clean.endpoint, clean.proxy, it.xSk) }
         touch()
         pollSoon()
+        if (renamed) sendProfile(null)
         done(null)
     }
 }
