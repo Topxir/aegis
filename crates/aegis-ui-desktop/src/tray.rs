@@ -41,6 +41,7 @@ extern "system" {
 #[link(name = "user32")]
 extern "system" {
     fn LoadIconW(instance: *mut c_void, name: *const u16) -> *mut c_void;
+    fn CreateIconFromResourceEx(data: *const u8, len: u32, icon: i32, ver: u32, cx: i32, cy: i32, flags: u32) -> *mut c_void;
 }
 
 const NIM_ADD: u32 = 0;
@@ -50,6 +51,8 @@ const NIF_ICON: u32 = 0x02;
 const NIF_TIP: u32 = 0x04;
 const NIF_INFO: u32 = 0x10;
 const NIIF_INFO: u32 = 0x01;
+const NIIF_USER: u32 = 0x04;
+const NIIF_LARGE_ICON: u32 = 0x20;
 const NIIF_RESPECT_QUIET_TIME: u32 = 0x80;
 const IDI_APPLICATION: usize = 32512;
 const ICON_ID: u32 = 1;
@@ -66,6 +69,27 @@ fn copy(dst: &mut [u16], s: &str) {
         n -= 1;
     }
     dst[n] = 0;
+}
+
+/// The app icon from the bundled PNG, small for the notification area and large for the balloon.
+/// Falls back to the stock icon if Windows refuses the image. Created once and kept.
+fn icons() -> (*mut c_void, *mut c_void) {
+    static ICONS: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+    let (s, l) = *ICONS.get_or_init(|| {
+        let png = include_bytes!("../assets/icon-64.png");
+        let len = u32::try_from(png.len()).unwrap_or(0);
+        // SAFETY: the buffer is a complete PNG image that outlives the calls; Windows copies it.
+        let mk = |px| unsafe { CreateIconFromResourceEx(png.as_ptr(), len, 1, 0x0003_0000, px, px, 0) } as usize;
+        let small = mk(16);
+        let small = if small == 0 {
+            // SAFETY: loads a stock system icon; no instance handle is involved.
+            unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION as *const u16) as usize }
+        } else {
+            small
+        };
+        (small, mk(64))
+    });
+    (s as *mut c_void, l as *mut c_void)
 }
 
 fn blank(hwnd: isize) -> NotifyIconData {
@@ -109,12 +133,13 @@ impl Tray {
     pub fn show(&mut self, title: &str, body: &str) {
         let mut d = blank(self.hwnd);
         d.flags = NIF_ICON | NIF_TIP | NIF_INFO;
-        // SAFETY: loads a stock system icon; no instance handle is involved.
-        d.icon = unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION as *const u16) };
+        let (small, large) = icons();
+        d.icon = small;
+        d.balloon_icon = large;
         copy(&mut d.tip, "Aegis");
         copy(&mut d.info_title, title);
         copy(&mut d.info, body);
-        d.info_flags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+        d.info_flags = if large.is_null() { NIIF_INFO } else { NIIF_USER | NIIF_LARGE_ICON } | NIIF_RESPECT_QUIET_TIME;
         // SAFETY: `d` is a fully initialised structure whose size field matches its type.
         // A shown icon is gone after Explorer restarts, then it is added again.
         self.shown = unsafe {

@@ -1075,6 +1075,9 @@ html.rm #entry .spin, html.rm #entry .btn.busy::after, html.rm #entry .chip.busy
 @media (hover: hover){#entry .ib.send:not(:disabled):hover > svg{ transform: translateX(2px); }
  }
 #entry .ib.send:not(:disabled):active > svg{ transform: translateX(4px); }
+#entry .pane-l.thru{ background: transparent; }
+#entry .ls-empty .obj3d{ width: min(56vw, 240px); aspect-ratio: 1; justify-self: center; }
+#entry .ls-empty:has(.obj3d){ justify-items: center; text-align: center; padding-top: 8vh; }
 #entry{ position: fixed; inset: 0; z-index: 100; background: var(--void); color: var(--bone); font: 400 15px/1.45 var(--sans); overflow: hidden; }
 #entry .sprite{ position: absolute; width: 0; height: 0; overflow: hidden; }
 #entry .fx-cv{ position: fixed; left: 0; top: 0; z-index: 40; pointer-events: none; }

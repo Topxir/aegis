@@ -211,6 +211,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .with_title("Aegis")
         .with_inner_size(LogicalSize::new(1040.0, 720.0))
         .with_min_inner_size(LogicalSize::new(560.0, 420.0))
+        .with_window_icon(window_icon())
         .build(&event_loop)
         .map_err(|e| format!("window: {e}"))?;
     let hwnd = window.hwnd();
@@ -320,4 +321,11 @@ pub fn run(cfg: Config) -> Result<(), String> {
             _ => {}
         }
     });
+}
+
+/// The window and taskbar icon, decoded from the bundled PNG.
+fn window_icon() -> Option<tao::window::Icon> {
+    let img = image::load_from_memory(include_bytes!("../assets/icon-256.png")).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    tao::window::Icon::from_rgba(img.into_raw(), w, h).ok()
 }

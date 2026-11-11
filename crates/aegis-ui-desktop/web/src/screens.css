@@ -515,3 +515,6 @@ button.set > .chev { transition: transform .3s var(--e-scene), color .2s; }
 .ib.send > svg { transition: transform .3s var(--e-scene); }
 @media (hover: hover) { .ib.send:not(:disabled):hover > svg { transform: translateX(2px); } }
 .ib.send:not(:disabled):active > svg { transform: translateX(4px); }
+.pane-l.thru { background: transparent; }
+.ls-empty .obj3d { width: min(56vw, 240px); aspect-ratio: 1; justify-self: center; }
+.ls-empty:has(.obj3d) { justify-items: center; text-align: center; padding-top: 8vh; }

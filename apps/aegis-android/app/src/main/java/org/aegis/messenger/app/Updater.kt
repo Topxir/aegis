@@ -182,6 +182,7 @@ object Updater {
         val pi = PendingIntent.getActivity(ctx, 1, installIntent(ctx, apk), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val n = Notification.Builder(ctx, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat)
+            .setColor(ctx.getColor(R.color.notif_accent))
             .setContentTitle(ctx.getString(R.string.notif_update))
             .setContentText(ctx.getString(R.string.notif_update_text, version))
             .setAutoCancel(true)

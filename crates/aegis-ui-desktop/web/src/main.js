@@ -186,14 +186,17 @@ function mnLater(ms, f) {
 /* the 3D shield lives on the empty desktop stage only; everywhere else in the shell the
    canvas is covered by opaque panes, so the scene stops drawing */
 function mnScene() {
-  if (!mn) return;
+  if (!mn || !mn.stage || !mn.list) return;
   // a view that is fading out is already inert: it no longer holds the object
   const view = mn.stage.querySelector('.view:not([inert])');
   const obj = view && view.matches('.st-empty') ? view.querySelector('.obj3d') : null;
   // the appearance section lets the scene through, so a choice of particles is seen at once
   const thru = !!view && view.dataset.sec === 'look';
   mn.paneS.classList.toggle('thru', thru);
+  const lobj = !isDesk() && (mn.el.dataset.depth || '0') === '0' && mn.view === 'chats' ? $('.ls-empty .obj3d', mn.list) : null;
+  mn.paneL.classList.toggle('thru', !!lobj);
   if (obj && isDesk()) AegisScene.show('shield', obj, { morph: true });
+  else if (lobj) AegisScene.show('shield', lobj, { morph: true });
   else if (thru) { AegisScene.scatter(); AegisScene.show(null, null); }
   else { AegisScene.scatter(); AegisScene.rest(900); }
 }
@@ -205,6 +208,7 @@ function mnDepth(d) {
   mn.paneL.inert = !desk && d > 0;
   mn.paneS.inert = !desk && d !== 1;
   mn.paneI.inert = desk ? !mn.info : d !== 2;
+  mnScene();
 }
 function mnBack() {
   if (mn.info) return mnCloseInfo();
@@ -256,6 +260,9 @@ function mnStage(node) {
     if (isDesk() && !reduced) {
       anim(node, [{ opacity: 0, transform: 'translateY(10px)' }, { opacity: 1, transform: 'none' }], { duration: 420, easing: E.scene });
       anim(old, [{ opacity: 1 }, { opacity: 0 }], { duration: 220, easing: E.out, fill: 'forwards' }).then(() => old.remove());
+    } else if (!reduced && (mn.el.dataset.depth || '0') !== '0') {
+      anim(node, [{ opacity: 0, transform: 'translateX(18px)' }, { opacity: 1, transform: 'none' }], { duration: 300, easing: E.scene });
+      anim(old, [{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: E.out, fill: 'forwards' }).then(() => old.remove());
     } else old.remove();
   }
   mnScene();
@@ -354,8 +361,9 @@ function mnRenderList() {
   if (!qv && mn.filter === 'all' && !a.chats.some(c => c.kind !== 'official')) {
     const b = h('button.btn.sm', { type: 'button' }, ico('at'), t('nav.new_chat'));
     b.addEventListener('click', () => mnNewChat());
-    mn.list.append(h('div.ls-empty', h('p', t('list.empty')), b));
+    mn.list.append(h('div.ls-empty', isDesk() ? null : h('div.obj3d'), h('p', t('list.empty')), b));
   }
+  mnScene();
 }
 function mnRow(c) {
   const m = mnLast(c);

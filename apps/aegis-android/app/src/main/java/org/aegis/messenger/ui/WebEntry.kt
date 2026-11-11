@@ -208,7 +208,7 @@ fun WebEntry(session: Session) {
             "duress_clear" -> session.duressRemove()
             "save_privacy" -> {
                 val s = dd.settings
-                session.saveSettings(s.copy(idleLockMin = a.optString("idle_min").toIntOrNull()?.coerceIn(1, 999) ?: s.idleLockMin, appLock = a.optBoolean("app_lock", s.appLock))) { e -> res(e) }
+                session.saveSettings(s.copy(idleLockMin = a.optString("idle_min").toIntOrNull()?.coerceIn(1, 999) ?: s.idleLockMin, appLock = a.optBoolean("app_lock", s.appLock), backgroundLockMin = if (!a.has("lock_min")) s.backgroundLockMin else if (a.optBoolean("lock_min")) 0 else if (s.backgroundLockMin == 0) 15 else s.backgroundLockMin)) { e -> res(e) }
                 val sec = a.optBoolean("protect", Boot.secureScreen(ctx))
                 if (sec != Boot.secureScreen(ctx)) { Boot.setSecureScreen(ctx, sec); ctx.activity()?.applySecure() }
             }
@@ -364,7 +364,7 @@ private fun model(ctx: android.content.Context, s: Session, d: VaultData, route:
         .put("update", Updater.state.name)
         .put("requests", arr(s.requests().map { JSONObject().put("x", it.first).put("first", 0) }))
         .put("tor", JSONObject().put("state", tor).put("p", p))
-        .put("set", JSONObject().put("idle", st.idleLockMin).put("lock", st.appLock).put("lockMin", false).put("protect", Boot.secureScreen(ctx))
+        .put("set", JSONObject().put("idle", st.idleLockMin).put("lock", st.appLock).put("lockMin", st.backgroundLockMin == 0).put("protect", Boot.secureScreen(ctx))
             .put("hidden", st.hidden).put("taskbar", st.notifications).put("notifyName", st.showContent).put("tor", Tor.enabled)
             .put("bridges", Transports.mode(ctx).code).put("bridgeLines", Transports.custom(ctx)).put("cover", Boot.coverMode(ctx)).put("autoUpd", auto)
             .put("server", st.endpoint).put("socks", st.proxy))

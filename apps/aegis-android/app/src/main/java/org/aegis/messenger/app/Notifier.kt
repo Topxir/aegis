@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import org.aegis.messenger.MainActivity
 import org.aegis.messenger.R
 
@@ -23,6 +24,8 @@ object Notifier {
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_MESSAGES, ctx.getString(R.string.channel_messages), NotificationManager.IMPORTANCE_DEFAULT).apply {
                 lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+                enableLights(true)
+                lightColor = ctx.getColor(R.color.notif_accent)
                 setShowBadge(false)
             },
         )
@@ -38,9 +41,16 @@ object Notifier {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
-    private fun generic(ctx: Context, visibility: Int): Notification =
-        Notification.Builder(ctx, CHANNEL_MESSAGES)
+    private fun base(ctx: Context, channel: String): Notification.Builder =
+        Notification.Builder(ctx, channel)
             .setSmallIcon(R.drawable.ic_stat)
+            .setColor(ctx.getColor(R.color.notif_accent))
+            .setLargeIcon(BitmapFactory.decodeResource(ctx.resources, R.drawable.notif_large))
+            .setShowWhen(true)
+
+    private fun generic(ctx: Context, visibility: Int): Notification =
+        base(ctx, CHANNEL_MESSAGES)
+            .setCategory(Notification.CATEGORY_MESSAGE)
             .setContentTitle(ctx.getString(R.string.app_name))
             .setContentText(ctx.getString(R.string.notif_new_message))
             .setVisibility(visibility)
@@ -59,10 +69,11 @@ object Notifier {
         val n = if (m == null || !showContent) {
             generic(ctx, if (Boot.appLock(ctx)) Notification.VISIBILITY_SECRET else hidden)
         } else {
-            Notification.Builder(ctx, CHANNEL_MESSAGES)
-                .setSmallIcon(R.drawable.ic_stat)
+            base(ctx, CHANNEL_MESSAGES)
+                .setCategory(Notification.CATEGORY_MESSAGE)
                 .setContentTitle(note.title)
                 .setContentText(note.body)
+                .setStyle(Notification.BigTextStyle().bigText(note.body))
                 .setVisibility(hidden)
                 .setPublicVersion(generic(ctx, Notification.VISIBILITY_PUBLIC))
                 .setAutoCancel(true)
@@ -83,6 +94,7 @@ object Notifier {
     fun serviceNotification(ctx: Context): Notification =
         Notification.Builder(ctx, CHANNEL_SERVICE)
             .setSmallIcon(R.drawable.ic_stat)
+            .setColor(ctx.getColor(R.color.notif_accent))
             .setContentTitle(ctx.getString(R.string.app_name))
             .setContentText(ctx.getString(R.string.notif_service))
             .setOngoing(true)

@@ -56,12 +56,13 @@ const AegisScene = (() => {
 
   function build(THREE) {
     const canvas = document.getElementById('gl');
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
+    const LITE = Math.min(screen.width, screen.height) < 600 || /Android|iPhone/.test(navigator.userAgent);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: !LITE, alpha: true, powerPreference: LITE ? 'default' : 'high-performance' });
     renderer.setClearColor(0x000000, 0);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.05;
     const scene = new THREE.Scene();
-    const FOV = 35, CZ = 10, N = 480, RIM = 0.9;
+    const FOV = 35, CZ = 10, N = LITE ? 300 : 480, RIM = 0.9;
     const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 80);
     camera.position.z = CZ;
     let W = 1, H = 1, K = 0.01;
@@ -372,7 +373,7 @@ const AegisScene = (() => {
 
     // ── particles: ~700 additive points, rain as lines ──
     const pf = (() => {
-      const n = 700;
+      const n = LITE ? 380 : 700;
       const pos = new Float32Array(n * 3), vel = new Float32Array(n * 3), seed = new Float32Array(n), size = new Float32Array(n);
       const g = new THREE.BufferGeometry();
       const pa = new THREE.BufferAttribute(pos, 3); pa.setUsage(THREE.DynamicDrawUsage);
@@ -505,7 +506,7 @@ const AegisScene = (() => {
     }
     function resize() {
       W = innerWidth; H = innerHeight;
-      renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
+      renderer.setPixelRatio(Math.min(devicePixelRatio || 1, LITE ? 1.25 : 1.5));
       renderer.setSize(W, H, false);
       camera.aspect = W / Math.max(1, H);
       camera.updateProjectionMatrix();
