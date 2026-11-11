@@ -33,10 +33,10 @@ pub enum Platform {
 pub fn mean_gap_ms(platform: Platform, mode: Mode) -> Option<u64> {
     match (platform, mode) {
         (_, Mode::Off) => None,
-        (Platform::Desktop, Mode::Standard) => Some(20_000),
-        (Platform::Android, Mode::Standard) => Some(30_000),
-        (Platform::Desktop, Mode::High) => Some(8_000),
-        (Platform::Android, Mode::High) => Some(12_000),
+        (Platform::Desktop, Mode::Standard) => Some(6_000),
+        (Platform::Android, Mode::Standard) => Some(8_000),
+        (Platform::Desktop, Mode::High) => Some(3_000),
+        (Platform::Android, Mode::High) => Some(4_000),
     }
 }
 
@@ -302,10 +302,10 @@ mod tests {
     #[test]
     fn rate_matches_the_mean_and_respects_the_minimum() {
         for (p, m, mean) in [
-            (Platform::Desktop, Mode::Standard, 20_000.0),
-            (Platform::Android, Mode::Standard, 30_000.0),
-            (Platform::Desktop, Mode::High, 8_000.0),
-            (Platform::Android, Mode::High, 12_000.0),
+            (Platform::Desktop, Mode::Standard, 6_000.0),
+            (Platform::Android, Mode::Standard, 8_000.0),
+            (Platform::Desktop, Mode::High, 3_000.0),
+            (Platform::Android, Mode::High, 4_000.0),
         ] {
             let t = run_idle(p, m, 50_000, 7);
             let gaps: Vec<u64> = t.windows(2).map(|w| w[1] - w[0]).collect();
@@ -350,7 +350,7 @@ mod tests {
         };
         let (idle, busy) = (count(false), count(true));
         assert!((busy / idle - 1.0).abs() < 0.05, "idle {idle}, busy {busy}");
-        assert!((idle / (horizon as f64 / 20_000.0) - 1.0).abs() < 0.05);
+        assert!((idle / (horizon as f64 / 6_000.0) - 1.0).abs() < 0.05);
     }
 
     #[test]

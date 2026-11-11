@@ -96,6 +96,8 @@ import kotlin.random.Random
  */
 class Session(private val ctx: Context) {
     companion object {
+        /** Poll interval while the app is on screen, so new messages show up within seconds. */
+        private const val FG_POLL_MS = 2_500L
         const val MIN_PASSWORD = 10
         const val MAX_MESSAGES = 2000
         const val MAX_TEXT_CHARS = 4000
@@ -640,7 +642,7 @@ class Session(private val ctx: Context) {
             val d = data ?: break
             val mode = coverMode()
             val now = SystemClock.elapsedRealtime()
-            val pollMs = d.settings.pollSeconds.coerceIn(10, 600) * 1000L
+            val pollMs = if (foreground) FG_POLL_MS else d.settings.pollSeconds.coerceIn(10, 600) * 1000L
             if (mode != sched.mode) sched.setMode(mode, now, coverRng)
             if (early) {
                 early = false

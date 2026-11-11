@@ -7,7 +7,7 @@ import org.junit.Test
 class CoverTest {
     @Test
     fun rateMatchesMeanAndMinimum() {
-        for ((m, mean) in listOf(CoverMode.Standard to 30_000.0, CoverMode.High to 12_000.0)) {
+        for ((m, mean) in listOf(CoverMode.Standard to 8_000.0, CoverMode.High to 4_000.0)) {
             val rng = SeededCoverRng(7)
             val s = CoverScheduler(m, 0, rng)
             val times = ArrayList<Long>()

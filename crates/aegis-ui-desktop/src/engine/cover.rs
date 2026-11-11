@@ -182,13 +182,7 @@ fn mode_of(level: u8) -> Mode {
 }
 
 /// How long since the last poll before a slot is spent on a poll rather than a dummy.
-fn poll_every_ms(level: u8) -> u64 {
-    if level >= 2 {
-        4_000
-    } else {
-        10_000
-    }
-}
+const POLL_EVERY_MS: u64 = 3_000;
 
 /// Owned by the network thread.
 #[derive(Debug, Default)]
@@ -250,7 +244,7 @@ impl Driver {
             sc.queue_grew(now_ms, queued);
         }
         self.seen_queued = queued;
-        let due = now_ms.saturating_sub(self.last_poll_ms) >= poll_every_ms(level);
+        let due = now_ms.saturating_sub(self.last_poll_ms) >= POLL_EVERY_MS;
         let Some(s) = self.sched.as_mut() else {
             return Step::Plain;
         };
@@ -454,8 +448,8 @@ mod tests {
         let mut rng = SeededRng(7);
         let (p, n) = run(&mut d, &mut rng, true, 1, 0, 3_600_000);
         let slots = p + n;
-        // Mean gap 20 s: about 180 slots an hour.
-        assert!((120..260).contains(&slots), "{slots}");
+        // Mean gap 6 s: about 600 slots an hour.
+        assert!((450..800).contains(&slots), "{slots}");
         assert!(p > 0 && n > 0, "{p} {n}");
         let mut h = Driver::new();
         let (p2, n2) = run(&mut h, &mut rng, true, 2, 0, 3_600_000);

@@ -72,8 +72,8 @@ object Cover {
     /** Mean gap on Android in milliseconds; null when off. */
     fun meanGapMs(mode: CoverMode): Long? = when (mode) {
         CoverMode.Off -> null
-        CoverMode.Standard -> 30_000L
-        CoverMode.High -> 12_000L
+        CoverMode.Standard -> 8_000L
+        CoverMode.High -> 4_000L
     }
 
     /**

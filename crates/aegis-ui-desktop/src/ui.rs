@@ -109,7 +109,7 @@ fn serve(engine: &Engine, req: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>
 }
 
 fn jitter_ms() -> u64 {
-    aegis_core::random_bytes::<2>().map_or(2500, |b| u64::from(u16::from_le_bytes(b)) % 5000)
+    aegis_core::random_bytes::<2>().map_or(750, |b| u64::from(u16::from_le_bytes(b)) % 1500)
 }
 
 /// Runs the application until the window is closed.
@@ -187,7 +187,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
                     }
                     if Instant::now() >= next {
                         poll_engine.poll_once();
-                        next = Instant::now() + Duration::from_millis(5000 + jitter_ms());
+                        next = Instant::now() + Duration::from_millis(1500 + jitter_ms());
                     } else {
                         poll_engine.sweep();
                     }
@@ -200,7 +200,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
                     if !poll_engine.gate.start_poll() {
                         poll_engine.send_dummy(64, 1024);
                     }
-                    next = Instant::now() + Duration::from_millis(5000 + jitter_ms());
+                    next = Instant::now() + Duration::from_millis(1500 + jitter_ms());
                 }
                 cover::Step::Dummy { req_len, resp_len } => poll_engine.send_dummy(req_len, resp_len),
             }
