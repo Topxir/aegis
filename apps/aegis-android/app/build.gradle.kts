@@ -20,8 +20,8 @@ android {
         applicationId = "org.aegis.messenger"
         minSdk = 28
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.2.7"
+        versionCode = 6
+        versionName = "0.2.8"
 
         // tor-android ships one native library per ABI; 32-bit x86 devices are not worth the extra size.
         ndk {
@@ -114,3 +114,13 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
 }
+
+// The sign-in screens are the desktop web bundle; only the files the phone needs are packed.
+val webOut = layout.buildDirectory.dir("generated/web")
+val copyWeb by tasks.registering(Copy::class) {
+    from(file("../../../crates/aegis-ui-desktop/assets")) { include("entry.js", "entry.css", "vendor/three.module.min.js", "fonts/*.woff2") }
+    from(file("../web"))
+    into(webOut.map { it.dir("web") })
+}
+android.sourceSets["main"].assets.srcDir(webOut)
+tasks.named("preBuild") { dependsOn(copyWeb) }

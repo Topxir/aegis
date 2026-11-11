@@ -271,9 +271,9 @@ class Session(private val ctx: Context) {
 
     /** Copies a vault file chosen by the user after proving the password opens it. */
     fun importVault(rawUser: String, password: String, uri: Uri, done: (Int?) -> Unit) {
-        val user = try { Names.normalizeUsername(rawUser) } catch (e: AegisException) { return done(R.string.err_username_invalid) }
-        val f = vaultFile(user)
-        if (f.exists()) return done(R.string.err_account_exists)
+        // A blank username takes the one inside the vault.
+        val named = if (rawUser.isBlank()) null else try { Names.normalizeUsername(rawUser) } catch (e: AegisException) { return done(R.string.err_username_invalid) }
+        if (named != null && vaultFile(named).exists()) return done(R.string.err_account_exists)
         busy = true
         net.execute {
             var result: Int? = null
@@ -292,10 +292,12 @@ class Session(private val ctx: Context) {
                 val opened = Vault.decrypt(password, bytes)
                 val d = VaultCodec.decode(opened.data)
                 opened.data.fill(0)
+                val vu = d.username
                 opened.keyed.wipe()
                 d.wipe()
-                if (d.username != user) throw AegisException.VaultFormat()
-                writeAtomic(f, bytes)
+                if (named != null && vu != named) throw AegisException.VaultFormat()
+                val f = vaultFile(vu)
+                if (f.exists()) result = R.string.err_account_exists else writeAtomic(f, bytes)
             } catch (e: Throwable) {
                 result = R.string.err_import
             }

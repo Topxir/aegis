@@ -6,3 +6,4 @@
 -keep class net.freehaven.tor.control.** { *; }
 -keep class go.** { *; }
 -keep class IPtProxy.** { *; }
+-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }

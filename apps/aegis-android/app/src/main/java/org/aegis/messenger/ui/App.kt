@@ -52,7 +52,13 @@ fun Root(session: Session, onLanguage: () -> Unit) {
     Box(Modifier.fillMaxSize().background(Ui.bg).backdrop().fx(rememberFx("full"))) {
         LookGround()
         if (session.keyChangedOrigin != null) KeyChangedStop(session)
-        else if (d == null) StartScreen(session) else Navigator(session, onLanguage)
+        else {
+            // The web sign-in stays on top until its closing animation ends.
+            var entry by remember { mutableStateOf(true) }
+            if (d == null) entry = true
+            if (d != null) Navigator(session, onLanguage)
+            if (entry) WebEntry(session) { if (session.data != null) entry = false }
+        }
         session.notice?.let { n ->
             Box(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(12.dp).clip(RoundedCornerShape(14.dp)).background(Ui.surface2).border(1.dp, Ui.border, RoundedCornerShape(14.dp)).fillMaxWidth()) {
                 Text(stringResource(n), color = Ui.text, modifier = Modifier.padding(12.dp).align(Alignment.CenterStart))
