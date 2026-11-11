@@ -275,6 +275,15 @@ fn flash_html(app: &App, l: Lang) -> String {
     let Some(f) = &app.flash else {
         return String::new();
     };
+    format!(
+        r#"<div class="flash {}" role="alert"><span>{}</span><button type="button" class="x" data-act="dismiss_flash" aria-label="{}">&times;</button></div>"#,
+        if f.ok { "ok" } else { "bad" },
+        esc(&flash_text(f, l)),
+        esc(tr(l, "common.close"))
+    )
+}
+
+fn flash_text(f: &crate::engine::Flash, l: Lang) -> String {
     let mut t = tr(l, f.key).to_owned();
     if !f.detail.is_empty() && !f.ok {
         t.push_str(" (");
@@ -284,12 +293,7 @@ fn flash_html(app: &App, l: Lang) -> String {
         t.push_str(": ");
         t.push_str(&f.detail);
     }
-    format!(
-        r#"<div class="flash {}" role="alert"><span>{}</span><button type="button" class="x" data-act="dismiss_flash" aria-label="{}">&times;</button></div>"#,
-        if f.ok { "ok" } else { "bad" },
-        esc(&t),
-        esc(tr(l, "common.close"))
-    )
+    t
 }
 
 // ---- avatars and small helpers ----------------------------------------------------
@@ -1864,6 +1868,13 @@ pub fn view(app: &App) -> Value {
     json!({
         "lang": l.code(),
         "authed": logged_in,
+        "tab": match app.tab {
+            AuthTab::Unlock => "unlock",
+            AuthTab::Create => "create",
+            AuthTab::Import => "import",
+        },
+        "busy": app.busy,
+        "flash": app.flash.as_ref().map(|f| json!({ "ok": f.ok, "text": flash_text(f, l) })),
         "auth": if logged_in { String::new() } else { auth(app) },
         "drawer": drawer(app),
         "tabs": tabs(app),

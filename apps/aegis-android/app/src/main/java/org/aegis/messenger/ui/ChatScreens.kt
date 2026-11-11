@@ -257,7 +257,7 @@ fun ChatListScreen(
                 val tilt = depthOn()
                 LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, contentPadding = PaddingValues(bottom = 96.dp)) {
                     items(shown, key = { it.key }) { r ->
-                        ChatRow(r, r.key in selected, selected.isNotEmpty(), if (tilt) Modifier.depth(listState, r.key) else Modifier,
+                        ChatRow(r, r.key in selected, selected.isNotEmpty(), Modifier.animateItemPlacement(tween(420)).then(if (tilt) Modifier.depth(listState, r.key) else Modifier),
                             onClick = { if (selected.isNotEmpty()) { if (r.key in selected) selected.remove(r.key) else selected.add(r.key) } else onOpen(r.key) },
                             onLong = { if (!r.official || selected.isNotEmpty()) { if (r.key in selected) selected.remove(r.key) else selected.add(r.key) } else selected.add(r.key) })
                     }

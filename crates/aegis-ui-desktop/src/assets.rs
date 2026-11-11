@@ -5,6 +5,9 @@ pub const CSP: &str = "default-src 'none'; style-src 'self'; font-src 'self'; im
 static INDEX: &[u8] = include_bytes!("../assets/index.html");
 static CSS: &[u8] = include_bytes!("../assets/app.css");
 static JS: &[u8] = include_bytes!("../assets/app.js");
+static ENTRY_CSS: &[u8] = include_bytes!("../assets/entry.css");
+static ENTRY_JS: &[u8] = include_bytes!("../assets/entry.js");
+static THREE: &[u8] = include_bytes!("../assets/vendor/three.module.min.js");
 static GEIST: &[u8] = include_bytes!("../assets/fonts/Geist-Variable.woff2");
 static GEIST_MONO: &[u8] = include_bytes!("../assets/fonts/GeistMono-Variable.woff2");
 
@@ -14,6 +17,9 @@ pub fn lookup(path: &str) -> Option<(&'static str, &'static [u8])> {
         "/" | "/index.html" => Some(("text/html; charset=utf-8", INDEX)),
         "/app.css" => Some(("text/css; charset=utf-8", CSS)),
         "/app.js" => Some(("text/javascript; charset=utf-8", JS)),
+        "/entry.css" => Some(("text/css; charset=utf-8", ENTRY_CSS)),
+        "/entry.js" => Some(("text/javascript; charset=utf-8", ENTRY_JS)),
+        "/vendor/three.module.min.js" => Some(("text/javascript; charset=utf-8", THREE)),
         "/fonts/Geist-Variable.woff2" => Some(("font/woff2", GEIST)),
         "/fonts/GeistMono-Variable.woff2" => Some(("font/woff2", GEIST_MONO)),
         _ => None,
@@ -46,13 +52,16 @@ mod tests {
         }
         for s in html.split("<script").skip(1) {
             let tag = s.split('>').next().unwrap_or_default();
-            assert!(tag.contains("src=\"/app.js\""), "inline script: {tag}");
+            assert!(
+                tag.contains("src=\"/app.js\"") || tag.contains("src=\"/entry.js\""),
+                "inline script: {tag}"
+            );
         }
     }
 
     #[test]
     fn script_avoids_dynamic_code_and_network() {
-        let js = text("/app.js");
+        let js = text("/app.js") + &text("/entry.js");
         for bad in [
             "eval(",
             "new Function",

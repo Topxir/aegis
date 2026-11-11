@@ -512,7 +512,10 @@
     var stash = (id === 'msgs' || id === 'info' || id === 'page') ? takeMedia(el) : null;
     var scroll = el.scrollTop;
     var stick = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    var fl = (id === 'list' || id === 'msgs') && motion() !== 'off' ? snap(el, id === 'list' ? '.item[data-id]' : '.m[data-mid]', id === 'list' ? 'data-id' : 'data-mid') : null;
     el.innerHTML = html;
+    if (fl) { play(el, fl, id === 'msgs'); }
+    if (id === 'head' && motion() !== 'off') { decode(el.querySelector('.t1')); }
     stamp(el);
     if (st) { restoreForm(el, st); }
     if (stash) { hydrate(el, stash); }
@@ -541,6 +544,63 @@
   }
 
   // Only messages that were not on screen before get the entrance animation.
+  // Motion: nodes are only moved, never built here. Lists slide to their new places,
+  // removed messages burn away, chat titles resolve from noise.
+  function snap(el, sel, attr) {
+    var out = {}, ns = el.querySelectorAll(sel);
+    for (var i = 0; i < ns.length; i++) {
+      var r = ns[i].getBoundingClientRect();
+      if (!r.width || r.bottom < 0 || r.top > innerHeight) { continue; }
+      out[ns[i].getAttribute(attr)] = { r: r, n: ns[i] };
+    }
+    out._sel = sel; out._attr = attr;
+    return out;
+  }
+
+  function play(el, before, burn) {
+    var ns = el.querySelectorAll(before._sel), keep = {}, moved = 0;
+    for (var i = 0; i < ns.length; i++) {
+      var k = ns[i].getAttribute(before._attr), b = before[k];
+      keep[k] = true;
+      if (!b) { continue; }
+      moved++;
+      var r = ns[i].getBoundingClientRect(), dy = b.r.top - r.top;
+      if (Math.abs(dy) > 1 && Math.abs(dy) < innerHeight && !burn) {
+        ns[i].animate([{ transform: 'translateY(' + dy + 'px)' }, { transform: 'none' }], { duration: 420, easing: 'cubic-bezier(.2,.8,.2,1)' });
+      }
+    }
+    if (!burn || !moved) { return; }
+    var gone = 0;
+    for (var key in before) {
+      if (key.charAt(0) === '_' || keep[key] || ++gone > 6) { continue; }
+      var g = before[key].n.cloneNode(true), rr = before[key].r;
+      g.classList.add('ash');
+      g.style.left = rr.left + 'px'; g.style.top = rr.top + 'px'; g.style.width = rr.width + 'px';
+      document.body.appendChild(g);
+      g.animate([{ opacity: 1, filter: 'blur(0)', transform: 'none' },
+        { opacity: .6, filter: 'blur(1px) sepia(1) saturate(4) hue-rotate(-30deg)', transform: 'translateY(-4px)', offset: .3 },
+        { opacity: 0, filter: 'blur(6px)', transform: 'translateY(-26px) scale(.96)' }],
+        { duration: 900, easing: 'cubic-bezier(.3,0,.2,1)' }).finished.then(remover(g), remover(g));
+    }
+  }
+
+  function remover(g) { return function () { g.remove(); }; }
+
+  var glyphs = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789#%&@';
+  function decode(t) {
+    if (!t || t.dataset.dec === t.textContent) { return; }
+    var txt = t.textContent, n = 0, steps = 14;
+    t.dataset.dec = txt;
+    (function tick() {
+      if (t.dataset.dec !== txt) { return; }
+      n++;
+      var k = Math.floor(txt.length * n / steps), out = txt.slice(0, k);
+      for (var i = k; i < txt.length; i++) { out += txt[i] === ' ' ? ' ' : glyphs[(Math.random() * glyphs.length) | 0]; }
+      t.textContent = out;
+      if (n < steps) { requestAnimationFrame(tick); } else { t.textContent = txt; }
+    })();
+  }
+
   function markArrivals(el) {
     var ms = el.querySelectorAll('.m[data-mid]');
     for (var i = 0; i < ms.length; i++) {
@@ -556,6 +616,10 @@
 
   function render(s) {
     document.documentElement.lang = s.lang;
+    if (window.aegisEntry) {
+      window.aegisEntry.update(s);
+      document.getElementById('auth').hidden = true;
+    }
     applyLook(s.look);
     var changedPage = s.pkey !== pkey;
     pkey = s.pkey;

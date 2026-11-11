@@ -1,5 +1,7 @@
 package org.aegis.messenger.ui
 
+import androidx.compose.ui.geometry.Size
+
 import android.graphics.BitmapFactory
 import android.util.Base64
 import androidx.compose.animation.core.LinearEasing
@@ -98,8 +100,11 @@ fun bubbleInk(out: Boolean): Color = if (out && Ui.look.bubble != "minimal") Ui.
 fun bubbleSub(out: Boolean): Color = if (out && Ui.look.bubble != "minimal") Ui.onOutBubble.copy(alpha = 0.66f) else Ui.muted
 
 /** Hairline border for the minimal bubble style; other styles have none. */
-fun Modifier.bubbleEdge(out: Boolean, shape: Shape): Modifier =
-    if (Ui.look.bubble == "minimal") border(1.dp, if (out) Ui.accent.copy(alpha = 0.45f) else Ui.border, shape) else this
+fun Modifier.bubbleEdge(out: Boolean, shape: Shape): Modifier = when {
+    Ui.look.bubble == "minimal" -> border(1.dp, if (out) Ui.accent.copy(alpha = 0.45f) else Ui.border, shape)
+    out -> drawWithContent { drawContent(); drawRect(Color(0x80C4302B), Offset(size.width - 1.dp.toPx(), 0f), Size(1.dp.toPx(), size.height)) }
+    else -> this
+}
 
 val InBubbleColor = Color(0xFF161619)
 

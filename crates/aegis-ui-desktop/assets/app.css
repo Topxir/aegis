@@ -500,3 +500,18 @@ button.sti:hover { border-color: #38383e; color: var(--text); }
 :root[data-wscope="full"]:not([data-wall="none"]) .card { backdrop-filter: blur(14px); }
 .fx { position: fixed; left: 0; top: 0; pointer-events: none; z-index: 30; }
 .fx[hidden] { display: none; }
+
+/* prototype look: soft cards, tailed bubbles, red edge on own messages */
+.item { border-radius: 18px; transition: background 160ms, transform 220ms var(--ease); }
+.item:active { transform: scale(.985); }
+.bubble { box-shadow: 0 1px 0 rgba(255, 255, 255, .03) inset; }
+.m.in .bubble { background: #161619; }
+.m.out .bubble { box-shadow: inset -1px 0 0 rgba(196, 48, 43, .5), 0 6px 18px rgba(0, 0, 0, .35); }
+:root[data-shape="minimal"] .bubble { box-shadow: none; }
+.menu { border-radius: 16px; backdrop-filter: blur(18px); background: rgba(14, 14, 16, .86); }
+.ash { position: fixed; z-index: 60; margin: 0; pointer-events: none; }
+:root[data-motion="full"] .m.out.new .bubble { animation: mrise 420ms cubic-bezier(.2, .9, .25, 1.15) both; transform-origin: 100% 100%; }
+:root[data-motion="full"] .m.in.new .bubble { animation: minrise 380ms var(--ease) both; transform-origin: 0 100%; }
+@keyframes mrise { from { opacity: 0; transform: translateY(18px) scale(.9); } to { opacity: 1; transform: none; } }
+@keyframes minrise { from { opacity: 0; transform: translateX(-10px) scale(.96); } to { opacity: 1; transform: none; } }
+.t1[data-dec] { font-variant-numeric: tabular-nums; }

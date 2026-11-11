@@ -1,0 +1,43 @@
+{
+  "d.splash_a": ["NETWORK INTERCEPTED", "СЕТЬ ПЕРЕХВАЧЕНА"],
+  "d.splash_b": ["EXCEPT THIS CHANNEL", "КРОМЕ ЭТОГО КАНАЛА"],
+  "d.onb1": ["Keys stay on your device. The server sees only the queue and the time.", "Ключи остаются на устройстве. Сервер видит только очередь и время."],
+  "d.onb2": ["Compare the 30-digit safety number.", "Сверьте 30-значный номер безопасности."],
+  "d.onb3": ["Disappearing messages, Tor by default, cover traffic.", "Исчезающие сообщения, Tor по умолчанию, маскирующий трафик."],
+  "d.start": ["Start", "Начать"],
+  "d.chats": ["Chats", "Чаты"],
+  "d.sound": ["Sound", "Звук"],
+  "d.verify": ["Verify", "Проверка"],
+  "d.about_short": ["About", "О себе"],
+  "d.pin4": ["4 digits", "4 цифры"],
+  "d.pin6": ["6 digits", "6 цифр"],
+  "d.erase": ["Erase", "Стереть"],
+  "d.show_secret": ["Show", "Показать"],
+  "d.copied": ["Copied.", "Скопировано."],
+  "d.compressed": ["compressed to {w}×{h} · metadata removed · {kb} KB", "сжато до {w}×{h} · метаданные удалены · {kb} КБ"],
+  "d.post1": [
+    "Aegis 0.2.5. Tor is now built in and on by default. The app reaches the server through its onion address and sends nothing until Tor is connected. Where Tor is blocked, turn on bridges: Snowflake, obfs4 or your own lines.",
+    "Aegis 0.2.5. Tor теперь встроен в приложение и включён по умолчанию. Aegis подключается к серверу через onion-адрес и ничего не отправляет, пока Tor не подключился. Там, где Tor заблокирован, включите мосты: Snowflake, obfs4 или свои строки."
+  ],
+  "d.post2": [
+    "PIN and duress. Unlock with 4 or 6 digits instead of the password. After five wrong tries the PIN stops working and only the password opens the vault. A duress PIN erases the account from the device and shows the usual wrong-PIN message.",
+    "PIN и принуждение. Входите четырьмя или шестью цифрами вместо пароля. После пяти неверных попыток PIN перестаёт действовать, и хранилище открывает только пароль. PIN принуждения стирает аккаунт с устройства и показывает обычное сообщение о неверном PIN."
+  ],
+  "d.post3": [
+    "Media compression. Photos are re-encoded as JPEG, at most 1600 px on the long side, with EXIF and other metadata removed. Videos lose their metadata too. Files up to 40 MB.",
+    "Сжатие медиа. Фото перекодируются в JPEG не больше 1600 px по длинной стороне, EXIF и другие метаданные удаляются. Из видео метаданные тоже вычищаются. Файлы до 40 МБ."
+  ],
+  "d.post4": [
+    "Cover traffic. While the app is open it talks to the network on its own schedule: when there is no real request, a dummy one of the same size goes out, so the server cannot tell when you are really talking. Off, Normal or Strong in Network and Tor. It stops while Aegis is locked or minimized.",
+    "Маскирующий трафик. Пока приложение открыто, оно ходит в сеть по своему расписанию: если настоящего запроса нет, уходит пустой такого же размера, и сервер не видит, когда вы действительно общаетесь. Выключен, Обычный или Усиленный — в разделе «Сеть и Tor». Пока Aegis заблокирован или свёрнут, трафик останавливается."
+  ],
+  "d.cover_real": ["real", "настоящие"],
+  "d.cover_dummy": ["dummy", "пустые"],
+  "d.gate_create": ["Creating your account", "Создаём аккаунт"],
+  "d.gate_open": ["Signing in", "Входим"],
+  "d.gate_done": ["Account created", "Аккаунт создан"],
+  "d.gate_keys": ["Generating keys", "Генерация ключей"],
+  "d.gate_pow": ["Registration puzzle", "Задача регистрации"],
+  "d.zoom_in": ["Zoom in", "Увеличить"],
+  "d.zoom_out": ["Zoom out", "Уменьшить"]
+}

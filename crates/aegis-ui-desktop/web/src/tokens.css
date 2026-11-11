@@ -1,0 +1,140 @@
+/* Aegis 0.2.5 tokens. Names match the WEB code syntax of the Figma variables
+   (file CQunv3AOMsoee846yYQyQn): Color / Scale / Motion collections.
+   Dark only by design: the app has no light theme. The palette is black, graphite
+   and white; red (--danger) is kept for failures. */
+:root {
+  color-scheme: dark;
+
+  /* surface */
+  --void: #000000;
+  --ash: #09090b;
+  --soot: #111114;
+  --smoke: #18181b;
+  /* line */
+  --line: #1c1c20;
+  --line2: #26262b;
+  /* ink */
+  --bone: #eeeef1;
+  --fog: #8a8b91;
+  --hint: #7c7d84;   /* placeholders, time, hints: 4.6:1 on soot */
+  --dim: #5b5c63;    /* separators, disabled, focus border only (3.2:1) */
+  --on-bone: #0a0a0c;
+  /* state */
+  --ok: #5fc48a;
+  --danger: #ef5d58;
+  /* bubble: outgoing is lit graphite with a thin red edge, incoming is dark graphite */
+  --out: #232328;
+  --out-edge: rgba(196, 48, 43, .5);
+  --out-ink: #eeeef1;
+  --out-meta: #8a8b91;
+  /* bars over the chat, avatar */
+  --glass: #040406;
+  --avatar-a: #2b2b31;
+
+  /* radius */
+  --r-field: 16px;
+  --r-btn: 27px;
+  --r-row: 18px;
+  --r-group: 20px;
+  --r-bubble: 19px;
+  --r-tail: 6px;
+  --r-sheet: 28px;
+  --r-card: 26px;
+  --r-pill: 999px;
+
+  /* space */
+  --sp-4: 4px;
+  --sp-6: 6px;
+  --sp-8: 8px;
+  --sp-10: 10px;
+  --sp-12: 12px;
+  --sp-16: 16px;
+  --sp-20: 20px;
+  --sp-24: 24px;
+  --sp-32: 32px;
+
+  /* size */
+  --h-control: 54px;
+  --h-seg: 40px;
+  --h-set: 58px;
+  --avatar: 50px;
+  --tap: 40px;
+  --tg-w: 58px;
+  --tg-h: 34px;
+
+  /* duration */
+  --d-auth: 700ms;
+  --d-push: 560ms;
+  --d-decode: 1100ms;
+  --d-spin: 500ms;
+  --d-shake: 420ms;
+  --d-menu: 340ms;
+  --d-flight: 610ms;
+  --d-lid: 900ms;
+  --d-morph: 1000ms;
+  --d-flip: 700ms;
+
+  /* easing */
+  --e-scene: cubic-bezier(.16, 1, .3, 1);
+  --e-out: cubic-bezier(.2, .7, .2, 1);
+  --e-soft: cubic-bezier(.65, 0, .35, 1);
+  --e-back: cubic-bezier(.34, 1.56, .64, 1);
+
+  /* type */
+  --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  /* safe areas: the shell is fixed, so it applies them itself */
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --top: calc(var(--safe-t) + 12px);
+}
+/* smooth corners where the browser draws them: a squircle reads smaller than a circular
+   arc of the same radius, so the radii grow by about half */
+@supports (corner-shape: squircle) {
+  :root { --r-field: 24px; --r-row: 26px; --r-group: 30px; --r-sheet: 40px; --r-card: 38px; }
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--void);
+  color: var(--bone);
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+body {
+  font: 400 15px/1.45 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  -webkit-tap-highlight-color: transparent;
+}
+*, *::before, *::after { box-sizing: border-box; }
+button, input, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--bone); outline-offset: 2px; }
+::selection { background: rgba(238, 238, 241, .26); color: var(--bone); }
+[hidden] { display: none !important; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* type roles (Figma text styles) */
+.t-wordmark { font: 600 56px/1 var(--sans); letter-spacing: .16em; text-transform: uppercase; }
+.t-profile { font: 600 38px/1.08 var(--sans); letter-spacing: -.045em; }
+.t-onb { font: 500 34px/1.1 var(--sans); letter-spacing: -.035em; text-wrap: balance; }
+.t-screen { font: 600 33px/1.1 var(--sans); letter-spacing: -.04em; }
+.t-sheet { font: 600 22px/1.2 var(--sans); letter-spacing: -.02em; text-wrap: balance; }
+.t-body { font: 400 15px/1.45 var(--sans); }
+.t-strong { font: 500 15px/1.3 var(--sans); letter-spacing: -.005em; }
+.t-msg { font: 400 14.5px/1.42 var(--sans); }
+.t-small { font: 400 13px/1.38 var(--sans); }
+.t-label { font: 500 11px/1.3 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+.t-tag { font: 500 10.5px/1.2 var(--mono); letter-spacing: .18em; text-transform: uppercase; }
+.t-hud { font: 400 10.5px/1.2 var(--mono); letter-spacing: .22em; text-transform: uppercase; }
+.t-time { font: 400 11px/1.2 var(--mono); letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+.t-fp { font: 400 13px/1.5 var(--mono); letter-spacing: .08em; font-variant-numeric: tabular-nums; }
+.t-safety { font: 500 17px/1.2 var(--mono); letter-spacing: .06em; font-variant-numeric: tabular-nums; }
+.t-counter { font: 600 11px/1 var(--mono); font-variant-numeric: tabular-nums; }

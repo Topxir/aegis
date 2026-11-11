@@ -20,12 +20,12 @@ android {
         applicationId = "org.aegis.messenger"
         minSdk = 28
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.2.6"
+        versionCode = 5
+        versionName = "0.2.7"
 
         // tor-android ships one native library per ABI; 32-bit x86 devices are not worth the extra size.
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
     }
 
@@ -89,9 +89,10 @@ android {
             excludes += "/META-INF/*.version"
             excludes += "/META-INF/DEPENDENCIES"
             excludes += "/META-INF/INDEX.LIST"
+            excludes += "/org/bouncycastle/pqc/crypto/picnic/**"
         }
         jniLibs {
-            useLegacyPackaging = false
+            useLegacyPackaging = true
         }
     }
 }

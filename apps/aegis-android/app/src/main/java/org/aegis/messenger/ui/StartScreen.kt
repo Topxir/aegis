@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
@@ -157,8 +158,15 @@ fun StartScreen(session: Session) {
             if ((session.pinSet || session.pinGhost) && !usePassword) Reveal(1, anim) {
                 PinUnlockCard(session, { error = it; usePassword = true }) { usePassword = true }
             } else Reveal(1, anim) {
+                val flip = remember { Animatable(0f) }
+                var first by remember { mutableStateOf(true) }
+                LaunchedEffect(tab) {
+                    if (!first && anim) { flip.snapTo(-80f); flip.animateTo(0f, spring(dampingRatio = 0.72f, stiffness = 260f)) }
+                    first = false
+                }
                 Column(
                     Modifier.fillMaxWidth()
+                        .graphicsLayer { rotationY = flip.value; cameraDistance = 14f * density }
                         .clip(RoundedCornerShape(22.dp))
                         .background(Brush.verticalGradient(listOf(Color(0xFF1A1A1E).copy(alpha = 0.78f), Color(0xFF0E0E10).copy(alpha = 0.86f))))
                         .border(1.dp, Color(0xFF25262B), RoundedCornerShape(22.dp))
