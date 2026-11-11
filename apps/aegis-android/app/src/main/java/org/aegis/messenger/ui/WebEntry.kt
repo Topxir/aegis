@@ -87,6 +87,8 @@ fun WebEntry(session: Session) {
     var route by remember { mutableStateOf("") }
     var dlg by remember { mutableStateOf("") }
     var infoKey by remember { mutableStateOf("") }
+    var viewing by remember { mutableStateOf(false) }
+    var jsErr by remember { mutableStateOf<String?>(null) }
     val web = remember { WebView(ctx) }
     val media = remember { ConcurrentHashMap<String, Media>() }
     val d = session.data
@@ -150,7 +152,9 @@ fun WebEntry(session: Session) {
         when (m.optString("cmd")) {
             "ready" -> ready = true
             "auth_tab" -> tab = a.optString("tab", tab)
-            "dismiss_flash" -> flash = null
+            "dismiss_flash" -> { flash = null; jsErr = null }
+            "js_error" -> jsErr = "JS: " + a.optString("msg").take(200)
+            "viewing" -> viewing = a.optBoolean("on")
             "set_lang" -> { lang = if (a.optString("lang") == "en") "en" else "ru"; Boot.setLanguage(ctx, lang) }
             "unlock" -> {
                 val u = a.optString("username"); val p = a.optString("password")
@@ -272,12 +276,12 @@ fun WebEntry(session: Session) {
 
     val tor = Tor.status
     val upd = Updater.state
-    LaunchedEffect(ready, d, tab, flash, lang, route, session.busy, session.pinSet, session.duressSet, session.inviteLink, tor, upd, session.requestTick) {
+    LaunchedEffect(ready, d, tab, flash, jsErr, viewing, lang, route, session.busy, session.pinSet, session.duressSet, session.inviteLink, tor, upd, session.requestTick) {
         if (!ready) return@LaunchedEffect
-        val f = flash?.let { JSONObject().put("ok", it.first).put("text", text(it.second)) }
+        val f = jsErr?.let { JSONObject().put("ok", false).put("text", it) } ?: flash?.let { JSONObject().put("ok", it.first).put("text", text(it.second)) }
         val s = JSONObject().put("authed", authed).put("tab", tab).put("lang", lang).put("flash", f ?: JSONObject.NULL)
         if (d != null) {
-            if (route.isNotEmpty() && d.chat(keyOf(route)).unread > 0) session.markRead(keyOf(route))
+            if (viewing && route.isNotEmpty() && d.chat(keyOf(route)).unread > 0) session.markRead(keyOf(route))
             s.put("m", model(ctx, session, d, route, lang, media, Updater.auto(ctx)))
             s.put("look", lookJson(d.look))
         }
@@ -330,8 +334,7 @@ private fun model(ctx: android.content.Context, s: Session, d: VaultData, route:
             .put("last", c.messages.lastOrNull()?.tsMs ?: 0).put("full", full).put("msgs", arr(ms.map { msgJson(it, ru, media) }))
         chats.put(extra)
     }
-    val dms = d.chats.keys.filter { it.startsWith("dm:") }.toMutableSet()
-    if (open.startsWith("dm:") && d.contact(open.removePrefix("dm:")) != null) dms += open
+    val dms = (d.contacts.map { dmKey(it.username) } + d.chats.keys.filter { it.startsWith("dm:") }).toSet()
     for (k in dms) {
         val u = k.removePrefix("dm:")
         chat(k, d.contact(u)?.ttlS ?: 0, JSONObject().put("kind", "dm").put("peer", u))
