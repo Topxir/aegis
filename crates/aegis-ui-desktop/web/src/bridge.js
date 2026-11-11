@@ -107,4 +107,8 @@ function entryUpdate(s) {
   else ENV.leave();
 }
 
-window.aegisEntry = { update: entryUpdate };
+window.aegisEntry = {
+  update: entryUpdate,
+  inChat: () => !!(mn && mn.chat),
+  layered: () => !!((mn && (mn.chat || mn.sec || mn.info)) || openSheets.length || openMenu),
+};
