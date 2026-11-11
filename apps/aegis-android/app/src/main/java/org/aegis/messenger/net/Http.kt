@@ -25,6 +25,9 @@ private const val TIMEOUT_MS = 20_000
 /** Onion services need a rendezvous first, so Tor requests get a longer budget. */
 const val TOR_TIMEOUT_MS = 60_000
 
+/** The server refuses clients below its minimum version, except for update downloads. */
+val USER_AGENT = "aegis/" + org.aegis.messenger.BuildConfig.VERSION_NAME
+
 /** Direct connection through the platform stack; never uses a system proxy. */
 class DirectTransport : Transport {
     override fun request(ep: Endpoint, method: String, pathQuery: String, body: ByteArray?, contentType: String?): Response {
@@ -40,6 +43,7 @@ class DirectTransport : Transport {
             conn.instanceFollowRedirects = false
             conn.useCaches = false
             conn.setRequestProperty("Accept", "application/json")
+            conn.setRequestProperty("User-Agent", USER_AGENT)
             if (body != null) {
                 conn.doOutput = true
                 conn.setFixedLengthStreamingMode(body.size)
@@ -89,6 +93,7 @@ class SocksTransport(private val proxy: ProxyAddr, private val timeoutMs: Int = 
                 .append(method).append(' ').append(pathQuery).append(" HTTP/1.1\r\n")
                 .append("Host: ").append(ep.host).append("\r\n")
                 .append("Accept: application/json\r\n")
+                .append("User-Agent: ").append(USER_AGENT).append("\r\n")
                 .append("Connection: close\r\n")
             if (body != null) {
                 if (contentType != null) head.append("Content-Type: ").append(contentType).append("\r\n")

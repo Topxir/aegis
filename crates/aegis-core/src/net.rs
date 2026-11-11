@@ -603,8 +603,9 @@ impl Client {
         cap: usize,
     ) -> Result<(u16, Vec<u8>)> {
         let mut head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: aegis\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
-            self.endpoint.host_header()
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: aegis/{}\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+            self.endpoint.host_header(),
+            env!("CARGO_PKG_VERSION")
         );
         if method == "POST" {
             head.push_str(&format!("Content-Type: {ctype}\r\nContent-Length: {}\r\n", body.len()));
