@@ -503,6 +503,31 @@ impl Engine {
         });
     }
 
+    /// Waits until the embedded Tor has finished bootstrapping. Must be called on a worker
+    /// thread: status updates go to the UI from the Tor thread.
+    fn tor_ready(&self) -> Result<String, Failure> {
+        let mut up = self.tor.socks_addr();
+        for _ in 0..180 {
+            if up.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            up = self.tor.socks_addr();
+        }
+        up.ok_or(Failure::new("err.tor_boot"))
+    }
+
+    /// Starts Tor for settings that do not belong to an installed session yet, such as the
+    /// first account on this device.
+    fn start_tor_for(&self, st: &Settings) -> Result<(), Failure> {
+        if !st.tor {
+            return Ok(());
+        }
+        self.tor.configure(crate::bridges::torrc_for(st));
+        self.tor_sync_for(true);
+        self.tor_ready().map(|_| ())
+    }
+
     /// Forgets the pinned key after the user confirmed twice; the next check pins whatever
     /// the server shows then.
     pub fn reset_server_key(&self) {
@@ -745,6 +770,10 @@ impl Engine {
         s.data.settings.tor =
             crate::model::same_endpoint(&self.cfg.default_endpoint, crate::model::DEFAULT_ENDPOINT);
         let identity = identity_of(&s);
+        // The first frame is the registration itself, so Tor has to be up before it and
+        // before the server key is checked through the onion. Without this wait a fresh
+        // install could never create an account: nothing starts the embedded client.
+        self.start_tor_for(&s.data.settings)?;
         let mut st = s.data.settings.clone();
         self.pin_key(&mut st)?;
         s.data.settings = st;
@@ -997,15 +1026,7 @@ impl Engine {
             } else {
                 self.tor_sync_for(true);
             }
-            let mut up = self.tor.socks_addr();
-            for _ in 0..180 {
-                if up.is_some() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(500));
-                up = self.tor.socks_addr();
-            }
-            up.ok_or(Failure::new("err.tor_boot"))?
+            self.tor_ready()?
         } else {
             let socks = socks5.to_owned();
             if !socks.is_empty() && !valid_socks(&socks) {
