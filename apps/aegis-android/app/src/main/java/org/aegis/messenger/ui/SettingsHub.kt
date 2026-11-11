@@ -1,5 +1,9 @@
 package org.aegis.messenger.ui
 
+import androidx.compose.runtime.LaunchedEffect
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -148,6 +152,10 @@ fun AppearanceScreen(host: SettingsHost) {
     fun preview(n: Look) { l = n.sanitize(); Ui.apply(l) }
     fun commit(n: Look) { preview(n); host.session.saveLook(l) }
     val wide = LocalConfiguration.current.screenWidthDp >= 600
+    // A new photo arrives through the saved look after it is cleaned in the background.
+    LaunchedEffect(saved.photo) { if (saved.photo != l.photo) l = l.copy(photo = saved.photo, wall = saved.wall) }
+    val pickPhoto = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let { host.session.setWallPhoto(it) } }
+    val scopes = listOf("chat" to stringResource(R.string.look_scope_chat), "full" to stringResource(R.string.look_scope_full))
 
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         TopBar(stringResource(R.string.sec_appearance), onBack = host.onBack)
@@ -224,16 +232,44 @@ fun AppearanceScreen(host: SettingsHost) {
                     l.font.toFloat(), { preview(l.copy(font = it.toInt())) }, valueRange = Look.FONT_MIN.toFloat()..Look.FONT_MAX.toFloat(),
                     steps = Look.FONT_MAX - Look.FONT_MIN - 1, onValueChangeFinished = { commit(l) }, colors = sliderColors(Ui.accent),
                 )
-                Text(stringResource(R.string.look_wall), color = Ui.text)
-                Choices(
-                    listOf("none" to stringResource(R.string.look_wall_none), "solid" to stringResource(R.string.look_wall_solid), "gradient" to stringResource(R.string.look_wall_gradient)),
-                    l.wall,
-                ) { commit(l.copy(wall = it)) }
                 Text(stringResource(R.string.look_avatar), color = Ui.text, modifier = Modifier.padding(top = 12.dp))
                 Choices(
                     listOf("circle" to stringResource(R.string.look_circle), "rounded" to stringResource(R.string.look_rounded), "square" to stringResource(R.string.look_square)),
                     l.avatar,
                 ) { commit(l.copy(avatar = it)) }
+            }
+            Divider()
+            Section(stringResource(R.string.look_backdrop)) {
+                Text(stringResource(R.string.look_wall), color = Ui.text)
+                Choices(
+                    listOfNotNull(
+                        "none" to stringResource(R.string.look_wall_none), "solid" to stringResource(R.string.look_wall_solid),
+                        "gradient" to stringResource(R.string.look_wall_gradient), if (l.photo.isNotEmpty()) "photo" to stringResource(R.string.look_wall_photo) else null,
+                    ),
+                    l.wall,
+                ) { commit(l.copy(wall = it)) }
+                Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Secondary(stringResource(R.string.look_photo_pick), modifier = Modifier.weight(1f)) { pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                    if (l.photo.isNotEmpty()) Secondary(stringResource(R.string.look_photo_remove), modifier = Modifier.weight(1f)) { commit(l.copy(photo = "")) }
+                }
+                Text(stringResource(R.string.look_wall_scope), color = Ui.text, modifier = Modifier.padding(top = 12.dp))
+                Choices(scopes, l.wallScope) { commit(l.copy(wallScope = it)) }
+                if (l.wall == "photo") {
+                    Text(stringResource(R.string.look_dim, l.dim), color = Ui.text, modifier = Modifier.padding(top = 12.dp))
+                    Slider(
+                        l.dim.toFloat(), { preview(l.copy(dim = it.toInt())) }, valueRange = 0f..Look.DIM_MAX.toFloat(),
+                        onValueChangeFinished = { commit(l) }, colors = sliderColors(Ui.accent),
+                    )
+                }
+                Note(stringResource(R.string.look_photo_note))
+                Text(stringResource(R.string.look_effect), color = Ui.text, modifier = Modifier.padding(top = 12.dp))
+                Look.EFFECTS.chunked(3).forEach { row ->
+                    Box(Modifier.padding(bottom = 6.dp)) {
+                        Choices(row.map { it to stringResource(fxLabel(it)) }, l.effect) { commit(l.copy(effect = it)) }
+                    }
+                }
+                Text(stringResource(R.string.look_effect_scope), color = Ui.text, modifier = Modifier.padding(top = 12.dp))
+                Choices(scopes, l.effectScope) { commit(l.copy(effectScope = it)) }
             }
             Divider()
             Section(stringResource(R.string.language)) {
@@ -297,7 +333,7 @@ private fun LookPreview(modifier: Modifier) {
                 }
             }
             HeadLine()
-            Column(Modifier.fillMaxWidth().wallpaper().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.fillMaxWidth().wallPreview().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 PreviewBubble(stringResource(R.string.look_preview_in), false)
                 PreviewBubble(stringResource(R.string.look_preview_out), true)
             }
@@ -313,4 +349,13 @@ private fun PreviewBubble(text: String, out: Boolean) {
             Text(text, style = MaterialTheme.typography.bodyLarge, color = bubbleInk(out))
         }
     }
+}
+
+private fun fxLabel(id: String): Int = when (id) {
+    "rain" -> R.string.look_fx_rain
+    "snow" -> R.string.look_fx_snow
+    "dust" -> R.string.look_fx_dust
+    "embers" -> R.string.look_fx_embers
+    "stars" -> R.string.look_fx_stars
+    else -> R.string.look_fx_none
 }

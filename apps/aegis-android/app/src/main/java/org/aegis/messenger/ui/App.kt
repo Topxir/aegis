@@ -49,7 +49,7 @@ fun Root(session: Session, onLanguage: () -> Unit) {
     val d = session.data
     // Only a saved change re-applies the look, so an unsaved preview in Appearance stays.
     remember(d?.look) { Ui.apply(d?.look ?: Look()) }
-    Box(Modifier.fillMaxSize().background(Ui.bg)) {
+    Box(Modifier.fillMaxSize().background(Ui.bg).backdrop().fx(rememberFx("full"))) {
         LookGround()
         if (session.keyChangedOrigin != null) KeyChangedStop(session)
         else if (d == null) StartScreen(session) else Navigator(session, onLanguage)

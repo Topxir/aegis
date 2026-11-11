@@ -76,7 +76,7 @@
     <string name="look_minimal">Minimal</string>
     <string name="look_radius">Corner radius: %1$d</string>
     <string name="look_font">Text size: %1$d</string>
-    <string name="look_wall">Chat background</string>
+    <string name="look_wall">Background</string>
     <string name="look_wall_none">Black</string>
     <string name="look_wall_solid">Solid</string>
     <string name="look_wall_gradient">Gradient</string>
@@ -88,4 +88,21 @@
     <string name="look_preview_status">online</string>
     <string name="look_preview_in">Did the photos arrive?</string>
     <string name="look_preview_out">Yes, all of them. Thanks!</string>
+    <string name="look_wall_photo">Photo</string>
+    <string name="look_backdrop">Background and effects</string>
+    <string name="look_photo_pick">Choose photo</string>
+    <string name="look_photo_remove">Remove photo</string>
+    <string name="look_photo_note">The photo is cleaned of metadata and kept inside your encrypted profile.</string>
+    <string name="look_scope_chat">In chats</string>
+    <string name="look_scope_full">Whole screen</string>
+    <string name="look_wall_scope">Background shows</string>
+    <string name="look_dim">Dimming: %1$d%%</string>
+    <string name="look_effect">Effect</string>
+    <string name="look_effect_scope">Effect shows</string>
+    <string name="look_fx_none">None</string>
+    <string name="look_fx_rain">Rain</string>
+    <string name="look_fx_snow">Snow</string>
+    <string name="look_fx_dust">Dust</string>
+    <string name="look_fx_embers">Embers</string>
+    <string name="look_fx_stars">Stars</string>
 </resources>

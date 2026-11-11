@@ -15,6 +15,10 @@ pub const RADIUS_DEFAULT: u8 = 16;
 pub const FONT_MIN: u8 = 12;
 pub const FONT_MAX: u8 = 18;
 pub const FONT_DEFAULT: u8 = 14;
+pub const DIM_MAX: u8 = 85;
+pub const DIM_DEFAULT: u8 = 45;
+/// Base64 of the cleaned wallpaper JPEG; anything longer is dropped.
+pub const PHOTO_MAX: usize = 4 << 20;
 
 /// Preset themes: id, gradient for outgoing bubbles and the header, gradient for buttons and badges.
 pub const PRESETS: [(&str, &[&str], &[&str]); 6] = [
@@ -70,7 +74,9 @@ choice!(ListPos { Left = "left", Right = "right", Top = "top" });
 choice!(Density { Comfortable = "comfortable", Compact = "compact" });
 choice!(Motion { Subtle = "subtle", Off = "off", Full = "full" });
 choice!(Bubble { Rounded = "rounded", Sharp = "sharp", Minimal = "minimal" });
-choice!(Wallpaper { None = "none", Solid = "solid", Gradient = "gradient" });
+choice!(Wallpaper { None = "none", Solid = "solid", Gradient = "gradient", Photo = "photo" });
+choice!(Effect { None = "none", Rain = "rain", Snow = "snow", Dust = "dust", Embers = "embers", Stars = "stars" });
+choice!(Scope { Chat = "chat", Full = "full" });
 choice!(AvatarShape { Circle = "circle", Rounded = "rounded", Square = "square" });
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +97,14 @@ pub struct Look {
     pub font: u8,
     pub wallpaper: Wallpaper,
     pub avatar: AvatarShape,
+    /// Where the wallpaper shows: behind the messages or behind the whole window.
+    pub wall_scope: Scope,
+    /// How much the wallpaper photo is darkened, in percent.
+    pub wall_dim: u8,
+    /// The wallpaper photo: a cleaned JPEG in base64, empty when none was picked.
+    pub photo: String,
+    pub effect: Effect,
+    pub effect_scope: Scope,
 }
 
 impl Default for Look {
@@ -109,6 +123,11 @@ impl Default for Look {
             font: FONT_DEFAULT,
             wallpaper: Wallpaper::None,
             avatar: AvatarShape::Circle,
+            wall_scope: Scope::Chat,
+            wall_dim: DIM_DEFAULT,
+            photo: String::new(),
+            effect: Effect::None,
+            effect_scope: Scope::Chat,
         }
     }
 }
@@ -198,6 +217,39 @@ impl Look {
         self.list_width = self.list_width.clamp(WIDTH_MIN, WIDTH_MAX);
         self.radius = self.radius.min(RADIUS_MAX);
         self.font = self.font.clamp(FONT_MIN, FONT_MAX);
+        self.wall_dim = self.wall_dim.min(DIM_MAX);
+        if self.photo.len() > PHOTO_MAX
+            || !self.photo.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+        {
+            self.photo.clear();
+        }
+        if self.wallpaper == Wallpaper::Photo && self.photo.is_empty() {
+            self.wallpaper = Wallpaper::None;
+        }
+    }
+
+    /// Short tag that changes with the photo, so the page loads the new one.
+    pub fn photo_tag(&self) -> String {
+        let h = self
+            .photo
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+        format!("{h:016x}")
+    }
+
+    /// Stores a cleaned JPEG as the wallpaper and switches to it.
+    pub fn set_photo(&mut self, jpeg: &[u8]) {
+        self.photo = b64(jpeg);
+        self.wallpaper = Wallpaper::Photo;
+        self.sanitize();
+    }
+
+    pub fn photo_bytes(&self) -> Option<Vec<u8>> {
+        if self.photo.is_empty() {
+            None
+        } else {
+            unb64(&self.photo)
+        }
     }
 
     /// Gradient stops for bubbles and the header, and for buttons and badges.
@@ -249,6 +301,14 @@ impl Look {
             "bubble" => Bubble::parse(value).map(|v| self.bubble = v).is_some(),
             "wallpaper" => Wallpaper::parse(value).map(|v| self.wallpaper = v).is_some(),
             "avatar" => AvatarShape::parse(value).map(|v| self.avatar = v).is_some(),
+            "wall_scope" => Scope::parse(value).map(|v| self.wall_scope = v).is_some(),
+            "wall_dim" => num(value).map(|n| self.wall_dim = n.min(255) as u8).is_some(),
+            "effect" => Effect::parse(value).map(|v| self.effect = v).is_some(),
+            "effect_scope" => Scope::parse(value).map(|v| self.effect_scope = v).is_some(),
+            "photo" if value.is_empty() => {
+                self.photo.clear();
+                true
+            }
             "list_width" => num(value).map(|n| self.list_width = n.min(u32::from(u16::MAX)) as u16).is_some(),
             "radius" => num(value).map(|n| self.radius = n.min(255) as u8).is_some(),
             "font" => num(value).map(|n| self.font = n.min(255) as u8).is_some(),
@@ -278,6 +338,11 @@ impl Look {
             "font": self.font,
             "wall": self.wallpaper.id(),
             "avatar": self.avatar.id(),
+            "wall_scope": self.wall_scope.id(),
+            "dim": self.wall_dim,
+            "photo": if self.wallpaper == Wallpaper::Photo { format!("/wall/{}", self.photo_tag()) } else { String::new() },
+            "fx": self.effect.id(),
+            "fx_scope": self.effect_scope.id(),
             "cols": cols,
             "rows": rows,
             "areas": areas,
@@ -360,7 +425,7 @@ pub fn page(l: Lang, look: &Look) -> String {
         esc(tr(l, "look.pv_out"))
     );
     format!(
-        r#"<section class="card"><h2>{}</h2>{preview}<div class="f"><span>{}</span><div class="sws">{sw}</div></div><div class="picks">{picks}</div><p class="note">{}</p>{}</section><section class="card"><h2>{}</h2>{}{}{}</section><section class="card"><h2>{}</h2>{}{}{}</section><section class="card"><h2>{}</h2>{}{}{}{}{}</section><section class="card"><div class="row"><button type="button" class="btn" data-act="reset_look">{}</button></div></section>"#,
+        r#"<section class="card"><h2>{}</h2>{preview}<div class="f"><span>{}</span><div class="sws">{sw}</div></div><div class="picks">{picks}</div><p class="note">{}</p>{}</section><section class="card"><h2>{}</h2>{}{}{}</section><section class="card"><h2>{}</h2>{}{}{}</section><section class="card"><h2>{}</h2>{}{}{}{}</section>{}<section class="card"><div class="row"><button type="button" class="btn" data-act="reset_look">{}</button></div></section>"#,
         esc(tr(l, "look.title")),
         esc(tr(l, "look.theme")),
         esc(tr(l, "look.custom_note")),
@@ -377,12 +442,101 @@ pub fn page(l: Lang, look: &Look) -> String {
         seg(l, "bubble", Bubble::ALL, look.bubble, Bubble::id),
         range(l, "radius", 0, u32::from(RADIUS_MAX), u32::from(look.radius)),
         range(l, "font", u32::from(FONT_MIN), u32::from(FONT_MAX), u32::from(look.font)),
-        seg(l, "wallpaper", Wallpaper::ALL, look.wallpaper, Wallpaper::id),
         seg(l, "avatar", AvatarShape::ALL, look.avatar, AvatarShape::id),
+        backdrop(l, look),
         esc(tr(l, "look.reset"))
     )
 }
 
 fn p_note(l: Lang, key: &str) -> String {
     format!(r#"<p class="note">{}</p>"#, esc(tr(l, key)))
+}
+
+/// Wallpaper and screen effects.
+fn backdrop(l: Lang, look: &Look) -> String {
+    let remove = if look.photo.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<button type="button" class="btn ghost" data-act="set_look" data-key="photo" data-value="">{}</button>"#,
+            esc(tr(l, "look.photo_remove"))
+        )
+    };
+    format!(
+        r#"<section class="card"><h2>{}</h2>{}<div class="row"><button type="button" class="btn" data-act="pick_wall">{}</button>{remove}</div>{}{}<p class="note">{}</p>{}{}{}</section>"#,
+        esc(tr(l, "look.backdrop")),
+        seg(l, "wallpaper", Wallpaper::ALL, look.wallpaper, Wallpaper::id),
+        esc(tr(l, "look.photo_pick")),
+        seg(l, "wall_scope", Scope::ALL, look.wall_scope, Scope::id),
+        range(l, "wall_dim", 0, u32::from(DIM_MAX), u32::from(look.wall_dim)),
+        esc(tr(l, "look.photo_note")),
+        seg(l, "effect", Effect::ALL, look.effect, Effect::id),
+        seg(l, "effect_scope", Scope::ALL, look.effect_scope, Scope::id),
+        p_note(l, "look.effect_note")
+    )
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(c.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(c.get(2).copied().unwrap_or(0));
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(char::from(B64[((n >> (18 - 6 * i)) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn unb64(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for b in s.trim_end_matches('=').bytes() {
+        let v = B64.iter().position(|&x| x == b)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod backdrop_tests {
+    use super::*;
+
+    #[test]
+    fn base64_round_trip() {
+        for n in 0..20u8 {
+            let v: Vec<u8> = (0..n).map(|i| i.wrapping_mul(37)).collect();
+            assert_eq!(unb64(&b64(&v)).unwrap(), v);
+        }
+        assert_eq!(b64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(b64(b"fo"), "Zm8=");
+    }
+
+    #[test]
+    fn photo_and_effects() {
+        let mut l = Look::default();
+        l.set("wallpaper", "photo");
+        assert_eq!(l.wallpaper, Wallpaper::None);
+        l.set_photo(&[0xff, 0xd8, 0xff]);
+        assert_eq!(l.wallpaper, Wallpaper::Photo);
+        assert_eq!(l.photo_bytes().unwrap(), vec![0xff, 0xd8, 0xff]);
+        assert!(l.set("photo", ""));
+        assert_eq!(l.wallpaper, Wallpaper::None);
+        assert!(l.set("effect", "snow") && l.set("effect_scope", "full"));
+        assert_eq!(l.to_json(false)["fx"], "snow");
+        assert!(!l.set("effect", "fire"));
+    }
 }

@@ -20,6 +20,13 @@ data class Look(
     val font: Int = FONT_DEFAULT,
     val wall: String = "none",
     val avatar: String = "circle",
+    /** "chat" or "full": behind the messages or behind every screen. */
+    val wallScope: String = "chat",
+    val dim: Int = DIM_DEFAULT,
+    /** Cleaned wallpaper JPEG in base64; empty when none. */
+    val photo: String = "",
+    val effect: String = "none",
+    val effectScope: String = "chat",
 ) {
     /** Gradient stops for accents, buttons and outgoing bubbles. */
     fun stops(): List<Int> =
@@ -55,8 +62,13 @@ data class Look(
         bubble = pick(bubble, BUBBLES),
         radius = radius.coerceIn(0, RADIUS_MAX),
         font = font.coerceIn(FONT_MIN, FONT_MAX),
-        wall = pick(wall, WALLS),
+        wall = pick(wall, WALLS).let { if (it == "photo" && photo.isEmpty()) "none" else it },
         avatar = pick(avatar, AVATARS),
+        wallScope = pick(wallScope, SCOPES),
+        dim = dim.coerceIn(0, DIM_MAX),
+        photo = if (photo.length <= PHOTO_MAX && photo.all { it.isLetterOrDigit() && it.code < 128 || it in "+/=" }) photo else "",
+        effect = pick(effect, EFFECTS),
+        effectScope = pick(effectScope, SCOPES),
     )
 
     fun toJson(): Map<String, Any?> = linkedMapOf(
@@ -72,6 +84,11 @@ data class Look(
         "font" to font.toLong(),
         "wall" to wall,
         "avatar" to avatar,
+        "wall_scope" to wallScope,
+        "dim" to dim.toLong(),
+        "photo" to photo,
+        "effect" to effect,
+        "effect_scope" to effectScope,
     )
 
     companion object {
@@ -85,7 +102,12 @@ data class Look(
         val LISTS = listOf("left", "right", "top")
         val DENSITIES = listOf("comfortable", "compact")
         val BUBBLES = listOf("rounded", "sharp", "minimal")
-        val WALLS = listOf("none", "solid", "gradient")
+        val WALLS = listOf("none", "solid", "gradient", "photo")
+        val SCOPES = listOf("chat", "full")
+        val EFFECTS = listOf("none", "rain", "snow", "dust", "embers", "stars")
+        const val DIM_MAX = 85
+        const val DIM_DEFAULT = 45
+        const val PHOTO_MAX = 4 shl 20
         val AVATARS = listOf("circle", "rounded", "square")
 
         val PRESETS: Map<String, List<Int>> = linkedMapOf(
@@ -142,6 +164,11 @@ data class Look(
                 font = n("font", d.font),
                 wall = s("wall", d.wall),
                 avatar = s("avatar", d.avatar),
+                wallScope = s("wall_scope", d.wallScope),
+                dim = n("dim", d.dim),
+                photo = s("photo", ""),
+                effect = s("effect", d.effect),
+                effectScope = s("effect_scope", d.effectScope),
             ).sanitize()
         }
     }

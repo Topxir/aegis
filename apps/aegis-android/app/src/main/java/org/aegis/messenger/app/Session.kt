@@ -2124,6 +2124,24 @@ class Session(private val ctx: Context) {
 
     fun saveLook(l: org.aegis.messenger.data.Look) = update { it.copy(look = l.sanitize()) }
 
+    /** Cleans the picked image like an outgoing photo and keeps it as the wallpaper. */
+    fun setWallPhoto(uri: Uri) {
+        busy = true
+        net.execute {
+            try {
+                val p = MediaPrep.fromUri(ctx, uri)
+                if (p.kind != MediaKind.Image) throw AegisException.Media("type")
+                val b64 = android.util.Base64.encodeToString(p.bytes, android.util.Base64.NO_WRAP)
+                p.bytes.fill(0)
+                post { data?.let { saveLook(it.look.copy(photo = b64, wall = "photo")) } }
+            } catch (e: Throwable) {
+                post { notice = R.string.err_media }
+            } finally {
+                post { busy = false }
+            }
+        }
+    }
+
     fun setTor(on: Boolean) {
         Boot.setTor(ctx, on)
         Tor.setEnabled(on)

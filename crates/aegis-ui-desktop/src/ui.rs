@@ -89,6 +89,12 @@ fn serve(engine: &Engine, req: &Request<Vec<u8>>) -> Response<Cow<'static, [u8]>
     if let Some(r) = serve_media(engine, req) {
         return r;
     }
+    if req.uri().path().starts_with("/wall/") && req.method() == wry::http::Method::GET {
+        return match engine.wall_photo() {
+            Some(b) => respond(StatusCode::OK, "image/jpeg", Cow::Owned(b)),
+            None => respond(StatusCode::NOT_FOUND, "text/plain", Cow::Borrowed(b"")),
+        };
+    }
     if req.method() != wry::http::Method::GET {
         return respond(
             StatusCode::METHOD_NOT_ALLOWED,

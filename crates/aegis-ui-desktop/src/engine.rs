@@ -232,6 +232,7 @@ pub enum Job {
         ttl: u64,
     },
     PickMedia(ChatRef),
+    PickWall,
     SendMedia {
         chat: ChatRef,
         path: PathBuf,
@@ -1921,6 +1922,13 @@ impl Engine {
             }
             Job::PickMedia(chat) => {
                 let r = self.pick_and_send(&chat);
+                self.finish(r.map(|()| None));
+            }
+            Job::PickWall => {
+                let r = self.pick_wall();
+                if r.is_ok() {
+                    let _ = self.flush();
+                }
                 self.finish(r.map(|()| None));
             }
             Job::SendMedia { chat, path } => {

@@ -269,7 +269,9 @@
     if (!k) {
       for (var i = 0; i < lookVars.length; i++) { st.removeProperty(lookVars[i]); }
       for (var n = 0; n < lookAttrs.length; n++) { r.removeAttribute('data-' + lookAttrs[n]); }
+      st.removeProperty('--wall-img');
       untilt();
+      fxSet('none', 'chat');
       return;
     }
     var g = stops(k.bubble, 3);
@@ -293,7 +295,97 @@
     r.setAttribute('data-avatar', k.avatar);
     r.setAttribute('data-anim', k.animated ? 'on' : 'off');
     r.setAttribute('data-depth', k.depth ? 'on' : 'off');
+    r.setAttribute('data-wscope', k.wall_scope || 'chat');
+    st.setProperty('--dim', String((k.dim || 0) / 100));
+    if (k.photo) { st.setProperty('--wall-img', 'url("' + k.photo + '")'); } else { st.removeProperty('--wall-img'); }
     if (!k.depth) { untilt(); }
+    fxSet(motion() === 'off' ? 'none' : (k.fx || 'none'), k.fx_scope || 'chat');
+  }
+
+  // Screen effects: one canvas over the messages or over the whole window. Clicks pass through.
+  var fx = { kind: 'none', scope: 'chat', cv: null, ps: [], raf: 0, w: 0, h: 0, last: 0 };
+
+  function fxSet(kind, scope) {
+    if (kind === fx.kind && scope === fx.scope) { return; }
+    fx.kind = kind;
+    fx.scope = scope;
+    fx.ps = [];
+    if (kind === 'none') {
+      if (fx.cv) { fx.cv.hidden = true; }
+      if (fx.raf) { cancelAnimationFrame(fx.raf); fx.raf = 0; }
+      return;
+    }
+    if (!fx.cv) {
+      fx.cv = document.createElement('canvas');
+      fx.cv.className = 'fx';
+      fx.cv.setAttribute('aria-hidden', 'true');
+      document.body.appendChild(fx.cv);
+    }
+    fx.cv.hidden = false;
+    if (!fx.raf) { fx.last = 0; fx.raf = requestAnimationFrame(fxFrame); }
+  }
+
+  function fxSpawn(top) {
+    var w = fx.w, h = fx.h, k = fx.kind, R = Math.random;
+    var p = { x: R() * w, y: top ? -10 : R() * h, a: R() * 6.28 };
+    if (k === 'rain') { p.v = 520 + R() * 380; p.l = 10 + R() * 14; p.o = .18 + R() * .25; }
+    else if (k === 'snow') { p.v = 28 + R() * 44; p.r = .8 + R() * 2.2; p.o = .35 + R() * .5; }
+    else if (k === 'dust') { p.v = 4 + R() * 10; p.r = .5 + R() * 1.3; p.o = .12 + R() * .3; p.dx = (R() - .5) * 10; }
+    else if (k === 'embers') { p.y = top ? h + 10 : p.y; p.v = -(24 + R() * 50); p.r = .7 + R() * 1.6; p.o = .4 + R() * .5; }
+    else { p.v = 0; p.r = .4 + R() * 1.2; p.o = .2 + R() * .6; p.tw = .6 + R() * 2; }
+    return p;
+  }
+
+  function fxFrame(t) {
+    fx.raf = 0;
+    if (fx.kind === 'none') { return; }
+    fx.raf = requestAnimationFrame(fxFrame);
+    if (document.hidden) { fx.last = 0; return; }
+    var cv = fx.cv, x0 = 0, y0 = 0, w = innerWidth, h = innerHeight;
+    if (fx.scope === 'chat') {
+      var m = document.querySelector('#shell:not([hidden]) .msgs');
+      var b = m && m.getBoundingClientRect();
+      if (!b || b.width < 2) { cv.hidden = true; return; }
+      x0 = b.left; y0 = b.top; w = b.width; h = b.height;
+    }
+    cv.hidden = false;
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (fx.w !== w || fx.h !== h || cv.width !== Math.round(w * dpr)) {
+      fx.w = w; fx.h = h;
+      cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+      cv.style.width = w + 'px'; cv.style.height = h + 'px';
+    }
+    cv.style.transform = 'translate(' + x0 + 'px,' + y0 + 'px)';
+    var dt = fx.last ? Math.min((t - fx.last) / 1000, .05) : 0;
+    fx.last = t;
+    var want = Math.round(w * h / ({ rain: 5200, snow: 7000, dust: 9000, embers: 16000, stars: 5000 }[fx.kind] || 8000));
+    want = Math.min(want, 420);
+    while (fx.ps.length < want) { fx.ps.push(fxSpawn(false)); }
+    if (fx.ps.length > want) { fx.ps.length = want; }
+    var c = cv.getContext('2d');
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, w, h);
+    var k = fx.kind;
+    for (var i = 0; i < fx.ps.length; i++) {
+      var p = fx.ps[i];
+      p.a += dt;
+      if (k === 'rain') {
+        p.y += p.v * dt; p.x -= p.v * dt * .12;
+        c.strokeStyle = 'rgba(190, 205, 230,' + p.o + ')';
+        c.lineWidth = 1;
+        c.beginPath(); c.moveTo(p.x, p.y); c.lineTo(p.x + p.l * .12, p.y - p.l); c.stroke();
+      } else if (k === 'stars') {
+        c.fillStyle = 'rgba(235, 238, 255,' + (p.o * (.55 + .45 * Math.sin(p.a * p.tw))) + ')';
+        c.fillRect(p.x, p.y, p.r * 1.6, p.r * 1.6);
+        continue;
+      } else {
+        p.y += p.v * dt;
+        p.x += (k === 'snow' ? Math.sin(p.a) * 18 : k === 'dust' ? p.dx : Math.sin(p.a * 2) * 12) * dt;
+        c.fillStyle = k === 'embers' ? 'rgba(255, 120, 60,' + p.o + ')' : 'rgba(230, 232, 240,' + p.o + ')';
+        c.beginPath(); c.arc(p.x, p.y, p.r, 0, 6.283); c.fill();
+      }
+      if (p.y > h + 20 || p.y < -30 || p.x < -30 || p.x > w + 30) { fx.ps[i] = fxSpawn(true); }
+    }
   }
 
   function paintSwatches(root) {
@@ -313,6 +405,10 @@
       st.setProperty(key === 'radius' ? '--r' : '--fs', el.value + 'px');
       var rv = el.parentNode.querySelector('.rv');
       if (rv) { rv.textContent = el.value; }
+    } else if (key === 'wall_dim') {
+      st.setProperty('--dim', String(el.value / 100));
+      var dv = el.parentNode.querySelector('.rv');
+      if (dv) { dv.textContent = el.value; }
     } else if (/^c[123]$/.test(key)) {
       st.setProperty('--g' + key.charAt(1), el.value);
       st.setProperty('--a' + key.charAt(1), el.value);

@@ -75,6 +75,30 @@ impl Engine {
         }
     }
 
+    /// Asks for a picture and makes it the wallpaper. The picture is cleaned like a sent photo
+    /// and kept in the vault settings, never as a loose file.
+    pub fn pick_wall(&self) -> Result<(), Failure> {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Photo", &["jpg", "jpeg", "png", "webp"])
+            .pick_file()
+        else {
+            return Ok(());
+        };
+        let meta = std::fs::metadata(&path).map_err(|e| io_failure(&e))?;
+        if !meta.is_file() || meta.len() > media::MAX_INPUT as u64 {
+            return Err(Failure::new("err.media_big"));
+        }
+        let raw = std::fs::read(&path).map_err(|e| io_failure(&e))?;
+        let clean = media::sanitize_image(&raw).map_err(media_failure)?;
+        self.mutate(|s| s.data.settings.look.set_photo(&clean.bytes))
+            .ok_or(Failure::new("err.locked"))
+    }
+
+    /// The wallpaper photo of the open profile, for `/wall/<tag>`.
+    pub fn wall_photo(&self) -> Option<Vec<u8>> {
+        self.app().session.as_ref()?.data.settings.look.photo_bytes()
+    }
+
     pub fn send_media(&self, chat: &ChatRef, path: &Path) -> Result<(), Failure> {
         let (epoch, client, dir, key) = {
             let app = self.app();

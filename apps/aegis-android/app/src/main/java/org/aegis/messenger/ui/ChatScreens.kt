@@ -477,7 +477,7 @@ fun ChatScreen(
         }
         if (session.busy) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp), color = Ui.accent, trackColor = Ui.border)
         val tilt = depthOn()
-        LazyColumn(Modifier.weight(1f).fillMaxWidth().wallpaper(), state = state, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
+        LazyColumn(Modifier.weight(1f).fillMaxWidth().wallpaper().fx(rememberFx("chat")), state = state, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
             items(chat.messages.size, key = { chat.messages[it].id }) { i ->
                 val m = chat.messages[i]
                 val prev = chat.messages.getOrNull(i - 1)

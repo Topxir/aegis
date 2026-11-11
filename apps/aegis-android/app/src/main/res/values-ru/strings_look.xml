@@ -75,7 +75,7 @@
     <string name="look_minimal">Минимальные</string>
     <string name="look_radius">Радиус углов: %1$d</string>
     <string name="look_font">Размер текста: %1$d</string>
-    <string name="look_wall">Фон чата</string>
+    <string name="look_wall">Фон</string>
     <string name="look_wall_none">Чёрный</string>
     <string name="look_wall_solid">Цвет</string>
     <string name="look_wall_gradient">Градиент</string>
@@ -87,4 +87,21 @@
     <string name="look_preview_status">в сети</string>
     <string name="look_preview_in">Фото дошли?</string>
     <string name="look_preview_out">Да, все. Спасибо!</string>
+    <string name="look_wall_photo">Фото</string>
+    <string name="look_backdrop">Фон и эффекты</string>
+    <string name="look_photo_pick">Выбрать фото</string>
+    <string name="look_photo_remove">Убрать фото</string>
+    <string name="look_photo_note">Фото очищается от метаданных и хранится в зашифрованном профиле.</string>
+    <string name="look_scope_chat">В чатах</string>
+    <string name="look_scope_full">Весь экран</string>
+    <string name="look_wall_scope">Где фон</string>
+    <string name="look_dim">Затемнение: %1$d%%</string>
+    <string name="look_effect">Эффект</string>
+    <string name="look_effect_scope">Где эффект</string>
+    <string name="look_fx_none">Нет</string>
+    <string name="look_fx_rain">Дождь</string>
+    <string name="look_fx_snow">Снег</string>
+    <string name="look_fx_dust">Пыль</string>
+    <string name="look_fx_embers">Искры</string>
+    <string name="look_fx_stars">Звёзды</string>
 </resources>

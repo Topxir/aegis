@@ -1,5 +1,7 @@
 package org.aegis.messenger.ui
 
+import android.graphics.BitmapFactory
+import android.util.Base64
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -30,6 +32,18 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import kotlin.random.Random
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -89,11 +103,109 @@ fun Modifier.bubbleEdge(out: Boolean, shape: Shape): Modifier =
 
 val InBubbleColor = Color(0xFF161619)
 
-/** Chat background from the wallpaper setting. */
-fun Modifier.wallpaper(): Modifier = drawBehind {
-    when (Ui.look.wall) {
+/** Chat background from the wallpaper setting; empty when the wallpaper covers the whole app. */
+fun Modifier.wallpaper(): Modifier = drawBehind { if (Ui.look.wallScope != "full") paintWall() }
+
+/** Wallpaper for the Appearance preview, whatever its scope. */
+fun Modifier.wallPreview(): Modifier = drawBehind { paintWall() }
+
+/** Whole-app background, drawn only when the wallpaper scope is "full". */
+fun Modifier.backdrop(): Modifier = drawBehind { if (Ui.look.wallScope == "full") paintWall() }
+
+private fun DrawScope.paintWall() {
+    val l = Ui.look
+    when (l.wall) {
         "solid" -> drawRect(Ui.surface)
         "gradient" -> drawRect(Brush.linearGradient(Ui.accentStops.map { it.copy(alpha = 0.10f) }, Offset.Zero, Offset(size.width, size.height)))
+        "photo" -> photoBitmap(l.photo)?.let { img ->
+            val s = maxOf(size.width / img.width, size.height / img.height)
+            val cw = (size.width / s).toInt().coerceIn(1, img.width)
+            val ch = (size.height / s).toInt().coerceIn(1, img.height)
+            drawImage(
+                img, IntOffset((img.width - cw) / 2, (img.height - ch) / 2), IntSize(cw, ch),
+                dstSize = IntSize(size.width.toInt(), size.height.toInt()),
+            )
+            drawRect(Color.Black.copy(alpha = l.dim / 100f))
+        }
+    }
+}
+
+private var wallHash = 0
+private var wallLen = -1
+private var wallImg: ImageBitmap? = null
+
+private fun photoBitmap(b64: String): ImageBitmap? {
+    if (b64.isEmpty()) return null
+    if (b64.length != wallLen || b64.hashCode() != wallHash) {
+        wallLen = b64.length
+        wallHash = b64.hashCode()
+        wallImg = runCatching {
+            val b = Base64.decode(b64, Base64.NO_WRAP)
+            BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap()
+        }.getOrNull()
+    }
+    return wallImg
+}
+
+/** Particle effect for the given scope ("chat" or "full"); null when off. */
+@Composable
+fun rememberFx(scope: String): Fx? {
+    val l = Ui.look
+    if (l.effect == "none" || l.effectScope != scope || !animationsOn()) return null
+    val fx = remember(l.effect) { Fx(l.effect) }
+    LaunchedEffect(fx) { while (true) withFrameNanos { fx.tick(it) } }
+    return fx
+}
+
+/** Draws the effect over the content; pointer input passes through. */
+fun Modifier.fx(fx: Fx?): Modifier = if (fx == null) this else drawWithContent {
+    drawContent()
+    fx.draw(this)
+}
+
+class Fx(private val kind: String) {
+    private val n = when (kind) { "rain" -> 150; "snow" -> 110; "stars" -> 120; "dust" -> 70; else -> 60 }
+    private val r = Random(kind.hashCode())
+    private val x = FloatArray(n) { r.nextFloat() }
+    private val y = FloatArray(n) { r.nextFloat() }
+    private val v = FloatArray(n) { 0.4f + r.nextFloat() * 0.6f }
+    private val p = FloatArray(n) { r.nextFloat() * 6.2832f }
+    private var last = 0L
+    private var time by mutableFloatStateOf(0f)
+
+    fun tick(now: Long) {
+        val dt = if (last == 0L) 0f else ((now - last) / 1e9f).coerceAtMost(0.05f)
+        last = now
+        for (i in 0 until n) {
+            when (kind) {
+                "rain" -> { y[i] += dt * 1.6f * v[i]; x[i] += dt * 0.12f * v[i] }
+                "snow" -> { y[i] += dt * 0.07f * v[i]; x[i] += dt * 0.02f * sin(time * 0.8f + p[i]) }
+                "dust" -> { x[i] += dt * 0.015f * cos(p[i]); y[i] += dt * 0.012f * sin(p[i]); p[i] += dt * 0.2f * (v[i] - 0.7f) }
+                "embers" -> { y[i] -= dt * 0.09f * v[i]; x[i] += dt * 0.02f * sin(time * 1.3f + p[i]) }
+            }
+            if (y[i] > 1.02f) { y[i] = -0.02f; x[i] = r.nextFloat() }
+            if (y[i] < -0.02f) { y[i] = 1.02f; x[i] = r.nextFloat() }
+            if (x[i] > 1.02f) x[i] = -0.02f
+            if (x[i] < -0.02f) x[i] = 1.02f
+        }
+        time += dt
+    }
+
+    fun draw(d: DrawScope) = with(d) {
+        val t = time
+        val w = size.width
+        val h = size.height
+        val dp = density
+        for (i in 0 until n) {
+            val o = Offset(x[i] * w, y[i] * h)
+            when (kind) {
+                "rain" -> drawLine(Color.White.copy(alpha = 0.10f + 0.18f * v[i]), o, Offset(o.x + 3 * dp * v[i], o.y + 16 * dp * v[i]), 1.2f * dp)
+                "snow" -> drawCircle(Color.White.copy(alpha = 0.35f + 0.4f * v[i]), (1.2f + 2.4f * v[i]) * dp, o)
+                "dust" -> drawCircle(Color.White.copy(alpha = 0.10f + 0.25f * (0.5f + 0.5f * sin(t * 1.5f + p[i] * 3))), 1.1f * dp, o)
+                "embers" -> drawCircle(Ui.accent.copy(alpha = (0.25f + 0.55f * y[i]) * v[i]), (1f + 1.6f * v[i]) * dp, o)
+                else -> drawCircle(Color.White.copy(alpha = 0.15f + 0.6f * (0.5f + 0.5f * sin(t * (0.6f + v[i]) + p[i]))), (0.6f + 1.1f * v[i]) * dp, o)
+            }
+        }
     }
 }
 

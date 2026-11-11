@@ -188,6 +188,7 @@ pub enum Cmd {
         step: String,
     },
     PickMedia {},
+    PickWall {},
     Mute {},
     Pin {},
     InfoToggle {},

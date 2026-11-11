@@ -479,3 +479,24 @@ button.sti:hover { border-color: #38383e; color: var(--text); }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 .qr { display: block; width: 220px; height: 220px; border-radius: 8px; }
+
+/* wallpaper photo and screen effects; the photo comes from /wall/<tag>, dimmed by --dim */
+:root { --dim: .45; --wall-img: none; }
+:root[data-wall="photo"] .msgs, :root[data-wall="photo"] .pvmsgs {
+  background: linear-gradient(rgba(0, 0, 0, var(--dim)), rgba(0, 0, 0, var(--dim))), var(--wall-img) center / cover no-repeat;
+}
+:root[data-wscope="full"]:not([data-wall="none"]) .msgs, :root[data-wscope="full"]:not([data-wall="none"]) .main { background: transparent; }
+:root[data-wscope="full"][data-wall="solid"] body { background: color-mix(in srgb, var(--a1) 6%, #050506); }
+:root[data-wscope="full"][data-wall="gradient"] body { background: linear-gradient(160deg, color-mix(in srgb, var(--a1) 13%, #000), #000 55%, color-mix(in srgb, var(--a2) 10%, #000)) fixed; }
+:root[data-wscope="full"][data-wall="photo"] body {
+  background: linear-gradient(rgba(0, 0, 0, var(--dim)), rgba(0, 0, 0, var(--dim))), var(--wall-img) center / cover no-repeat fixed;
+}
+:root[data-wscope="full"]:not([data-wall="none"]) {
+  --side: rgba(7, 7, 8, .62);
+  --panel: rgba(14, 14, 16, .74);
+}
+:root[data-wscope="full"]:not([data-wall="none"]) .side,
+:root[data-wscope="full"]:not([data-wall="none"]) .info,
+:root[data-wscope="full"]:not([data-wall="none"]) .card { backdrop-filter: blur(14px); }
+.fx { position: fixed; left: 0; top: 0; pointer-events: none; z-index: 30; }
+.fx[hidden] { display: none; }

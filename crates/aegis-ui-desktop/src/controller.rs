@@ -390,6 +390,11 @@ impl Controller {
                     e.changed();
                 }
             }
+            Cmd::PickWall {} => {
+                if !self.is_busy() {
+                    self.job(Job::PickWall);
+                }
+            }
             Cmd::PickMedia {} => {
                 if let Some(chat) = self.current_chat() {
                     self.job(Job::PickMedia(chat));
