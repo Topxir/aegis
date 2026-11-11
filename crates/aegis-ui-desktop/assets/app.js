@@ -9,7 +9,6 @@
   var fresh = true;
   var curTab = 'all';
   var lbl = { lookup: '', today: 'Today', yesterday: 'Yesterday' };
-  var rm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
   var look = null;
   var tiltEl = null;
 
@@ -248,7 +247,6 @@
   // ---- appearance -----------------------------------------------------------
 
   function motion() {
-    if (rm && rm.matches) { return 'off'; }
     return look ? look.motion : 'subtle';
   }
 
@@ -829,7 +827,6 @@
   $('grip').addEventListener('pointermove', gripMove);
   $('grip').addEventListener('pointerup', gripUp);
   $('grip').addEventListener('pointercancel', gripUp);
-  if (rm && rm.addEventListener) { rm.addEventListener('change', function () { applyLook(look); }); }
 
   document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
   document.addEventListener('dragover', function (e) { e.preventDefault(); });
