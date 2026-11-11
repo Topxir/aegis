@@ -11,6 +11,7 @@ use aegis_core::text::sanitize_display_text;
 use serde_json::{json, Value};
 
 mod invite;
+mod state;
 
 /// Escapes text for use in element content and in quoted attribute values.
 pub fn esc(s: &str) -> String {
@@ -1902,6 +1903,7 @@ pub fn view(app: &App) -> Value {
         "lbl_today": tr(l, "date.today"),
         "lbl_yesterday": tr(l, "date.yesterday"),
         "hint": tr(l, "chat.hint"),
+        "m": state::model(app),
     })
 }
 
@@ -2083,6 +2085,22 @@ mod tests {
         }
         app.session = Some(s);
         app
+    }
+
+    #[test]
+    fn model_carries_chats_and_only_the_open_one_in_full() {
+        let mut app = app_with_payloads();
+        let u = app.session.as_ref().and_then(|s| s.data.dms.keys().next().cloned()).expect("dm");
+        app.route = Route::Chat(ChatRef::Dm(u.clone()));
+        let m = state::model(&app);
+        assert_eq!(m["me"]["u"], "alice");
+        assert_eq!(m["route"], format!("dm:{u}"));
+        let chats = m["chats"].as_array().expect("chats");
+        assert!(chats.iter().any(|c| c["id"] == format!("dm:{u}") && c["full"] == true));
+        assert!(chats.iter().filter(|c| c["full"] == false).all(|c| c["msgs"].as_array().is_some_and(|a| a.len() <= 1)));
+        assert!(m["contacts"].as_array().is_some_and(|a| !a.is_empty()));
+        app.session = None;
+        assert!(state::model(&app).is_null());
     }
 
     #[test]

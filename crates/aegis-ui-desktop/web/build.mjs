@@ -58,7 +58,7 @@ css = scopeCss(css);
 writeFileSync(out('entry.css'), css);
 
 // ── JS: one closure; only window.aegisEntry leaves it ──
-const files = ['core.js', 'scene3d.js', 'entry.js', 'bridge.js'];
+const files = ['core.js', 'scene3d.js', 'entry.js', 'crypto.js', 'shell.js', 'settings.js', 'main.js', 'bridge.js'];
 let js = files.map(f => `// ${f}\n` + src(f).replace(/^'use strict';\n/, '')).join('\n');
 js = js.replace('__I18N__', () => i18nJson).replace('__SPRITE__', () => JSON.stringify(sprite));
 js = "'use strict';\n(() => {\n" + js + '\n})();\n';

@@ -7,7 +7,7 @@ members = [
 exclude = ["apps", "builds", "crates/aegis-server"]
 
 [workspace.package]
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 authors = ["aegis-project <aegis-project@users.noreply.github.com>"]

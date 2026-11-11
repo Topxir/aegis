@@ -15,6 +15,7 @@ ENTRY.insertAdjacentHTML('beforeend', __SPRITE__);
 // ENV.leave: the gate is done, the messenger shows through as the entry fades out
 ENV.leave = () => {
   if (!entryOn) return;
+  if (S.acct) { AegisScene.rest(700); go('main', { tr: 'zoom' }); return; }
   entryOn = false;
   ENV.wait = null;
   AegisScene.rest(700);
@@ -27,7 +28,7 @@ ENV.leave = () => {
     });
 };
 
-const SCREENS = { splash: () => scrSplash(), onb: () => scrOnb(), auth: o => scrAuth(o), gate: o => scrGate(o) };
+const SCREENS = { splash: () => scrSplash(), onb: () => scrOnb(), auth: o => scrAuth(o), gate: o => scrGate(o), main: o => scrMain(o) };
 let curScr = null, scrName = '';
 function go(name, o = {}) {
   const app = $('#app');
@@ -63,6 +64,18 @@ function entryUpdate(s) {
     if (entryOn && scrName === 'auth' && !ENV.wait) go('auth', { tr: 'none', tab: ENV.cur ? ENV.cur() : ENV.tab });
   }
   ENV.tab = s.tab || ENV.tab;
+  if (s.authed && s.m) {
+    const sh = document.getElementById('shell');
+    if (sh) sh.hidden = true;
+    eng.update(s);
+    if (!entryOn) { entryOn = true; booted = true; ENTRY.hidden = false; ENTRY.getAnimations().forEach(a => a.cancel()); go('main', { tr: 'fade' }); return; }
+    if (scrName === 'main') return;
+    lastFlash = s.flash ? JSON.stringify(s.flash) : '';
+  } else if (scrName === 'main') {
+    S.acct = null; eng.m = null; lookApply(null);
+    $$('.scrim, .sheet, .menu', ENTRY).forEach(x => x.remove());
+    go('auth', { tr: 'fade' });
+  }
   const f = s.flash;
   const fk = f ? JSON.stringify(f) : '';
   if (fk !== lastFlash) {

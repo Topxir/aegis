@@ -250,6 +250,7 @@ function seg(el, value, onChange) {
     const b = btns().find(x => x.dataset.v === String(value));
     if (!b) { pill.style.opacity = 0; return; }
     pill.style.opacity = 1;
+    if (el.classList.contains('wrap')) { pill.style.top = b.offsetTop + 'px'; pill.style.height = b.offsetHeight + 'px'; pill.style.bottom = 'auto'; }
     sx.to = b.offsetLeft; sw.to = b.offsetWidth;
     if (instant || first || reduced) { sx.snap(); sw.snap(); render(); first = false; return; }
     if (!run || !run.live) run = runSprings([sx, sw], render);

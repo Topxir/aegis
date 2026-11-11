@@ -343,6 +343,7 @@ impl Look {
             "photo": if self.wallpaper == Wallpaper::Photo { format!("/wall/{}", self.photo_tag()) } else { String::new() },
             "fx": self.effect.id(),
             "fx_scope": self.effect_scope.id(),
+            "theme": self.theme,
             "cols": cols,
             "rows": rows,
             "areas": areas,
