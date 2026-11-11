@@ -36,19 +36,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "aegis-server"
-version = "0.2.5"
-dependencies = [
- "aegis-core",
- "serde_json",
-]
-
-[[package]]
 name = "aegis-ui-desktop"
 version = "0.2.5"
 dependencies = [
  "aegis-core",
- "aegis-server",
  "chacha20poly1305",
  "image",
  "qrcode",

@@ -48,7 +48,7 @@ if (-not $SkipTests) {
 
 # Build Windows binaries
 Write-Host "Building release binaries..."
-& cargo +stable-x86_64-pc-windows-gnu build --release -p aegis-ui-desktop -p aegis-server
+& cargo +stable-x86_64-pc-windows-gnu build --release -p aegis-ui-desktop
 if ($LASTEXITCODE -ne 0) {
     throw "Cargo build failed"
 }
@@ -73,15 +73,6 @@ if (Test-Path $torDest) {
 }
 New-Item -ItemType Directory -Path $torDest -Force | Out-Null
 Copy-Item -Path (Join-Path $torSource "*") -Destination $torDest -Recurse -Force
-
-# Copy server binary
-$serverDestDir = Join-Path $root "builds\server"
-if (-not (Test-Path $serverDestDir)) {
-    New-Item -ItemType Directory -Path $serverDestDir -Force | Out-Null
-}
-$serverSource = Join-Path $root "target\release\aegis-serverd.exe"
-$serverDest = Join-Path $serverDestDir "aegis-serverd.exe"
-Copy-Item -Path $serverSource -Destination $serverDest -Force
 
 # Copy WebView2Loader.dll if it exists
 $webview2Source = Join-Path $root "target\release\WebView2Loader.dll"
@@ -131,29 +122,10 @@ if (-not $SkipAndroid) {
     }
 }
 
-# Signed update: manifest and files for the server's <data-dir>/update
-$updateKey = if ($env:AEGIS_UPDATE_KEY) { $env:AEGIS_UPDATE_KEY } else { Join-Path $env:USERPROFILE ".aegis-update.key" }
-if (Test-Path $updateKey) {
-    Write-Host "Signing update manifest..."
-    $updateDir = Join-Path $root "builds\update"
-    $version = (Select-String -Path (Join-Path $root "Cargo.toml") -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-    # Seconds since 1970 keep the sequence growing even if builds/update was emptied.
-    $seq = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-    $signArgs = @("sign", "--key", $updateKey, "--out", $updateDir, "--version", $version, "--seq", "$seq", "--windows", $desktopDest)
-    $apk = Join-Path $root "builds\android-apk\aegis-messenger-release.apk"
-    if (-not $SkipAndroid -and (Test-Path $apk)) {
-        $gradle = Get-Content (Join-Path $root "apps\aegis-android\app\build.gradle.kts") -Raw
-        $code = [regex]::Match($gradle, 'versionCode = (\d+)').Groups[1].Value
-        $apkVersion = [regex]::Match($gradle, 'versionName = "([^"]+)"').Groups[1].Value
-        $signArgs += @("--android", $apk, "--android-code", $code, "--android-version", $apkVersion)
-    }
-    & (Join-Path $root "target\release\aegis-update.exe") @signArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Signing the update failed"
-    }
-}
-else {
-    Write-Warning "Update key not found ($updateKey); no signed update written"
+# Owner-only steps that are not part of the repository (publishing a signed update).
+$localSteps = Join-Path $PSScriptRoot "build.local.ps1"
+if (Test-Path $localSteps) {
+    & $localSteps -Root $root -DesktopExe $desktopDest -SkipAndroid:$SkipAndroid -SkipTests:$SkipTests
 }
 
 # Generate SHA256SUMS.txt
@@ -166,8 +138,7 @@ $filesToHash = @(
     (Join-Path $root "builds\android-apk\*.apk"),
     (Join-Path $root "builds\desktop\aegis-desktop.exe"),
     (Join-Path $root "builds\desktop\WebView2Loader.dll"),
-    (Join-Path $root "builds\desktop\tor\tor.exe"),
-    (Join-Path $root "builds\server\aegis-serverd.exe")
+    (Join-Path $root "builds\desktop\tor\tor.exe")
 )
 
 foreach ($pattern in $filesToHash) {
@@ -188,11 +159,7 @@ $text = if ($sumsContent.Count -gt 0) { ($sumsContent -join "`n") + "`n" } else 
 Write-Host ""
 Write-Host "Build complete. Artifacts:"
 Write-Host "  Windows:  builds/desktop/aegis-desktop.exe"
-Write-Host "  Server:   builds/server/aegis-serverd.exe"
 if (-not $SkipAndroid) {
     Write-Host "  Android:  builds/android-apk/aegis-messenger-release.apk (or -unsigned.apk)"
 }
 Write-Host "  Checksums: builds/SHA256SUMS.txt"
-if (Test-Path (Join-Path $root "builds\update\manifest.signed")) {
-    Write-Host "  Update:    builds/update/ (copy into the server's <data-dir>/update)"
-}

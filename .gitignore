@@ -39,14 +39,19 @@ Thumbs.db
 *.sqlite
 *.log
 
-# Релизные сборки в папке builds/ (APK для Android, ПК-клиент и сервер со статическим IP)
+# Релизные сборки в папке builds/ (APK для Android и ПК-клиент)
 !builds/
 !builds/**
 # APK больше 100 МБ (IPtProxy): прикладывается к GitHub Release, в git не хранится
 builds/android-apk/*.apk
 !builds/desktop/*.exe
 !builds/desktop/*.dll
-!builds/server/*.exe
+
+# The relay server is kept out of the repository
+crates/aegis-server/
+builds/server/
+scripts/build.local.ps1
+target-ui/
 *.WebView2/
 
 # Signing material

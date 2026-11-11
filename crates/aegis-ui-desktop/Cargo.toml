@@ -27,8 +27,5 @@ tao = "0.37.2"
 wry = "0.57.1"
 rfd = { version = "0.15", default-features = false }
 
-[dev-dependencies]
-aegis-server = { path = "../aegis-server" }
-
 [lints]
 workspace = true

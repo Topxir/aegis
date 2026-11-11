@@ -950,10 +950,9 @@ on they reach the onion address and never the clearnet entry. The client checks 
 size and SHA-256 against the manifest before it uses the file. Android also requires the APK to
 carry the same signing certificate and package name as the installed app.
 
-Publishing (owner): `scripts/build.ps1` signs with `~/.aegis-update.key` (or
-`AEGIS_UPDATE_KEY`) and writes `builds/update/` (manifest plus files, `seq` = Unix time).
-Copy the contents of that folder into the server's `<data-dir>/update/`; no restart is
-needed. By hand: `aegis-update sign --key <key> --out <dir> --version <v> --windows <exe>
+Publishing (owner): the signing tool writes the manifest plus the files into one folder
+(`seq` = Unix time); its contents go into the server's `<data-dir>/update/`, no restart is
+needed. `aegis-update sign --key <key> --out <dir> --version <v> --windows <exe>
 [--android <apk> --android-code <n>]`. A new key: `aegis-update keygen <path>` (never
 overwrites), then put the printed public key into both clients.
 

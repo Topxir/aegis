@@ -32,25 +32,24 @@ password; no phone number or e-mail. Status: **alpha, not externally audited.**
 | Path | |
 |---|---|
 | `crates/aegis-core` | Protocol v2: keys, sealed messages, groups, vault, proof of work, client |
-| `crates/aegis-server` | Directory and message queues (`aegis-serverd`) |
 | `crates/aegis-ui-desktop` | Windows client (WebView2) |
 | `apps/aegis-android` | Android client (Kotlin, Compose) |
-| `builds/` | Prebuilt binaries and server scripts |
+| `builds/` | Prebuilt binaries |
 
 ## Building
 
-Rust (Windows): `cargo build --release -p aegis-ui-desktop -p aegis-server`, tests:
+Rust (Windows): `cargo build --release -p aegis-ui-desktop`, tests:
 `cargo test --workspace`.
 
 Android (JDK 17, Android SDK 34): `cd apps/aegis-android && ./gradlew testDebugUnitTest assembleRelease`.
 The unit tests check the Kotlin implementation against `docs/test-vectors.json` produced by the
 Rust core.
 
-## Running a server
+## Server
 
-`aegis-serverd --bind 127.0.0.1 --port 8443 --data-dir <dir> [--blob-quota-mib 4096]`. It speaks plain HTTP and must be
-put behind a TLS terminator (Cloudflare Tunnel, Caddy, nginx) if it is reachable from outside;
-clients refuse `http://` to anything but loopback and `.onion`. See `builds/server/`.
+The relay server is not part of this repository. What a server has to do is specified in
+[docs/PROTOCOL.md](docs/PROTOCOL.md). Clients refuse `http://` to anything but loopback and
+`.onion`.
 
 ## License
 

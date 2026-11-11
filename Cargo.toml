@@ -2,10 +2,9 @@
 resolver = "2"
 members = [
     "crates/aegis-core",
-    "crates/aegis-server",
     "crates/aegis-ui-desktop",
 ]
-exclude = ["apps", "builds"]
+exclude = ["apps", "builds", "crates/aegis-server"]
 
 [workspace.package]
 version = "0.2.5"
@@ -16,7 +15,6 @@ repository = "https://github.com/aegis-project/aegis"
 
 [workspace.dependencies]
 aegis-core = { path = "crates/aegis-core" }
-aegis-server = { path = "crates/aegis-server" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

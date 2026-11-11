@@ -10,19 +10,17 @@ permissions:
 
 jobs:
   windows:
-    name: Desktop and server (Windows)
+    name: Desktop (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p aegis-ui-desktop -p aegis-server
+      - run: cargo build --release -p aegis-ui-desktop
       - uses: actions/upload-artifact@v4
         with:
           name: aegis-windows
-          path: |
-            target/release/aegis-desktop.exe
-            target/release/aegis-serverd.exe
+          path: target/release/aegis-desktop.exe
 
   android:
     name: Android APK (unsigned)
