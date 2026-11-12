@@ -1,19 +1,22 @@
-# Политика безопасности
+# Security policy
 
-## Как сообщить об уязвимости
-**Не создавайте публичный Issue.** Используйте приватный канал GitHub:
-вкладка **Security → Report a vulnerability** (Private vulnerability reporting).
-Сообщить можно анонимно. Личные данные не нужны.
+Aegis is an unaudited alpha. Do not rely on it where a compromise would put someone at risk.
 
-Укажите: затронутый модуль, шаги воспроизведения, влияние, версию.
+## Reporting a vulnerability
 
-## Что мы обещаем
-- Подтвердить получение в течение 7 дней
-- Держать вас в курсе по исправлению
-- Публично указать автора находки, только если он сам этого хочет
+Do not open a public issue. Use GitHub's private reporting: **Security → Report a vulnerability**.
+A pseudonymous account is fine. Include the affected component, steps to reproduce, impact and version.
 
-## Область
-Криптография, протокол, хранение ключей, обход PIN/пароля, утечки метаданных, побег из песочницы плагинов, подделка галочек ✓ и каталога серверов, deanonymization.
+We acknowledge reports within 7 days and credit the reporter only if they ask for it.
 
-## Статус
-Проект на этапе планирования. Внешнего аудита ещё не было, не используйте для критичных задач до Фазы 8.
+## In scope
+
+Cryptography and protocol (`docs/PROTOCOL.md`), key and vault storage, metadata leaks to the
+server or network, desktop UI injection (HTML/JS), Android app isolation, server denial of service.
+
+## Known limitations
+
+- No forward secrecy: a stolen identity key decrypts previously captured traffic.
+- The server sees which queue receives frames and when, and the username → public key directory.
+- With the default server, Cloudflare terminates TLS and sees client IP addresses.
+- The Android release build is signed with a debug key.

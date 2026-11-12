@@ -1,75 +1,89 @@
 package org.aegis.messenger
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
-import android.view.inputmethod.EditorInfo
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import org.aegis.messenger.core.AegisRustBridge
-import org.aegis.messenger.notify.AegisNotifications
-import org.aegis.messenger.service.AegisBackgroundService
-import org.aegis.messenger.ui.AegisComposeApp
+import org.aegis.messenger.app.AegisApp
+import org.aegis.messenger.app.Boot
+import org.aegis.messenger.app.Session
+import org.aegis.messenger.ui.AegisTheme
+import org.aegis.messenger.ui.Root
 
 class MainActivity : ComponentActivity() {
+    private val session: Session get() = (application as AegisApp).session
 
-    private lateinit var rustBridge: AegisRustBridge
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(Boot.localized(newBase))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_SECURE
-        )
-
-        rustBridge = AegisRustBridge(applicationContext)
-        AegisNotifications.ensureChannels(this)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        applySecure()
+        if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            runCatching {
-                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
-            }
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
-
-        runCatching {
-            val serviceIntent = Intent(this, AegisBackgroundService::class.java).apply {
-                action = AegisBackgroundService.ACTION_START_TRANSPORT
-            }
-            startForegroundService(serviceIntent)
-        }
-
+        if (savedInstanceState == null) takeLink(intent)
         setContent {
-            AegisComposeApp(
-                bridge = rustBridge,
-                onPanicWipeTriggered = {
-                    rustBridge.triggerEmergencyPanicWipe()
-                    runCatching {
-                        stopService(Intent(this, AegisBackgroundService::class.java))
-                    }
-                }
-            )
+            AegisTheme { Root(session) { recreate() } }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        takeLink(intent)
+    }
+
+    /** An opened `aegis://invite/` link waits in the session until the user acts on it. */
+    private fun takeLink(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val link = intent.dataString ?: return
+        if (link.startsWith("aegis://invite/", ignoreCase = true)) session.linkIn = link
+        intent.data = null
+    }
+
+    /**
+     * FLAG_SECURE follows the setting, on by default. With it off but the app lock on, the task
+     * switcher still gets no thumbnail, so no chat stays visible there while the app is locked.
+     */
+    fun applySecure() {
+        val secure = Boot.secureScreen(this)
+        if (secure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(!secure && !Boot.appLock(this))
     }
 
     override fun onResume() {
         super.onResume()
-        AegisNotifications.isAppForeground = true
+        applySecure()
     }
 
     override fun onPause() {
+        // Before Android 13 the thumbnail can only be kept out with FLAG_SECURE, set as the app leaves.
+        if (Build.VERSION.SDK_INT < 33 && Boot.appLock(this)) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         super.onPause()
-        AegisNotifications.isAppForeground = false
-        rustBridge.onAppBackgrounded()
     }
 
-    companion object {
-        fun secureKeyboardImeOptions(): Int {
-            return EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or EditorInfo.IME_ACTION_SEND
-        }
+    override fun onStart() {
+        super.onStart()
+        session.onForeground()
+        session.pollSoon()
+    }
+
+    override fun onStop() {
+        session.onBackground()
+        super.onStop()
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        session.touch()
     }
 }

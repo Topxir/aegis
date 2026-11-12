@@ -1,0 +1,21 @@
+#entry { position: fixed; inset: 0; z-index: 100; background: var(--void); color: var(--bone); font: 400 15px/1.45 var(--sans); overflow: hidden; }
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+/* look: themed outgoing bubbles, wallpaper, screen effects */
+.fx-cv { position: fixed; left: 0; top: 0; z-index: 40; pointer-events: none; }
+#app[data-theme]:not([data-theme="mono"]) .msg.out:not(.media) { background: var(--look-g); color: var(--look-ink); border-color: transparent; }
+#app[data-theme]:not([data-theme="mono"]) .msg.out:not(.media) .meta { color: color-mix(in srgb, var(--look-ink) 65%, transparent); }
+#app[data-wall="photo"] .ch-scroll { background: linear-gradient(rgba(0, 0, 0, var(--dim)), rgba(0, 0, 0, var(--dim))), var(--wall-img) center / cover no-repeat; }
+#app[data-wall="gradient"] .ch-scroll { background: linear-gradient(rgba(0, 0, 0, var(--dim)), rgba(0, 0, 0, var(--dim))), var(--look-g); }
+#app[data-wall="solid"] .ch-scroll { background: color-mix(in srgb, var(--look-a1) calc(30% - var(--dim) * 25%), var(--void)); }
+#app[data-wscope="full"][data-wall="photo"] .main { background: linear-gradient(rgba(0, 0, 0, var(--dim)), rgba(0, 0, 0, var(--dim))), var(--wall-img) center / cover no-repeat; }
+#app[data-wscope="full"][data-wall="gradient"] .main { background: linear-gradient(rgba(0, 0, 0, var(--dim)), rgba(0, 0, 0, var(--dim))), var(--look-g); }
+#app[data-wscope="full"][data-wall="solid"] .main { background: color-mix(in srgb, var(--look-a1) 22%, var(--void)); }
+#app[data-wscope="full"]:not([data-wall="none"]) :is(.pane-l, .pane-s, .pane-i, .ch-scroll, .st-panel) { background: rgba(8, 8, 10, .55); }
+#app[data-wscope="full"]:not([data-wall="none"]) .ch-scroll { background: transparent; }
+@media (max-width: 640px) {
+  .seg.wrap { flex-wrap: wrap; height: auto; border-radius: 18px; }
+  .seg.wrap > button { flex: 1 1 30%; height: calc(var(--h-seg) - 8px); }
+  .seg.wrap > .pill { border-radius: 14px; }
+}
+.check > .seg > button { flex: 0 0 auto; }

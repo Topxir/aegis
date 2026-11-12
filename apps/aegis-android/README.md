@@ -1,16 +1,13 @@
-# Aegis Android (`apps/aegis-android`)
+# Aegis for Android
 
-Android-клиент мессенджера **Aegis** на Jetpack Compose (`v0.1.0-alpha`, неаудированный прототип).
+Kotlin and Jetpack Compose client for protocol v2 (`docs/PROTOCOL.md`). Unaudited alpha.
 
-## Что реализовано в приложении
-- **Без сторонних аналитических SDK и Google Play Services:** только стандартные библиотеки AndroidX и Jetpack Compose, 0 разрешений на микрофон и камеру.
-- **Защита окна и ввода:** `FLAG_SECURE` (запрет скриншотов и превью в списке недавних задач), `excludeFromRecents="true"`, `android:allowBackup="false"`, флаг инкогнито-клавиатуры `IME_FLAG_NO_PERSONALIZED_LEARNING`.
-- **Функции клиента:**
-  - Полное переключение языка интерфейса `RU / EN`.
-  - Подключение к серверу `aegis-serverd` по `host:port`, настройка `SOCKS5h` прокси и релея, переключатель блокировки сети (`Kill Switch`).
-  - Создание чатов по общему коду канала, локальный фильтр поиска, PIN-код на чат, таймер исчезающих сообщений и проверка текста перед отправкой (`LeakGuard`).
+- `core/` pure Kotlin protocol and crypto on the BouncyCastle lightweight API; verified against `docs/test-vectors.json`.
+- `net/` HTTPS client, endpoint rules, SOCKS5 with remote DNS.
+- `data/` vault model and its JSON codec; `app/` session, service, notifications; `ui/` Compose screens.
 
-## Сборка APK
-```bash
-./gradlew assembleRelease
-```
+Build and test:
+
+    JAVA_HOME=<jdk17> ./gradlew testDebugUnitTest assembleRelease
+
+The release build is signed with the debug key; replace it before distributing.

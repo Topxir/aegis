@@ -1,17 +1,10 @@
-# Участие в проекте
+# Contributing
 
-## Анонимность участников
-- Можно работать под псевдонимом, личные данные не нужны.
-- Перед первым коммитом настройте git (см. docs/GITHUB_SETUP.md): имя и почта только проектные/noreply.
-- Не отправляйте файлы с метаданными (EXIF, имя автора в документах).
-
-## Правила
-1. Прочитайте `AGENTS.md`, он действует и для людей, и для ИИ-агентов.
-2. Работайте по задаче `docs/tasks/T-XXXX.md`. Нет задачи — откройте Issue.
-3. Никакой самописной криптографии, телеметрии и сторонних SDK в ядре.
-4. Каждое изменение: тесты, обновлённая документация, запись в `docs/reports/` для крупных задач.
-5. Коммиты: `T-XXXX: что и зачем`.
-6. Уязвимости: только через `SECURITY.md`.
-
-## Pull Request
-Используйте шаблон PR. Изменения протокола и публичных API требуют метки `contract-change` и записи в `docs/DECISIONS.md`.
+- Pseudonyms are welcome. Configure git with a noreply address before your first commit.
+- No custom cryptography, telemetry or third-party analytics SDKs.
+- Protocol changes start with `docs/PROTOCOL.md` and `docs/test-vectors.json`; both clients must
+  pass the vectors.
+- Before a pull request: `cargo fmt --all`, `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace`, and `./gradlew testDebugUnitTest` for Android changes.
+- Tests must never touch real user data: use temporary directories.
+- Report vulnerabilities privately, see `SECURITY.md`.

@@ -1,3 +1,9 @@
-# Aegis Messenger ProGuard / R8 Rules
--keep class org.aegis.messenger.** { *; }
+-keep class org.aegis.messenger.core.** { *; }
+-keep class org.bouncycastle.crypto.** { *; }
+-dontwarn org.bouncycastle.**
 -dontwarn kotlin.**
+-keep class org.torproject.jni.** { *; }
+-keep class net.freehaven.tor.control.** { *; }
+-keep class go.** { *; }
+-keep class IPtProxy.** { *; }
+-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }

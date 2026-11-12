@@ -1,17 +1,32 @@
-# Сборки Aegis (`builds/`)
+# Builds
 
-> ⚠ **Примечание:** артефакты в этой папке — **неаудированный прототип (`v0.1.0-alpha`, unaudited)**. Не используйте их для критически чувствительной переписки до завершения миграции криптоядра по плану [`docs/security-reset/`](../docs/security-reset/).
+This folder contains prebuilt artifacts.
 
-## 1. 📱 `builds/android-apk/aegis-messenger-release.apk`
-- APK для Android 9.0+ (`minSdk 28`, `targetSdk 34`) на базе Jetpack Compose (русский и английский язык `RU / EN`, `FLAG_SECURE`, `excludeFromRecents="true"`, `allowBackup="false"`, инкогнито-клавиатура, `LeakGuard`, без Google Play Services и без разрешений на микрофон/камеру).
-- Поддерживает подключение к вашему серверу `aegis-serverd` (`host:port`), `SOCKS5h` прокси, релею и блокировку сети (`Kill Switch`).
+- `android-apk/aegis-messenger-release.apk` - Android client. It is larger than GitHub's 100 MB file limit, so it is not stored in git: download it from the GitHub Release of the same tag. Its checksum is in `SHA256SUMS.txt`.
+- `desktop/aegis-desktop.exe` - Windows desktop client
+- `SHA256SUMS.txt` - SHA256 checksums for the artifacts above
 
-## 2. 🖥 `builds/desktop/aegis-desktop.exe` + `builds/desktop/WebView2Loader.dll`
-- Нативный десктопный клиент для Windows (`tao 0.37.2` + `wry 0.57.1` поверх системного WebView2, `windows_subsystem = "windows"` — запускается сразу в окне приложения без консоли).
-- Навигация WebView ограничена локальным адресом `http://127.0.0.1:<port>`, всплывающие окна, внешние разрешения и DevTools отключены.
-- Для запуска держите `WebView2Loader.dll` в одной папке с `aegis-desktop.exe`.
+To verify checksums from the repository root:
 
-## 3. 🌐 `builds/server/`
-- **`aegis-serverd.exe`** — сервер очередей (`--bind=127.0.0.1 --port=8443`, фиксированные блоки `256..16384 B`, проверка `auth_hash` / `read_token`, пересылка `/api/v1/queue/relay` и `/api/v1/queue/relay_poll`).
-- **`start-hidden-server.bat`** — запускает сервер без раскрытия IP вашего ПК через исходящий Anycast-туннель (встроенные доверенные узлы: `104.21.53.92:80`, `172.67.211.53:80`, `freeoasis.space:80`).
-- **`deploy-static-ip-vps.sh`** и **`docker-compose.yml`** — шаблоны запуска сервера в Docker на Linux VPS.
+```sh
+sha256sum -c SHA256SUMS.txt
+```
+
+On Windows, you can check a file with:
+
+```powershell
+Get-FileHash <file> -Algorithm SHA256
+```
+
+## Building
+
+The artifacts are produced by `scripts/build.ps1`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build.ps1 [-SkipAndroid] [-SkipTests]
+```
+
+- `-SkipTests` - skips running the Rust workspace tests (`cargo +stable-x86_64-pc-windows-gnu test --workspace`) and Clippy (`cargo +stable-x86_64-pc-windows-gnu clippy --workspace --all-targets -- -D warnings`) before building the Windows binaries.
+- `-SkipAndroid` - skips the Android build (`gradlew testDebugUnitTest assembleRelease`) and skips copying the APK into `builds/android-apk/`.
+
+Without flags, the script builds the Windows binaries, builds Android, and regenerates `SHA256SUMS.txt`.

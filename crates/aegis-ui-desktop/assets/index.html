@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aegis</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/entry.css">
+<script src="/entry.js" defer></script>
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div id="auth" class="auth" hidden></div>
+<div id="shell" class="shell" hidden>
+  <aside class="side">
+    <div class="searchrow">
+      <button id="burger" type="button" class="ib" data-ui="drawer"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <div class="filterwrap">
+        <svg class="i s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+        <input id="filter" class="filter" type="search" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+    <div id="tabs" class="tabs2"></div>
+    <nav id="list" class="list"></nav>
+    <button id="lookup" type="button" class="lookup" data-ui="lookup" hidden></button>
+    <div id="sidefoot" class="sidefoot"></div>
+    <div id="drawerscrim" class="drscrim" data-ui="drawer" hidden></div>
+    <div id="drawer" class="drawer"></div>
+    <div id="grip" class="grip" aria-hidden="true"></div>
+  </aside>
+  <main class="main">
+    <header id="head" class="head"></header>
+    <div id="msgbar" class="msgbar" hidden><input id="msgq" type="search" autocomplete="off" spellcheck="false"></div>
+    <div id="toast" class="toast"></div>
+    <div id="msgs" class="msgs" hidden></div>
+    <div id="page" class="page" hidden></div>
+    <div id="composer" class="composer" hidden>
+      <div class="cbox">
+        <button id="attach" type="button" class="ib" data-act="pick_media"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9.5 17.3a1.7 1.7 0 0 1-2.4-2.4L15 7"/></svg></button>
+        <textarea id="input" rows="1" maxlength="1200" autocomplete="off"></textarea>
+        <button id="send" type="button" class="sendbtn" data-act="send_current" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+      </div>
+      <p id="hint" class="hint"></p>
+    </div>
+    <div id="bar" class="barwrap" hidden></div>
+  </main>
+  <aside id="info" class="info" hidden></aside>
+</div>
+<div id="overlay" class="overlay" hidden></div>
+<div id="guide" class="guide" hidden></div>
+<div id="lightbox" class="lightbox" hidden><button id="lbclose" type="button" class="ib" data-ui="lbclose" aria-label="Close">&times;</button><div id="lbbody" class="lbbody"></div></div>
+<div id="entry" hidden><canvas id="gl" aria-hidden="true"></canvas><div id="app"></div><div id="layer"></div><div id="live" class="sr" aria-live="polite"></div></div>
+</body>
+</html>

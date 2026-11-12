@@ -1,8 +1,8 @@
-name: Aegis CI
+name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "redesign"]
   pull_request:
     branches: ["main"]
 
@@ -11,57 +11,46 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
 
 jobs:
-  check-and-test:
-    name: Format, Clippy, Test & Secret Scan
-    runs-on: ubuntu-latest
+  rust:
+    name: Rust (Windows)
+    runs-on: windows-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          fetch-depth: 0
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
           components: rustfmt, clippy
-
-      - name: Cache Cargo registry & build
-        uses: Swatinem/rust-cache@v2
-
-      - name: Secret & PII Scan
+      - uses: Swatinem/rust-cache@v2
+      - name: Secret scan
+        shell: bash
         run: bash ./scripts/check-secrets.sh
-
-      - name: Check formatting (rustfmt)
+      - name: Format
         run: cargo fmt --all -- --check
-
-      - name: Run Clippy (strict zero-unwrap / zero-unsafe)
+      - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Run Workspace Tests
+      - name: Test
         run: cargo test --workspace --all-targets
 
-  supply-chain-audit:
-    name: Cargo Audit & Cargo Deny
+  android:
+    name: Android unit tests
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          toolchain: stable
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Unit tests (protocol vectors)
+        working-directory: apps/aegis-android
+        run: ./gradlew testDebugUnitTest
 
-      - name: Run cargo-deny (licenses, bans, advisories, sources)
-        uses: EmbarkStudios/cargo-deny-action@v2
+  supply-chain:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-
-      - name: Run cargo-audit
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
