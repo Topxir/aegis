@@ -114,6 +114,7 @@ pub(super) fn model(app: &App) -> Value {
         "duress": app.duress_on,
         "invite": invite,
         "update": format!("{:?}", app.update.status),
+        "update_pct": app.update.pct,
         "requests": d.pending.iter().map(|p| json!({ "x": hex(&p.x), "first": p.first_ms })).collect::<Vec<_>>(),
         "tor": { "state": tor, "p": p },
         "set": {

@@ -38,6 +38,8 @@ pub struct State {
     /// Download even with auto-update off (the user asked).
     force: bool,
     staged: Option<(PathBuf, Artifact)>,
+    /// Download progress in percent.
+    pub pct: u8,
 }
 
 impl State {
@@ -48,6 +50,7 @@ impl State {
             running: false,
             force: false,
             staged: None,
+            pct: 0,
         }
     }
 
@@ -225,10 +228,17 @@ impl Engine {
             return Status::Available(a.version);
         }
         {
-            self.app().update.status = Status::Downloading(a.version.clone());
+            let mut app = self.app();
+            app.update.status = Status::Downloading(a.version.clone());
+            app.update.pct = 0;
         }
         self.changed();
-        match fetch(&data, &a, |off| client.update_chunk(&a.name, off)) {
+        let size = a.size.max(1);
+        match fetch(&data, &a, |off| {
+            self.app().update.pct = (off.saturating_mul(100) / size).min(99) as u8;
+            self.changed();
+            client.update_chunk(&a.name, off)
+        }) {
             Ok(path) => {
                 let version = a.version.clone();
                 self.app().update.staged = Some((path, a));

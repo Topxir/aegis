@@ -20,8 +20,8 @@ android {
         applicationId = "org.aegis.messenger"
         minSdk = 28
         targetSdk = 34
-        versionCode = 9
-        versionName = "0.3.1"
+        versionCode = 10
+        versionName = "0.3.2"
 
         // tor-android ships one native library per ABI; 32-bit x86 devices are not worth the extra size.
         ndk {

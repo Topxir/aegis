@@ -276,7 +276,8 @@ fun WebEntry(session: Session) {
 
     val tor = Tor.status
     val upd = Updater.state
-    LaunchedEffect(ready, d, tab, flash, jsErr, viewing, lang, route, session.busy, session.pinSet, session.pinGhost, session.duressSet, session.inviteLink, tor, upd, session.requestTick) {
+    val updPct = Updater.pct
+    LaunchedEffect(ready, d, tab, flash, jsErr, viewing, lang, route, session.busy, session.pinSet, session.pinGhost, session.duressSet, session.inviteLink, tor, upd, updPct, session.requestTick) {
         if (!ready) return@LaunchedEffect
         val f = jsErr?.let { JSONObject().put("ok", false).put("text", it) } ?: flash?.let { JSONObject().put("ok", it.first).put("text", text(it.second)) }
         val s = JSONObject().put("authed", authed).put("tab", tab).put("lang", lang).put("flash", f ?: JSONObject.NULL)
@@ -366,7 +367,7 @@ private fun model(ctx: android.content.Context, s: Session, d: VaultData, route:
             .put("particles", d.profile.particles.wire).put("ed", Hex.encode(Crypto.ed25519Public(d.edSk))).put("x", Hex.encode(x)).put("fp", s.keyFingerprint(x)))
         .put("version", org.aegis.messenger.BuildConfig.VERSION_NAME)
         .put("route", route).put("busy", s.busy).put("pin", s.pinSet).put("duress", s.duressSet).put("invite", inv)
-        .put("update", Updater.state.name)
+        .put("update", Updater.state.name).put("update_pct", Updater.pct)
         .put("requests", arr(s.requests().map { JSONObject().put("x", it.first).put("first", 0) }))
         .put("tor", JSONObject().put("state", tor).put("p", p))
         .put("set", JSONObject().put("idle", st.idleLockMin).put("lock", st.appLock).put("lockMin", st.backgroundLockMin == 0).put("protect", Boot.secureScreen(ctx))

@@ -33,7 +33,7 @@ fun UpdateSettings() {
             )
         }
         when (Updater.state) {
-            UpdateState.Checking -> Note(stringResource(R.string.update_checking))
+            UpdateState.Checking, UpdateState.Downloading -> Note(stringResource(R.string.update_checking))
             UpdateState.Current -> Note(stringResource(R.string.update_current), Ui.accent)
             UpdateState.Ready -> Note(stringResource(R.string.update_ready, Updater.version), Ui.accent)
             UpdateState.Failed -> Note(stringResource(R.string.update_failed), Ui.danger)
@@ -44,7 +44,7 @@ fun UpdateSettings() {
             Primary(stringResource(R.string.update_install)) { allow = !Updater.install(ctx) }
             if (allow) Note(stringResource(R.string.update_allow))
         } else {
-            Secondary(stringResource(R.string.update_check), enabled = Updater.state != UpdateState.Checking) { Updater.checkNow() }
+            Secondary(stringResource(R.string.update_check), enabled = Updater.state != UpdateState.Checking && Updater.state != UpdateState.Downloading) { Updater.checkNow() }
         }
         Note(stringResource(R.string.update_note))
     }

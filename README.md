@@ -30,6 +30,9 @@ The `redesign` branch carries the new black interface and an appearance section 
 In progress: visual effects over the screen (rain, snow) and a photo wallpaper for chats or the
 whole interface. These are not finished.
 
+Version 0.3.2 shows download progress while an update is fetched; before, the screen stayed on
+"Checking for updates" for the whole download.
+
 Version 0.3.1: after the app is minimized or the phone is locked, an account with a PIN opens
 to the PIN keypad instead of the sign-in tabs. The official Aegis channel accepts posts from
 `@owner` only, signed with the owner key built into the app.
@@ -131,6 +134,9 @@ AGPL-3.0-or-later.
 
 В ветке `redesign` новый чёрный интерфейс и раздел настроек внешнего вида. В работе: визуальные
 эффекты поверх экрана (дождь, снег) и фото-обои для чатов или всего интерфейса. Это ещё не готово.
+
+В версии 0.3.2 во время скачивания обновления виден прогресс; раньше весь процесс висела надпись
+«Проверяю обновления».
 
 В версии 0.3.1 после сворачивания приложения или блокировки телефона аккаунт с PIN-кодом
 открывается на клавиатуре PIN, а не на вкладках входа. В официальный канал Aegis может писать

@@ -444,7 +444,11 @@ function stAbout() {
     res.hidden = false; res.className = 'stat'; res.replaceChildren(h('span', t('upd.checking')));
     busy(chk, true);
     send('update_now');
-    const u = await eng.until(m => !/^(Idle|Checking|Downloading)/.test(m.update), 90000).then(m => m.update, () => 'Failed');
+    // a manual check also downloads; the build is ~16 MB in 1 MB chunks, slow over Tor, so show the progress
+    const u = await eng.until(m => {
+      if (/^Downloading/.test(m.update) && res.isConnected) res.replaceChildren(h('span', t('upd.downloading') + (m.update_pct != null ? ' · ' + m.update_pct + '%' : '')));
+      return !/^(Idle|Checking|Downloading)/.test(m.update);
+    }, 30 * 60000).then(m => m.update, () => 'Failed');
     busy(chk, false);
     if (!res.isConnected) return;
     const k = /^Current/.test(u) ? 'd.upd_none' : /^Ready/.test(u) ? 'upd.ready' : /^Available/.test(u) ? 'upd.available' : 'upd.failed';

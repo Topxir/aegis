@@ -28,7 +28,7 @@ import java.io.FileOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-enum class UpdateState { Idle, Checking, Current, Ready, Failed, Rejected }
+enum class UpdateState { Idle, Checking, Downloading, Current, Ready, Failed, Rejected }
 
 /** True if [f] is exactly the file [a] describes. */
 fun isStaged(f: File, a: Update.Artifact): Boolean {
@@ -71,6 +71,8 @@ object Updater {
     var state by mutableStateOf(UpdateState.Idle)
         private set
     var version by mutableStateOf("")
+    /** Download progress in percent while [state] is Downloading. */
+    var pct by mutableStateOf(0)
         private set
 
     private var app: Context? = null
@@ -122,7 +124,12 @@ object Updater {
             if (offer !is Update.Offer.Newer) return finish(ctx, UpdateState.Current)
             val a = offer.artifact
             if (!a.name.endsWith(".apk")) throw AegisException.Update("file name")
-            val apk = stageUpdate(dir(ctx), a) { off -> client.updateChunk(a.name, off) }
+            pct = 0
+            state = UpdateState.Downloading
+            val apk = stageUpdate(dir(ctx), a) { off ->
+                pct = (off * 100 / maxOf(a.size, 1L)).toInt().coerceAtMost(99)
+                client.updateChunk(a.name, off)
+            }
             if (!sameSigner(ctx, apk, a.code)) {
                 apk.delete()
                 throw AegisException.Update("apk signer")
