@@ -387,6 +387,15 @@ impl Engine {
         r
     }
 
+    pub(super) fn net_send_official(&self, c: &Client, sk: &[u8; 32], padded: &[u8]) -> Result<u64, Error> {
+        self.slot(2 * padded.len());
+        let r = c.send_official(sk, padded);
+        if let Ok(seq) = &r {
+            self.got(json_len(&json!({"seq": seq})));
+        }
+        r
+    }
+
     pub(super) fn net_blob_put(&self, c: &Client, id: &[u8; 32], data: &[u8]) -> Result<(), Error> {
         self.slot(data.len());
         let r = c.blob_put(id, data);

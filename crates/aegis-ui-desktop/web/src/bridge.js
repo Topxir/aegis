@@ -28,8 +28,10 @@ ENV.leave = () => {
     });
 };
 
-const SCREENS = { splash: () => scrSplash(), onb: () => scrOnb(), auth: o => scrAuth(o), gate: o => scrGate(o), main: o => scrMain(o) };
+const SCREENS = { splash: () => scrSplash(), onb: () => scrOnb(), auth: o => scrAuth(o), gate: o => scrGate(o), lock: o => scrLock(o), main: o => scrMain(o) };
 let curScr = null, scrName = '';
+// a locked account with a PIN gets the keypad, everything else the sign-in tabs
+const authScr = () => (ENV.lock && ENV.lock.user ? 'lock' : 'auth');
 function go(name, o = {}) {
   const app = $('#app');
   const prev = curScr;
@@ -64,6 +66,7 @@ function entryUpdate(s) {
     if (entryOn && scrName === 'auth' && !ENV.wait) go('auth', { tr: 'none', tab: ENV.cur ? ENV.cur() : ENV.tab });
   }
   ENV.tab = s.tab || ENV.tab;
+  if (!s.authed) ENV.lock = s.lock || null;
   if (s.authed && s.m) {
     const sh = document.getElementById('shell');
     if (sh) sh.hidden = true;
@@ -74,7 +77,7 @@ function entryUpdate(s) {
   } else if (scrName === 'main') {
     S.acct = null; eng.m = null; lookApply(null);
     $$('.scrim, .sheet, .menu', ENTRY).forEach(x => x.remove());
-    go('auth', { tr: 'fade' });
+    go(authScr(), { tr: 'fade' });
   }
   const f = s.flash;
   const fk = f ? JSON.stringify(f) : '';
@@ -93,7 +96,7 @@ function entryUpdate(s) {
       ENTRY.hidden = false;
       ENTRY.getAnimations().forEach(a => a.cancel());
       document.documentElement.lang = LANG;
-      go(booted ? 'auth' : 'splash', { tr: 'fade' });
+      go(booted ? authScr() : 'splash', { tr: 'fade' });
       booted = true;
     }
     return;
@@ -103,7 +106,7 @@ function entryUpdate(s) {
   const w = ENV.wait;
   ENV.wait = null;
   if (scrName === 'gate' && w && w.ok) w.ok();
-  else if (scrName === 'auth') go('gate', { acct: { username: (w && w.user) || '' }, tr: 'push' });
+  else if (scrName === 'auth' || scrName === 'lock') go('gate', { acct: { username: (w && w.user) || '' }, tr: 'push' });
   else ENV.leave();
 }
 

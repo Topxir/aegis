@@ -731,6 +731,10 @@ html.rm #entry .spin, html.rm #entry .btn.busy::after, html.rm #entry .chip.busy
 #entry .key.fn{ border-color: transparent; background: transparent; font: 500 12px/1.1 var(--sans); color: var(--fog); }
 #entry .key.fn:hover{ color: var(--bone); background: var(--ash); }
 #entry .key svg{ width: 24px; height: 24px; }
+#entry .lock .pinbox{ gap: 14px; margin-top: 4vh; }
+#entry .lk-user{ font-size: 13px; color: var(--fog); letter-spacing: .02em; }
+#entry .lock .e-title{ margin: 0; }
+#entry .lk-msg{ min-height: 18px; margin: 0; font-size: 13px; color: var(--danger); }
 @media (max-height: 700px){#entry .keypad{ grid-template-columns: repeat(3, 58px); gap: 8px 18px; }
 #entry .key{ width: 58px; height: 58px; font-size: 22px; }
  }

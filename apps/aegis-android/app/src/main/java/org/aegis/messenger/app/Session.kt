@@ -1827,7 +1827,7 @@ class Session(private val ctx: Context) {
             key.startsWith("g:") -> if (d.group(key.removePrefix("g:")) == null) return false
             key.startsWith("c:") -> {
                 val ch = d.channel(key.removePrefix("c:")) ?: return false
-                if (!ch.mine(d.username)) return false
+                if (!ch.postable(d.username, d.edSk)) return false
             }
             else -> return false
         }
@@ -1917,11 +1917,16 @@ class Session(private val ctx: Context) {
                         sendPairwise(client, d, id, c, env)
                     } else if (key.startsWith("c:")) {
                         val ch = d.channel(key.removePrefix("c:")) ?: throw AegisException.GroupMismatch()
-                        if (!ch.mine(d.username) || ch.official) throw AegisException.SenderMismatch()
+                        if (!ch.postable(d.username, d.edSk)) throw AegisException.SenderMismatch()
                         val kind = if (media != null) Kind.Cmf else Kind.Cmsg
                         val env = Envelope(kind, m.id, d.username, m.senderName, id.edPublic, m.tsMs, m.ttlS, ch.id, body)
-                        val to = synchronized(d.fs) { d.fs.audience[key]?.toList() ?: emptyList() }
-                        sendSenderKeyFrame(client, d, id, key, SkScope.Channel, ch.secret, to, ChannelCrypto.queue(ch.secret), env)
+                        if (ch.official) {
+                            // signed with the owner key under the public secret; the server checks the extra signature
+                            client.sendOfficial(id.edSecret, ChannelCrypto.sealPost(Official.g(), id.edSecret, env))
+                        } else {
+                            val to = synchronized(d.fs) { d.fs.audience[key]?.toList() ?: emptyList() }
+                            sendSenderKeyFrame(client, d, id, key, SkScope.Channel, ch.secret, to, ChannelCrypto.queue(ch.secret), env)
+                        }
                     } else {
                         val g = d.group(key.removePrefix("g:")) ?: throw AegisException.GroupMismatch()
                         val kind = if (m.timer != null) Kind.Gttl else if (media != null) Kind.Gmf else Kind.Gmsg

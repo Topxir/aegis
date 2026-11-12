@@ -22,7 +22,8 @@ const mnChat = id => S.acct && S.acct.chats.find(c => c.id === id);
 const mnContact = u => S.acct && S.acct.contacts.find(c => c.username === u);
 const mnLast = c => c.msgs[c.msgs.length - 1];
 const mnOwner = c => c.kind === 'channel' && c.owner === S.acct.username;
-const mnCanWrite = c => c.kind === 'dm' || c.kind === 'group' || mnOwner(c);
+// the official channel takes posts only from the account holding the compiled-in owner key
+const mnCanWrite = c => c.kind === 'dm' || c.kind === 'group' || mnOwner(c) || (c.kind === 'official' && !!c.mine);
 function mnTitle(c) {
   if (c.kind !== 'dm') return c.title;
   const k = mnContact(c.peer);

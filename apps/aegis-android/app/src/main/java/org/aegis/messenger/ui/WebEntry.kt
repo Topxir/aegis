@@ -276,7 +276,7 @@ fun WebEntry(session: Session) {
 
     val tor = Tor.status
     val upd = Updater.state
-    LaunchedEffect(ready, d, tab, flash, jsErr, viewing, lang, route, session.busy, session.pinSet, session.duressSet, session.inviteLink, tor, upd, session.requestTick) {
+    LaunchedEffect(ready, d, tab, flash, jsErr, viewing, lang, route, session.busy, session.pinSet, session.pinGhost, session.duressSet, session.inviteLink, tor, upd, session.requestTick) {
         if (!ready) return@LaunchedEffect
         val f = jsErr?.let { JSONObject().put("ok", false).put("text", it) } ?: flash?.let { JSONObject().put("ok", it.first).put("text", text(it.second)) }
         val s = JSONObject().put("authed", authed).put("tab", tab).put("lang", lang).put("flash", f ?: JSONObject.NULL)
@@ -284,6 +284,11 @@ fun WebEntry(session: Session) {
             if (viewing && route.isNotEmpty() && d.chat(keyOf(route)).unread > 0) session.markRead(keyOf(route))
             s.put("m", model(ctx, session, d, route, lang, media, Updater.auto(ctx)))
             s.put("look", lookJson(d.look))
+        } else {
+            // locked with a PIN: the page shows the keypad for this account instead of the sign-in tabs
+            val u = Boot.pinUser(ctx)
+            if (u.isNotEmpty() && (session.pinSet || session.pinGhost))
+                s.put("lock", JSONObject().put("user", u).put("digits", session.pinDigits))
         }
         web.evaluateJavascript("window.aegisEntry&&aegisEntry.update($s)", null)
     }
@@ -341,7 +346,7 @@ private fun model(ctx: android.content.Context, s: Session, d: VaultData, route:
     }
     for (g in d.groups) chat(groupKey(g.id), g.ttlS, JSONObject().put("kind", "group").put("title", g.name).put("owner", g.creator).put("members", arr(g.members)))
     for (c in d.channels) chat(channelKey(c.id), 0, JSONObject().put("kind", if (c.official) "official" else "channel").put("title", c.name)
-        .put("about", "").put("owner", c.owner).put("mine", c.mine(d.username)).put("subs", JSONArray()).put("warn", false))
+        .put("about", "").put("owner", c.owner).put("mine", c.postable(d.username, d.edSk)).put("subs", JSONArray()).put("warn", false))
     val contacts = arr(d.contacts.map { c ->
         JSONObject().put("u", c.username).put("name", c.title.ifEmpty { c.username }).put("ed", Hex.encode(c.ed)).put("x", Hex.encode(c.x))
             .put("verified", c.verified).put("sn", s.safetyNumber(c) ?: "").put("fp", s.keyFingerprint(c.x)).put("about", c.about).put("changed", c.keyChanged)

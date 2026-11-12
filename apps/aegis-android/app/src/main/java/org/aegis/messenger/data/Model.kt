@@ -77,6 +77,11 @@ class Channel(
     val official: Boolean = false,
 ) {
     fun mine(me: String) = !official && owner == me
+    /** Own channels, plus the official one for `owner` holding the compiled-in key. */
+    fun postable(me: String, edSk: ByteArray): Boolean =
+        if (!official) owner == me
+        else me == org.aegis.messenger.core.Official.OWNER &&
+            org.aegis.messenger.core.Official.OWNER_ED_PK?.contentEquals(org.aegis.messenger.core.Crypto.ed25519Public(edSk)) == true
 }
 
 class ChatPrefs(val pinned: Boolean = false, val muted: Boolean = false)

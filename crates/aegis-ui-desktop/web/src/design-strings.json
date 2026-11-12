@@ -166,5 +166,17 @@
   "look.fx_stars": [
     "Stars",
     "Звёзды"
+  ],
+  "d.lock_title": [
+    "Enter your PIN",
+    "Введите PIN"
+  ],
+  "d.use_password": [
+    "Password",
+    "Пароль"
+  ],
+  "d.lock_ok": [
+    "OK",
+    "ОК"
   ]
 }

@@ -67,7 +67,7 @@ function scrSplash() {
   const leave = () => {
     if (left) return;
     left = true;
-    go(ENV.tab === 'unlock' ? 'auth' : 'onb', { tr: 'zoom' });
+    go(ENV.tab === 'unlock' ? authScr() : 'onb', { tr: 'zoom' });
   };
   el.addEventListener('click', leave);
   el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); leave(); } });
@@ -269,12 +269,62 @@ function scrAuth(o = {}) {
       h('div.au-mobile-head', h('span.eyebrow', t('auth.eyebrow')), h('h1', t('auth.headline'))),
       tabs, card)));
   // back from the gate with what was typed (the passwords are not kept)
+  if (o.user) F.unlock.user.input.value = o.user;
   if (o.keep) { F.create.user.input.value = o.keep.u; F.create.display.input.value = o.keep.d; F.create.display.count(); }
   if (o.errorText && F[cur]) { const k = Object.keys(F[cur])[0]; setTimeout(() => { F[cur][k].error(o.errorText); sync(cur); }, 400); }
   el._enter = () => {
     AegisScene.show('shield', obj, { morph: true });
     if (isDesk()) setTimeout(() => forms[cur].querySelector('input').focus({ preventScroll: true }), reduced ? 0 : 450);
   };
+  return el;
+}
+
+// ── lock: the app was open and locked (idle, minimized, screen off) with a PIN set. The
+//    account is known, so only the keypad is shown; the password opens the usual form. ──
+function scrLock(o) {
+  const L = ENV.lock || {};
+  const obj = h('div.obj3d');
+  const fixed = L.digits === 4 || L.digits === 6;
+  const dots = enPinDots(fixed ? L.digits : 4);
+  const msg = h('p.lk-msg', { role: 'status' });
+  let pin = '', waiting = false;
+  const draw = () => {
+    if (!fixed) dots.size(pin.length > 4 ? 6 : 4);
+    dots.fill(pin.length);
+  };
+  const submit = () => {
+    if (waiting || !/^(\d{4}|\d{6})$/.test(pin)) return;
+    waiting = true;
+    ENV.wait = {
+      user: L.user,
+      fail(text) {
+        waiting = false; pin = '';
+        dots.state('err'); msg.textContent = text;
+        setTimeout(() => { dots.state(null); draw(); }, 600);
+      },
+    };
+    send('unlock', { username: L.user, password: pin });
+  };
+  const pad = enKeypad(k => {
+    if (waiting) return;
+    if (k === 'del') pin = pin.slice(0, -1);
+    else if (k === 'fn') return submit();
+    else if (pin.length < 6) pin += k;
+    if (msg.textContent && k !== 'del') msg.textContent = '';
+    draw();
+    if (fixed && pin.length === L.digits) submit();
+  }, fixed ? null : t('d.lock_ok'));
+  const pw = h('button.btn.ghost.sm', { type: 'button' }, t('d.use_password'));
+  pw.addEventListener('click', () => go('auth', { tr: 'push', tab: 'unlock', user: L.user }));
+  const el = enLayout('.lock', obj, [
+    h('div.e-top', h('span.e-word', 'Aegis'), pw),
+    h('div.pinbox',
+      h('b.mono.lk-user', '@' + (L.user || '')),
+      h('h1.e-title', t('d.lock_title')),
+      dots, msg, pad),
+  ]);
+  el._enter = () => { AegisScene.show('shield', obj, { morph: true }); pad.listen(); };
+  el._off = () => pad.unlisten();
   return el;
 }
 

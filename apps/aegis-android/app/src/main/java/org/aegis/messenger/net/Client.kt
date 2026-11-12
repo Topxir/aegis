@@ -2,10 +2,12 @@ package org.aegis.messenger.net
 
 import org.aegis.messenger.core.AegisException
 import org.aegis.messenger.core.Cover
+import org.aegis.messenger.core.Crypto
 import org.aegis.messenger.core.Hex
 import org.aegis.messenger.core.Identity
 import org.aegis.messenger.core.Invite
 import org.aegis.messenger.core.Json
+import org.aegis.messenger.core.Official
 import org.aegis.messenger.core.Pad
 import org.aegis.messenger.core.Pin
 import org.aegis.messenger.core.Pow
@@ -111,6 +113,22 @@ class Client(private val ep: Endpoint, private val transport: Transport) {
             bits = more
             tries++
         } while (true)
+        if (r.code != 200) throw AegisException.Http(r.code)
+        observe?.invoke(body.size, r.body.size)
+        return (obj(r)["seq"] as? Long) ?: throw AegisException.BadResponse()
+    }
+
+    /** Posts to the official queue with the owner's signature over queue, ts and the padded frame (spec 19). */
+    fun sendOfficial(ownerEdSk: ByteArray, frame: ByteArray): Long {
+        val padded = Pad.pad(frame)
+        val body = Text.utf8(Hex.encode(padded))
+        val queue = Official.queue()
+        val q = Hex.encode(queue)
+        val ts = System.currentTimeMillis() / 1000
+        val pow = Pow.mine(q, ts, Pow.bodyHashHex(body), POW_BITS, powStart())
+        val msg = Text.utf8("aegis-v2 official-post") + queue + java.nio.ByteBuffer.allocate(8).putLong(ts).array() + Crypto.sha256(padded)
+        val sig = Hex.encode(Crypto.ed25519Sign(ownerEdSk, msg))
+        val r = transport.request(ep, "POST", "/api/v2/queue/send?q=$q&ts=$ts&pow=$pow&sig=$sig", body, PLAIN)
         if (r.code != 200) throw AegisException.Http(r.code)
         observe?.invoke(body.size, r.body.size)
         return (obj(r)["seq"] as? Long) ?: throw AegisException.BadResponse()

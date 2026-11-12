@@ -130,6 +130,8 @@ pub struct App {
     pub key_reset_ask: bool,
     /// When the server key was last compared with the pinned one.
     pub key_checked: Option<Instant>,
+    /// The account that was open when the app locked; the page offers its PIN keypad.
+    pub locked: Option<String>,
     /// Next time to top up the one-time prekeys on the server.
     pub prekeys_due: Instant,
     /// A PIN, and a duress PIN, are set for the open account.
@@ -171,6 +173,7 @@ impl App {
             key_alert: false,
             key_reset_ask: false,
             key_checked: None,
+            locked: None,
             prekeys_due: Instant::now(),
             pin_on: false,
             duress_on: false,
@@ -410,6 +413,13 @@ impl Engine {
         })
     }
 
+    /// The locked account when it can be opened with a PIN (or acts as if it could, after duress).
+    pub fn pin_lock(&self, app: &App) -> Option<String> {
+        let u = app.locked.as_ref()?;
+        let path = self.vault_path(u);
+        (pin::side(&path, "pin").exists() || Self::is_ghost(&path)).then(|| u.clone())
+    }
+
     pub fn vault_path(&self, username: &str) -> PathBuf {
         self.cfg.data_dir.join(vault_file_name(username))
     }
@@ -645,8 +655,9 @@ impl Engine {
     pub fn detach(&self) -> Option<Session> {
         let mut app = self.app();
         let s = app.session.take();
-        if s.is_some() {
+        if let Some(x) = &s {
             app.epoch += 1;
+            app.locked = Some(x.data.username.clone());
         }
         app.route = Route::Welcome;
         app.dialog = None;
@@ -1287,6 +1298,13 @@ impl Engine {
         for (tag, r, draft, given) in ready {
             let r = match (r, draft, &saved) {
                 (Ok(_), true, Err(f)) => Err(f.clone()),
+                (Ok(o), _, _) if official::official_queue().is_ok_and(|q| q == o.queue) => {
+                    // the server takes the official queue only with the owner's signature
+                    match self.live(epoch, |s| s.data.ed_sk.clone()) {
+                        Some(sk) => self.net_send_official(client, &sk, &o.padded).map(|_| ()).map_err(Failure::from),
+                        None => Err(Failure::new("err.locked")),
+                    }
+                }
                 (Ok(o), _, _) => {
                     self.net_send(client, &o.queue, &o.padded)
                         .map(|_| ())

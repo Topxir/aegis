@@ -30,6 +30,10 @@ The `redesign` branch carries the new black interface and an appearance section 
 In progress: visual effects over the screen (rain, snow) and a photo wallpaper for chats or the
 whole interface. These are not finished.
 
+Version 0.3.1: after the app is minimized or the phone is locked, an account with a PIN opens
+to the PIN keypad instead of the sign-in tabs. The official Aegis channel accepts posts from
+`@owner` only, signed with the owner key built into the app.
+
 Version 0.3.0 delivers messages faster. While the app is open, Android checks for new messages
 about every 2.5 s (it was 22–45 s) and Windows every 1.5–3 s (it was 5–10 s). Cover traffic now
 averages one request every 6–8 s at the Normal level and 3–4 s at Strong. The release also adds a
@@ -127,6 +131,10 @@ AGPL-3.0-or-later.
 
 В ветке `redesign` новый чёрный интерфейс и раздел настроек внешнего вида. В работе: визуальные
 эффекты поверх экрана (дождь, снег) и фото-обои для чатов или всего интерфейса. Это ещё не готово.
+
+В версии 0.3.1 после сворачивания приложения или блокировки телефона аккаунт с PIN-кодом
+открывается на клавиатуре PIN, а не на вкладках входа. В официальный канал Aegis может писать
+только `@owner`: посты подписаны ключом владельца, вшитым в приложение.
 
 В версии 0.3.0 сообщения доходят быстрее. Пока приложение открыто, Android проверяет новые
 сообщения примерно раз в 2,5 с (было 22–45 с), Windows раз в 1,5–3 с (было 5–10 с). Маскирующий

@@ -250,13 +250,21 @@ impl core::fmt::Debug for Session {
     }
 }
 
+/// `owner` with the compiled-in key: the only account that may post to the official channel.
+pub(crate) fn is_official_owner(data: &Data) -> bool {
+    data.username == aegis_core::official::OFFICIAL_OWNER
+        && aegis_core::official::OFFICIAL_OWNER_ED_PK == Some(ed25519_public(&data.ed_sk))
+}
+
 /// The built-in channel is always present. Its owner key is compiled in; a key that an older
 /// version pinned from the directory is dropped.
 fn ensure_official(data: &mut Data) {
     let id = aegis_core::official::official_channel_id();
+    let owner = is_official_owner(data);
     if let Some(c) = data.channels.get_mut(&id) {
         c.owner_ed = None;
         c.warn = false;
+        c.mine = owner;
     }
     data.channels.entry(id.clone()).or_insert_with(|| Channel {
         id,
@@ -265,7 +273,7 @@ fn ensure_official(data: &mut Data) {
         about: String::new(),
         owner: aegis_core::official::OFFICIAL_OWNER.to_owned(),
         owner_ed: None,
-        mine: false,
+        mine: owner,
         official: true,
         subs: Vec::new(),
         cursor: 0,
@@ -569,6 +577,15 @@ impl Session {
                 gr.members.iter().filter(|m| **m != me).cloned().collect::<Vec<_>>(),
             )
         } else if let Some(ch) = self.data.channels.get(&d.id) {
+            if ch.official && ch.mine && is_official_owner(&self.data) {
+                // Official posts are signed with the owner key under the public G; no sender chain.
+                let frame = aegis_core::channel::seal_post(&aegis_core::official::official_g(), &self.data.ed_sk, &d.env)?;
+                return Ok(ChainSeal {
+                    out: Outbound { queue: aegis_core::official::official_queue()?, padded: pad::pad(&frame)? },
+                    chain_id: [0; 16],
+                    skeys: Vec::new(),
+                });
+            }
             if !ch.mine || ch.official {
                 return Err(Failure::new("err.channel_readonly"));
             }
@@ -1211,9 +1228,6 @@ impl Session {
                     .get(cid)
                     .ok_or(Failure::new("err.no_channel"))?;
                 if !ch.mine {
-                    return Err(Failure::new("err.channel_readonly"));
-                }
-                if ch.official {
                     return Err(Failure::new("err.channel_readonly"));
                 }
                 let ttl = ch.chat.ttl_s;

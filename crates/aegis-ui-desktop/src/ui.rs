@@ -273,7 +273,11 @@ pub fn run(cfg: Config) -> Result<(), String> {
                 let (json, protect, locked) = {
                     let app = engine.app();
                     let protect = app.session.as_ref().is_none_or(|s| s.data.settings.protect);
-                    (render::view(&app).to_string(), protect, app.session.is_none())
+                    let mut v = render::view(&app);
+                    if let Some(u) = app.session.is_none().then(|| engine.pin_lock(&app)).flatten() {
+                        v["lock"] = serde_json::json!({ "user": u, "digits": 0 });
+                    }
+                    (v.to_string(), protect, app.session.is_none())
                 };
                 if protected != Some(protect) {
                     crate::shield::protect(hwnd, protect);
