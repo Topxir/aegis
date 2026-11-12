@@ -149,9 +149,8 @@
 @media (max-width: 899.98px) {
   .pane-l, .pane-s, .pane-i { transition: transform var(--d-push) var(--e-scene), opacity var(--d-push) var(--e-scene); will-change: transform; }
   .pane-s, .pane-i { transform: translateX(100%); box-shadow: -24px 0 48px rgba(0, 0, 0, .55); }
-  /* a covered pane slides left and dims; once it is fully under the next one it stops painting */
-  .main[data-depth="1"] .pane-l, .main[data-depth="2"] .pane-l, .main[data-depth="2"] .pane-s { transform: translateX(-26%) scale(.96); opacity: .3; pointer-events: none; visibility: hidden; transition: transform var(--d-push) var(--e-scene), opacity var(--d-push) var(--e-scene), visibility 0s var(--d-push); }
-  .main[data-depth="2"] .pane-l { opacity: 0; }
+  /* a covered pane slides left and fades out fast, so nothing shows through the next one; once it is fully under the next one it stops painting */
+  .main[data-depth="1"] .pane-l, .main[data-depth="2"] .pane-l, .main[data-depth="2"] .pane-s { transform: translateX(-26%) scale(.96); opacity: 0; pointer-events: none; visibility: hidden; transition: transform var(--d-push) var(--e-scene), opacity 220ms var(--e-out), visibility 0s var(--d-push); }
   .main[data-depth="1"] .pane-s, .main[data-depth="2"] .pane-i { transform: none; }
   .main[data-depth="0"] .pane-s, .main[data-depth="0"] .pane-i, .main[data-depth="1"] .pane-i { visibility: hidden; transition: transform var(--d-push) var(--e-scene), visibility 0s var(--d-push); }
   .pane-l { background: transparent; }

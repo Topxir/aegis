@@ -2319,6 +2319,7 @@ function stLookFx(cx) {
 }
 
 // main.js
+'use strict';
 /* Main: list, chat, contact HUD, media, sheets.
    Everything shown comes from what the user did in this session; nothing
    arrives on its own. The only unread posts are the four of the official channel.
@@ -2578,11 +2579,12 @@ function mnStage(node) {
     old._off && old._off();
     old.inert = true;
     if (isDesk() && !reduced) {
-      anim(node, [{ opacity: 0, transform: 'translateY(10px)' }, { opacity: 1, transform: 'none' }], { duration: 420, easing: E.scene });
-      anim(old, [{ opacity: 1 }, { opacity: 0 }], { duration: 220, easing: E.out, fill: 'forwards' }).then(() => old.remove());
+      anim(node, [{ opacity: 0, transform: 'translateY(10px)' }, { opacity: 1, transform: 'none' }], { duration: 380, delay: 120, easing: E.scene, fill: 'backwards' });
+      anim(old, [{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: E.out, fill: 'forwards' }).then(() => old.remove());
     } else if (!reduced && (mn.el.dataset.depth || '0') !== '0') {
-      anim(node, [{ opacity: 0, transform: 'translateX(18px)' }, { opacity: 1, transform: 'none' }], { duration: 300, easing: E.scene });
-      anim(old, [{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: E.out, fill: 'forwards' }).then(() => old.remove());
+      // the old view is gone before the new one shows: the two never overlap half-transparent
+      anim(node, [{ opacity: 0, transform: 'translateX(18px)' }, { opacity: 1, transform: 'none' }], { duration: 280, delay: 100, easing: E.scene, fill: 'backwards' });
+      anim(old, [{ opacity: 1 }, { opacity: 0 }], { duration: 100, easing: E.out, fill: 'forwards' }).then(() => old.remove());
     } else old.remove();
   }
   mnScene();

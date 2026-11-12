@@ -225,6 +225,8 @@
 #entry .fld > :focus + span, #entry .fld > :not(:placeholder-shown) + span{ transform: translateY(-10px) scale(.7333); color: var(--fog); }
 #entry .fld > :focus{ background: var(--soot); border-color: var(--dim); box-shadow: inset 0 0 0 1px var(--dim); }
 #entry .fld > :hover:not(:focus){ border-color: #303036; }
+#entry :is(input:not([type=checkbox], #entry [type=radio], #entry [type=range]), #entry textarea):focus-visible{ outline: none; }
+#entry :is(input[type=search], #entry input[type=text]):not(.fld > *):focus-visible{ box-shadow: inset 0 0 0 1px var(--dim); }
 #entry .fld.err > input, #entry .fld.err > textarea{ border-color: var(--danger); box-shadow: inset 0 0 0 1px rgba(239, 93, 88, .45); }
 #entry .fld.err > span{ color: var(--danger); }
 #entry .fld .cnt{ position: absolute; left: auto; right: 14px; transform: none; top: 9px; font: 400 11px/1 var(--mono); color: var(--hint); font-variant-numeric: tabular-nums; pointer-events: none; opacity: 0; transition: opacity .2s; }
@@ -549,7 +551,7 @@
 #entry .sheet > .grab::before{ content: ""; display: block; width: 40px; height: 5px; margin: 0 auto; border-radius: 3px; background: var(--line2); }
 #entry .sh-head{ display: flex; align-items: flex-start; gap: var(--sp-12); margin-bottom: var(--sp-16); }
 #entry .sh-head > h2{ flex: 1; min-width: 0; margin: 4px 0 0; }
-#entry .sh-body{ display: grid; gap: var(--sp-12); min-height: 0; overflow: auto; overscroll-behavior: contain; margin: 0 -20px; padding: 2px 20px 2px; }
+#entry .sh-body{ display: grid; gap: var(--sp-12); min-height: 0; overflow: auto; overscroll-behavior: contain; margin: 0 -20px; padding: 4px 20px; }
 #entry .sh-foot{ display: grid; gap: var(--sp-8); margin-top: var(--sp-16); }
 @media (min-width: 900px){#entry .sheet{
     top: 0;
@@ -743,8 +745,7 @@ html.rm #entry .spin, html.rm #entry .btn.busy::after, html.rm #entry .chip.busy
 #entry .tor-ln.done > i{ transform: scaleX(1); }
 @media (max-width: 899.98px){#entry .pane-l, #entry .pane-s, #entry .pane-i{ transition: transform var(--d-push) var(--e-scene), opacity var(--d-push) var(--e-scene); will-change: transform; }
 #entry .pane-s, #entry .pane-i{ transform: translateX(100%); box-shadow: -24px 0 48px rgba(0, 0, 0, .55); }
-#entry .main[data-depth="1"] .pane-l, #entry .main[data-depth="2"] .pane-l, #entry .main[data-depth="2"] .pane-s{ transform: translateX(-26%) scale(.96); opacity: .3; pointer-events: none; visibility: hidden; transition: transform var(--d-push) var(--e-scene), opacity var(--d-push) var(--e-scene), visibility 0s var(--d-push); }
-#entry .main[data-depth="2"] .pane-l{ opacity: 0; }
+#entry .main[data-depth="1"] .pane-l, #entry .main[data-depth="2"] .pane-l, #entry .main[data-depth="2"] .pane-s{ transform: translateX(-26%) scale(.96); opacity: 0; pointer-events: none; visibility: hidden; transition: transform var(--d-push) var(--e-scene), opacity 220ms var(--e-out), visibility 0s var(--d-push); }
 #entry .main[data-depth="1"] .pane-s, #entry .main[data-depth="2"] .pane-i{ transform: none; }
 #entry .main[data-depth="0"] .pane-s, #entry .main[data-depth="0"] .pane-i, #entry .main[data-depth="1"] .pane-i{ visibility: hidden; transition: transform var(--d-push) var(--e-scene), visibility 0s var(--d-push); }
 #entry .pane-l{ background: transparent; }
